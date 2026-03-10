@@ -1906,8 +1906,8 @@ const renderParametres = () => {
                       clients.map(c => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <span>${c.nom || ''}</span>
-                                <span class="text-muted">${c.email || ''}</span>
+                                <div><strong>${c.societe || ''}</strong> ${c.nom || ''}</div>
+                                <div class="text-muted" style="font-size:12px;">${c.adresse || ''} ${c.npa || ''}</div>
                                 <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
@@ -2280,9 +2280,15 @@ const showClientModal = (id = null) => {
     
     modal.show(id ? 'Modifier client' : 'Nouveau client', `
         <form id="clientForm">
-            <div class="form-group">
-                <label>Nom</label>
-                <input type="text" name="nom" value="${client?.nom || ''}" required>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Société</label>
+                    <input type="text" name="societe" value="${client?.societe || ''}">
+                </div>
+                <div class="form-group">
+                    <label>Prénom & Nom</label>
+                    <input type="text" name="nom" value="${client?.nom || ''}">
+                </div>
             </div>
             <div class="form-group">
                 <label>Adresse</label>
@@ -2290,12 +2296,36 @@ const showClientModal = (id = null) => {
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label>Email</label>
-                    <input type="email" name="email" value="${client?.email || ''}">
+                    <label>NPA & Localité</label>
+                    <input type="text" name="npa" value="${client?.npa || ''}">
                 </div>
                 <div class="form-group">
-                    <label>Téléphone</label>
-                    <input type="tel" name="telephone" value="${client?.telephone || ''}">
+                    <label>Tarifs</label>
+                    <input type="text" name="tarifs" value="${client?.tarifs || ''}">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Prix 25cl</label>
+                    <input type="text" name="prix25cl" value="${client?.prix25cl || ''}">
+                </div>
+                <div class="form-group">
+                    <label>Prix 50cl</label>
+                    <input type="text" name="prix50cl" value="${client?.prix50cl || ''}">
+                </div>
+                <div class="form-group">
+                    <label>Prix 100cl</label>
+                    <input type="text" name="prix100cl" value="${client?.prix100cl || ''}">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Mode facturation</label>
+                    <input type="text" name="modeFact" value="${client?.modeFact || ''}">
+                </div>
+                <div class="form-group">
+                    <label>Coordonnées</label>
+                    <input type="text" name="coord" value="${client?.coord || ''}">
                 </div>
             </div>
             <div class="form-group">
@@ -2317,10 +2347,16 @@ const saveClient = (id) => {
     
     const client = {
         id: id || generateId(),
-        nom: formData.get('nom'),
-        adresse: formData.get('adresse'),
-        email: formData.get('email'),
-        telephone: formData.get('telephone'),
+        societe: formData.get('societe') || '',
+        nom: formData.get('nom') || '',
+        adresse: formData.get('adresse') || '',
+        npa: formData.get('npa') || '',
+        tarifs: formData.get('tarifs') || '',
+        prix25cl: formData.get('prix25cl') || '',
+        prix50cl: formData.get('prix50cl') || '',
+        prix100cl: formData.get('prix100cl') || '',
+        modeFact: formData.get('modeFact') || '',
+        coord: formData.get('coord') || '',
         actif: form.querySelector('input[name="actif"]').checked
     };
     
@@ -2358,11 +2394,11 @@ const deleteClient = (id) => {
 const exportClientsCSV = () => {
     const clients = DB.get('clients') || [];
     
-    let csv = 'Nom,Adresse,Email,Telephone,Actif\n';
+    let csv = 'Société,Prénom & Nom,Adresse,NPA & Localité,Tarifs,25cl,50cl,100cl,Mode facturation,Coordonnées,Actif\n';
     
     clients.forEach(c => {
         const escape = (s) => String(s || '').replace(/"/g, '""');
-        csv += `"${escape(c.nom)}","${escape(c.adresse)}","${escape(c.email)}","${escape(c.telephone)}","${c.actif ? 'Oui' : 'Non'}"\n`;
+        csv += `"${escape(c.societe)}","${escape(c.nom)}","${escape(c.adresse)}","${escape(c.npa)}","${escape(c.tarifs)}","${escape(c.prix25cl)}","${escape(c.prix50cl)}","${escape(c.prix100cl)}","${escape(c.modeFact)}","${escape(c.coord)}","${c.actif ? 'Oui' : 'Non'}"\n`;
     });
     
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -2378,10 +2414,16 @@ const exportClientsCSV = () => {
 const exportClientsExcel = () => {
   const clients = DB.get('clients') || [];
   const data = clients.map(c => ({
-    Nom: c.nom,
-    Adresse: c.adresse,
-    Email: c.email,
-    Téléphone: c.telephone,
+    Société: c.societe || '',
+    'Prénom & Nom': c.nom || '',
+    Adresse: c.adresse || '',
+    'NPA & Localité': c.npa || '',
+    Tarifs: c.tarifs || '',
+    '25cl': c.prix25cl || '',
+    '50cl': c.prix50cl || '',
+    '100cl': c.prix100cl || '',
+    'Mode facturation': c.modeFact || '',
+    Coordonnées: c.coord || '',
     Actif: c.actif ? 'Oui' : 'Non'
   }));
   const ws = XLSX.utils.json_to_sheet(data);
@@ -2406,35 +2448,54 @@ const importClientsExcel = (event) => {
       showToast('Fichier Excel vide ou invalide', 'error');
       return;
     }
-    const headers = rows[0];
+    const headers = rows[0].map(h => String(h).toLowerCase().trim());
+    const findIdx = (names) => {
+      for (let i = 0; i < names.length; i++) {
+        const idx = headers.findIndex(h => h.includes(names[i]));
+        if (idx >= 0) return idx;
+      }
+      return -1;
+    };
     const idx = {
-      nom: headers.findIndex(h => String(h).toLowerCase() === 'nom') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'nom') : 0,
-      adresse: headers.findIndex(h => String(h).toLowerCase() === 'adresse') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'adresse') : 1,
-      email: headers.findIndex(h => String(h).toLowerCase() === 'email') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'email') : 2,
-      telephone: headers.findIndex(h => String(h).toLowerCase() === 'telephone') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'telephone') : 3,
-      actif: headers.findIndex(h => String(h).toLowerCase() === 'actif') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'actif') : 4
+      societe: findIdx(['société', 'societe']),
+      nom: findIdx(['nom', 'prénom', 'prenom']),
+      adresse: findIdx(['adresse']),
+      npa: findIdx(['npa', 'localité', 'localite']),
+      tarifs: findIdx(['tarif']),
+      '25cl': findIdx(['25cl']),
+      '50cl': findIdx(['50cl']),
+      '100cl': findIdx(['100cl']),
+      modeFact: findIdx(['mode', 'facturation']),
+      coord: findIdx(['coordonnées', 'coordonnees', 'contact'])
     };
     const newClients = [];
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row || row.length === 0) continue;
+      const getVal = (i) => row[i] !== undefined ? String(row[i]).trim() : '';
       newClients.push({
         id: generateId(),
-        nom: row[idx.nom] ?? '',
-        adresse: row[idx.adresse] ?? '',
-        email: row[idx.email] ?? '',
-        telephone: row[idx.telephone] ?? '',
-        actif: ((row[idx.actif] ?? 'Oui').toString().toLowerCase() === 'oui')
+        societe: idx.societe >= 0 ? getVal(idx.societe) : '',
+        nom: idx.nom >= 0 ? getVal(idx.nom) : '',
+        adresse: idx.adresse >= 0 ? getVal(idx.adresse) : '',
+        npa: idx.npa >= 0 ? getVal(idx.npa) : '',
+        tarifs: idx.tarifs >= 0 ? getVal(idx.tarifs) : '',
+        prix25cl: idx['25cl'] >= 0 ? getVal(idx['25cl']) : '',
+        prix50cl: idx['50cl'] >= 0 ? getVal(idx['50cl']) : '',
+        prix100cl: idx['100cl'] >= 0 ? getVal(idx['100cl']) : '',
+        modeFact: idx.modeFact >= 0 ? getVal(idx.modeFact) : '',
+        coord: idx.coord >= 0 ? getVal(idx.coord) : '',
+        actif: true
       });
     }
     if (newClients.length > 0) {
       const clients = DB.get('clients') || [];
       clients.push(...newClients);
       DB.set('clients', clients);
-      showToast(`${newClients.length} client(s) importé(s) depuis Excel`);
+      showToast(`${newClients.length} client(s) importé(s)`);
       renderParametres();
     } else {
-      showToast('Aucun client détecté dans le fichier Excel', 'error');
+      showToast('Aucun client détecté', 'error');
     }
   };
   reader.readAsArrayBuffer(file);
