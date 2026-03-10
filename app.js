@@ -1525,6 +1525,10 @@ const showCommandeModal = (id = null) => {
     const aromeOptions = aromes.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
     const formatOptions = formats.map(f => `<option value="${f.id}">${f.nom}</option>`).join('');
     
+    // Store options as JSON to avoid HTML escaping issues
+    const aromeOptionsJson = JSON.stringify(aromes.map(a => ({ id: a.id, nom: a.nom })));
+    const formatOptionsJson = JSON.stringify(formats.map(f => ({ id: f.id, nom: f.nom })));
+    
     modal.show(id ? 'Modifier commande' : 'Nouvelle commande', `
         <form id="commandeForm">
             <div class="form-row">
@@ -1539,11 +1543,13 @@ const showCommandeModal = (id = null) => {
                     <input type="date" name="dateLivraison" value="${commande?.dateLivraison || ''}" required>
                 </div>
             </div>
-            <div class="form-group">
+<div class="form-group">
                 <label>Articles</label>
-                <div id="itemsContainer" data-aromes="${aromeOptions}" data-formats="${formatOptions}">
+                <div id="itemsContainer" data-aromes='${aromeOptionsJson}' data-formats='${formatOptionsJson}'>
                     ${itemsHtml}
                 </div>
+                <button type="button" class="btn btn-sm btn-secondary mt-4" onclick="addItem()">+ Ajouter un article</button>
+            </div>
                 <button type="button" class="btn btn-sm btn-secondary mt-4" onclick="addItem()">+ Ajouter un article</button>
             </div>
             <div class="form-group">
@@ -1561,19 +1567,28 @@ const showCommandeModal = (id = null) => {
         <button class="btn btn-primary" onclick="saveCommande('${id || ''}')">Enregistrer</button>
     `);
     
-    // Set initial options in selects
-    document.querySelectorAll('#itemsContainer select[name="aromeId"]').forEach(sel => {
-        if (!sel.value) sel.innerHTML = aromeOptions;
+    // Set initial options in selects (for existing items that need options)
+    const container = document.getElementById('itemsContainer');
+    const aromesData = JSON.parse(container.dataset.aromes || '[]');
+    const formatsData = JSON.parse(container.dataset.formats || '[]');
+    const aromeOpts = aromesData.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
+    const formatOpts = formatsData.map(f => `<option value="${f.id}">${f.nom}</option>`).join('');
+    
+    container.querySelectorAll('select[name="aromeId"]:not([value])').forEach(sel => {
+        sel.innerHTML = aromeOpts;
     });
-    document.querySelectorAll('#itemsContainer select[name="formatId"]').forEach(sel => {
-        if (!sel.value) sel.innerHTML = formatOptions;
+    container.querySelectorAll('select[name="formatId"]:not([value])').forEach(sel => {
+        sel.innerHTML = formatOpts;
     });
 };
 
 const addItem = () => {
     const container = document.getElementById('itemsContainer');
-    const aromeOptions = container.dataset.aromes;
-    const formatOptions = container.dataset.formats;
+    const aromes = JSON.parse(container.dataset.aromes || '[]');
+    const formats = JSON.parse(container.dataset.formats || '[]');
+    
+    const aromeOptions = aromes.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
+    const formatOptions = formats.map(f => `<option value="${f.id}">${f.nom}</option>`).join('');
     
     const div = document.createElement('div');
     div.className = 'item-row';
