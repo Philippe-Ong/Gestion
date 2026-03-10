@@ -733,7 +733,7 @@ const saveEditLot = (lotId) => {
 };
 
 // Pointage
-const renderPointage = () => {
+const renderPointage = (tab = 'pointage') => {
     const pointages = DB.get('pointages') || [];
     const employes = DB.get('employees') || [];
     const today = getLocalDateISOString();
@@ -741,93 +741,449 @@ const renderPointage = () => {
     const currentTime = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
     
     let html = `
-        <div class="pointage-clock">
-            <div class="current-time">${currentTime}</div>
-            <div class="current-date">${formatDate(today)}</div>
-            <div class="pointage-actions">
-                <button class="btn btn-success" onclick="showSaisieManuelleModal()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg>
-                    Saisie heures
-                </button>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Historique des pointages</h3>
-            </div>
-            
-            <div class="filters">
-                <select id="filterEmploye" onchange="renderPointage()">
-                    <option value="">Tous les employés</option>
-                    ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
-                </select>
-                <input type="date" id="filterDate" value="${today}" onchange="renderPointage()">
-            </div>
-            
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Employé</th>
-                            <th>Début</th>
-                            <th>Fin</th>
-                            <th>Pause</th>
-                            <th>Total</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${pointages.length === 0 ? '<tr><td colspan="7" class="text-center">Aucun pointage</td></tr>' : 
-                          pointages
-                            .filter(p => {
-                                const filterEmploye = document.getElementById('filterEmploye')?.value || '';
-                                const filterDate = document.getElementById('filterDate')?.value || '';
-                                return (!filterEmploye || p.employeId === filterEmploye) && 
-                                       (!filterDate || p.date === filterDate);
-                            })
-                            .sort((a, b) => new Date(b.date + b.heureDebut) - new Date(a.date + a.heureDebut))
-                            .map(p => {
-                                const emp = employes.find(e => e.id === p.employeId);
-                                let totalMinutes = 0;
-                                if (p.heureDebut && p.heureFin) {
-                                    const [h1, m1] = p.heureDebut.split(':').map(Number);
-                                    const [h2, m2] = p.heureFin.split(':').map(Number);
-                                    totalMinutes = (h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0);
-                                }
-                                const heures = Math.floor(totalMinutes / 60);
-                                const mins = totalMinutes % 60;
-                                
-                                return `
-                                    <tr>
-                                        <td>${formatDate(p.date)}</td>
-                                        <td>${emp ? emp.prenom + ' ' + emp.nom : 'N/A'}</td>
-                                        <td>${p.heureDebut || '-'}</td>
-                                        <td>${p.heureFin || '-'}</td>
-                                        <td>${p.pause || 0} min</td>
-                                        <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
-                                        <td>
-                                            <button class="btn btn-sm btn-secondary" onclick="deletePointage('${p.id}')">Supprimer</button>
-                                        </td>
-                                    </tr>
-                                `;
-                            }).join('')}
-                    </tbody>
-                </table>
-            </div>
+        <div class="tabs">
+            <button class="tab ${tab === 'pointage' ? 'active' : ''}" onclick="renderPointage('pointage')">Pointage</button>
+            <button class="tab ${tab === 'historique' ? 'active' : ''}" onclick="renderPointage('historique')">Historique</button>
+            <button class="tab ${tab === 'stats' ? 'active' : ''}" onclick="renderPointage('stats')">Stats</button>
+            <button class="tab ${tab === 'employes' ? 'active' : ''}" onclick="renderPointage('employes')">Employés</button>
         </div>
     `;
     
+    if (tab === 'pointage') {
+        html += `
+            <div class="pointage-clock">
+                <div class="current-time">${currentTime}</div>
+                <div class="current-date">${formatDate(today)}</div>
+                <div class="pointage-actions">
+                    <button class="btn btn-success" onclick="showSaisieManuelleModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg>
+                        Saisie heures
+                    </button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3 class="card-title" style="margin-bottom: 16px;">Ajouter un pointage</h3>
+                <form id="quickPointageForm">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Employé</label>
+                            <select name="employeId" required>
+                                ${employes.filter(e => e.actif).length === 0 ? '<option value="">Aucun employé</option>' : 
+                                  employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Date</label>
+                            <input type="date" name="date" value="${today}" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Heure de début</label>
+                            <input type="time" name="heureDebut" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Heure de fin</label>
+                            <input type="time" name="heureFin" required>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Pause (minutes)</label>
+                        <input type="number" name="pause" value="0" min="0" style="max-width: 150px;">
+                    </div>
+                    <button type="button" class="btn btn-primary" onclick="saveQuickPointage()">Ajouter</button>
+                </form>
+            </div>
+        `;
+    } else if (tab === 'historique') {
+        html += `
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Historique des pointages</h3>
+                    <button class="btn btn-secondary" onclick="exportPointageExcel()">Exporter Excel</button>
+                </div>
+                
+                <div class="filters">
+                    <select id="filterEmploye" onchange="renderPointage('historique')">
+                        <option value="">Tous les employés</option>
+                        ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                    </select>
+                    <input type="date" id="filterDateFrom" placeholder="Du" onchange="renderPointage('historique')">
+                    <input type="date" id="filterDateTo" placeholder="Au" onchange="renderPointage('historique')">
+                </div>
+                
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Employé</th>
+                                <th>Début</th>
+                                <th>Fin</th>
+                                <th>Pause</th>
+                                <th>Total</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${renderHistoriqueTable(pointages, employes)}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    } else if (tab === 'stats') {
+        const stats = getPointageStats(pointages, employes);
+        html += `
+            <div class="card">
+                <h3 class="card-title" style="margin-bottom: 16px;">Statistiques</h3>
+                <div class="form-row" style="margin-bottom: 20px;">
+                    <div class="form-group">
+                        <label>Employé</label>
+                        <select id="statsEmploye" onchange="renderPointage('stats')">
+                            <option value="">Tous</option>
+                            ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Période</label>
+                        <select id="statsPeriod" onchange="renderPointage('stats')">
+                            <option value="week">Semaine en cours</option>
+                            <option value="month">Mois en cours</option>
+                            <option value="year">Année en cours</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon green">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        </div>
+                        <div class="stat-content">
+                            <h3>${stats.totalHours}h</h3>
+                            <p>Total heures</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon blue">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                        </div>
+                        <div class="stat-content">
+                            <h3>${stats.daysWorked}</h3>
+                            <p>Jours travaillés</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon orange">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                        </div>
+                        <div class="stat-content">
+                            <h3>${stats.avgHours}h</h3>
+                            <p>Moyenne/jour</p>
+                        </div>
+                    </div>
+                </div>
+                
+                ${stats.employeeStats.length > 0 ? `
+                <div style="margin-top: 24px;">
+                    <h4 style="margin-bottom: 12px;">Répartition par employé</h4>
+                    <div class="bar-chart">
+                        ${stats.employeeStats.map((emp, i) => `
+                            <div class="bar-row">
+                                <span class="bar-label">${emp.name}</span>
+                                <div class="bar-container">
+                                    <div class="bar" style="width: ${emp.percent}%; background: hsl(${i * 40}, 60%, 45%);"></div>
+                                </div>
+                                <span class="bar-value">${emp.hours}h</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                ` : ''}
+            </div>
+        `;
+    } else if (tab === 'employes') {
+        html += `
+            <div class="card">
+                <h3 class="card-title" style="margin-bottom: 16px;">Gérer les employés</h3>
+                <div class="form-row" style="margin-bottom: 20px;">
+                    <div class="form-group" style="flex: 1;">
+                        <label>Nouvel employé</label>
+                        <input type="text" id="newEmployeeName" placeholder="Nom de l'employé">
+                    </div>
+                    <div class="form-group">
+                        <label>Prénom</label>
+                        <input type="text" id="newEmployeePrenom" placeholder="Prénom">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end;">
+                        <button class="btn btn-success" onclick="addNewEmployee()">Ajouter</button>
+                    </div>
+                </div>
+                
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Nom</th>
+                                <th>Prénom</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${employes.length === 0 ? '<tr><td colspan="4" class="text-center">Aucun employé</td></tr>' : 
+                              employes.map(e => `
+                                <tr>
+                                    <td>${e.nom}</td>
+                                    <td>${e.prenom}</td>
+                                    <td><span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span></td>
+                                    <td>
+                                        <button class="btn btn-sm btn-danger" onclick="deleteEmployee('${e.id}')">Supprimer</button>
+                                    </td>
+                                </tr>
+                              `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+    
     document.getElementById('content').innerHTML = html;
     
-    // Update time every second
-    setInterval(() => {
-        const timeEl = document.querySelector('.current-time');
-        if (timeEl) {
-            timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
+    // Update time every second if on pointage tab
+    if (tab === 'pointage') {
+        setInterval(() => {
+            const timeEl = document.querySelector('.current-time');
+            if (timeEl) {
+                timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
+            }
+        }, 1000);
+    }
+};
+
+const renderHistoriqueTable = (pointages, employes) => {
+    const filterEmploye = document.getElementById('filterEmploye')?.value || '';
+    const filterDateFrom = document.getElementById('filterDateFrom')?.value || '';
+    const filterDateTo = document.getElementById('filterDateTo')?.value || '';
+    
+    const filtered = pointages
+        .filter(p => {
+            if (filterEmploye && p.employeId !== filterEmploye) return false;
+            if (filterDateFrom && p.date < filterDateFrom) return false;
+            if (filterDateTo && p.date > filterDateTo) return false;
+            return true;
+        })
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+    
+    if (filtered.length === 0) {
+        return '<tr><td colspan="7" class="text-center">Aucun pointage</td></tr>';
+    }
+    
+    return filtered.map(p => {
+        const emp = employes.find(e => e.id === p.employeId);
+        let totalMinutes = 0;
+        if (p.heureDebut && p.heureFin) {
+            const [h1, m1] = p.heureDebut.split(':').map(Number);
+            const [h2, m2] = p.heureFin.split(':').map(Number);
+            totalMinutes = (h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0);
         }
-    }, 1000);
+        const heures = Math.floor(totalMinutes / 60);
+        const mins = totalMinutes % 60;
+        
+        return `
+            <tr>
+                <td>${formatDate(p.date)}</td>
+                <td>${emp ? emp.prenom + ' ' + emp.nom : 'N/A'}</td>
+                <td>${p.heureDebut || '-'}</td>
+                <td>${p.heureFin || '-'}</td>
+                <td>${p.pause || 0} min</td>
+                <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
+                <td>
+                    <button class="btn btn-sm btn-danger" onclick="deletePointage('${p.id}')">Supprimer</button>
+                </td>
+            </tr>
+        `;
+    }).join('');
+};
+
+const getPointageStats = (pointages, employes) => {
+    const statsEmploye = document.getElementById('statsEmploye')?.value || '';
+    const statsPeriod = document.getElementById('statsPeriod')?.value || 'week';
+    
+    const now = new Date();
+    let startDate, endDate;
+    
+    if (statsPeriod === 'week') {
+        const day = now.getDay();
+        const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+        startDate = new Date(now.setDate(diff));
+        endDate = new Date(startDate);
+        endDate.setDate(startDate.getDate() + 6);
+    } else if (statsPeriod === 'month') {
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    } else {
+        startDate = new Date(now.getFullYear(), 0, 1);
+        endDate = new Date(now.getFullYear(), 11, 31);
+    }
+    
+    const startStr = getLocalDateISOString.call(startDate);
+    const endStr = getLocalDateISOString.call(endDate);
+    
+    let filtered = pointages.filter(p => p.date >= startStr && p.date <= endStr && p.heureFin);
+    
+    if (statsEmploye) {
+        filtered = filtered.filter(p => p.employeId === statsEmploye);
+    }
+    
+    const totalMinutes = filtered.reduce((acc, p) => {
+        if (!p.heureDebut || !p.heureFin) return acc;
+        const [h1, m1] = p.heureDebut.split(':').map(Number);
+        const [h2, m2] = p.heureFin.split(':').map(Number);
+        return acc + ((h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0));
+    }, 0);
+    
+    const totalHours = (totalMinutes / 60).toFixed(1);
+    const daysWorked = new Set(filtered.map(p => p.date)).size;
+    const avgHours = daysWorked > 0 ? (totalMinutes / 60 / daysWorked).toFixed(1) : 0;
+    
+    // Employee stats
+    const empStats = {};
+    filtered.forEach(p => {
+        if (!empStats[p.employeId]) empStats[p.employeId] = 0;
+        if (p.heureDebut && p.heureFin) {
+            const [h1, m1] = p.heureDebut.split(':').map(Number);
+            const [h2, m2] = p.heureFin.split(':').map(Number);
+            empStats[p.employeId] += ((h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0)) / 60;
+        }
+    });
+    
+    const maxHours = Math.max(...Object.values(empStats), 1);
+    const employeeStats = Object.entries(empStats).map(([id, hours]) => {
+        const emp = employes.find(e => e.id === id);
+        return {
+            name: emp ? emp.prenom + ' ' + emp.nom : 'Inconnu',
+            hours: hours.toFixed(1),
+            percent: (hours / maxHours) * 100
+        };
+    }).sort((a, b) => parseFloat(b.hours) - parseFloat(a.hours));
+    
+    return { totalHours, daysWorked, avgHours, employeeStats };
+};
+
+const saveQuickPointage = () => {
+    const form = document.getElementById('quickPointageForm');
+    const formData = new FormData(form);
+    
+    const employeId = formData.get('employeId');
+    const date = formData.get('date');
+    const heureDebut = formData.get('heureDebut');
+    const heureFin = formData.get('heureFin');
+    const pause = parseInt(formData.get('pause')) || 0;
+    
+    if (!employeId || !date || !heureDebut || !heureFin) {
+        showToast('Veuillez remplir tous les champs', 'error');
+        return;
+    }
+    
+    const pointages = DB.get('pointages') || [];
+    const pointage = {
+        id: generateId(),
+        employeId,
+        date,
+        heureDebut,
+        heureFin,
+        pause
+    };
+    pointages.push(pointage);
+    DB.set('pointages', pointages);
+    
+    form.reset();
+    document.querySelector('#quickPointageForm input[name="date"]').value = getLocalDateISOString();
+    showToast('Pointage ajouté');
+    renderPointage('pointage');
+};
+
+const addNewEmployee = () => {
+    const nom = document.getElementById('newEmployeeName').value.trim();
+    const prenom = document.getElementById('newEmployeePrenom').value.trim();
+    
+    if (!nom || !prenom) {
+        showToast('Veuillez entrer nom et prénom', 'error');
+        return;
+    }
+    
+    const employes = DB.get('employees') || [];
+    employes.push({
+        id: generateId(),
+        nom,
+        prenom,
+        actif: true
+    });
+    DB.set('employees', employes);
+    
+    document.getElementById('newEmployeeName').value = '';
+    document.getElementById('newEmployeePrenom').value = '';
+    showToast('Employé ajouté');
+    renderPointage('employes');
+};
+
+const deleteEmployee = (id) => {
+    if (confirm('Supprimer cet employé ?')) {
+        const employes = DB.get('employees').filter(e => e.id !== id);
+        DB.set('employees', employes);
+        showToast('Employé supprimé');
+        renderPointage('employes');
+    }
+};
+
+const exportPointageExcel = () => {
+    const pointages = DB.get('pointages') || [];
+    const employes = DB.get('employees') || [];
+    const filterEmploye = document.getElementById('filterEmploye')?.value || '';
+    const filterDateFrom = document.getElementById('filterDateFrom')?.value || '';
+    const filterDateTo = document.getElementById('filterDateTo')?.value || '';
+    
+    const filtered = pointages
+        .filter(p => {
+            if (filterEmploye && p.employeId !== filterEmploye) return false;
+            if (filterDateFrom && p.date < filterDateFrom) return false;
+            if (filterDateTo && p.date > filterDateTo) return false;
+            return true;
+        })
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+    
+    // Create CSV content
+    let csv = 'Date,Employé,Début,Fin,Pause,Durée\n';
+    
+    filtered.forEach(p => {
+        const emp = employes.find(e => e.id === p.employeId);
+        const empName = emp ? emp.prenom + ' ' + emp.nom : 'N/A';
+        
+        let totalMinutes = 0;
+        if (p.heureDebut && p.heureFin) {
+            const [h1, m1] = p.heureDebut.split(':').map(Number);
+            const [h2, m2] = p.heureFin.split(':').map(Number);
+            totalMinutes = (h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0);
+        }
+        const heures = Math.floor(totalMinutes / 60);
+        const mins = totalMinutes % 60;
+        const duree = totalMinutes > 0 ? `${heures}h ${mins}min` : '-';
+        
+        csv += `${p.date},${empName},${p.heureDebut || '-'},${p.heureFin || '-'},${p.pause || 0},${duree}\n`;
+    });
+    
+    // Download CSV
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `pointages_${getLocalDateISOString()}.csv`;
+    link.click();
+    
+    showToast('Exporté en CSV');
 };
 
 const showPointageModal = (type) => {

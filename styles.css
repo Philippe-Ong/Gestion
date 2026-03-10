@@ -871,6 +871,46 @@ input[type="checkbox"] {
     justify-content: center;
 }
 
+/* Bar Chart */
+.bar-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.bar-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.bar-label {
+    min-width: 120px;
+    font-size: 14px;
+    color: var(--text);
+}
+
+.bar-container {
+    flex: 1;
+    height: 24px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.bar {
+    height: 100%;
+    border-radius: var(--radius);
+    transition: width 0.3s ease;
+}
+
+.bar-value {
+    min-width: 50px;
+    text-align: right;
+    font-weight: 600;
+    color: var(--primary);
+}
+
 /* Utility */
 .text-center { text-align: center; }
 .text-right { text-align: right; }
