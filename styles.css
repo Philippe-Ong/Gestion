@@ -777,11 +777,18 @@ input[type="checkbox"] {
     }
 }
 
-.sidebar-close {
-    display: none;
+.sidebar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 24px 20px;
 }
 
-.sidebar-header {
+.sidebar .logo {
+    padding: 0;
+}
+
+.sidebar-close {
     display: none;
 }
 
@@ -822,6 +829,14 @@ input[type="checkbox"] {
     }
     
     .sidebar {
+        transform: translateX(-100%);
+        width: 280px;
+    }
+    
+    .sidebar.open {
+        transform: translateX(0);
+    }
+    
     .main-content {
         margin-left: 0;
     }

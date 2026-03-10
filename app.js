@@ -2507,6 +2507,22 @@ document.getElementById('menuToggle')?.addEventListener('click', () => {
     document.querySelector('.sidebar').classList.toggle('open');
 });
 
+const closeSidebar = () => {
+    document.querySelector('.sidebar').classList.remove('open');
+};
+
+// Close sidebar when clicking outside on mobile
+document.addEventListener('click', (e) => {
+    const sidebar = document.querySelector('.sidebar');
+    const toggle = document.getElementById('menuToggle');
+    if (window.innerWidth <= 768 && 
+        sidebar?.classList.contains('open') && 
+        !sidebar.contains(e.target) && 
+        !toggle?.contains(e.target)) {
+        sidebar.classList.remove('open');
+    }
+});
+
 // Reset clients data if corrupted
 const resetClients = () => {
     if (confirm('Voulez-vous effacer tous les clients et recommencer ?')) {
