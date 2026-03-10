@@ -590,8 +590,9 @@ const renderSellableSummary = (lots, aromes, formats, today) => {
     const sellableLots = lots.filter(lot => getStatus(lot.dlc) === 'ok');
     
     if (sellableLots.length === 0) return '';
+    if (!aromes || aromes.length === 0) return '';
     
-    const summary = (aromes || []).filter(a => a && a.actif).map(arome => {
+    const summary = aromes.filter(a => a && a.actif).map(arome => {
         const formatsData = (formats || []).filter(f => f && f.actif).map(format => {
             const total = sellableLots
                 .filter(l => l.arome === arome.nom && l.format === format.nom)
