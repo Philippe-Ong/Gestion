@@ -1421,7 +1421,7 @@ const renderCommandes = () => {
             <div class="filters">
                 <select id="filterClient" onchange="renderCommandes()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}">${c.nom}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}">${c.societe || c.nom}</option>`).join('')}
                 </select>
                 <select id="filterStatut" onchange="renderCommandes()">
                     <option value="">Tous les statuts</option>
@@ -1471,7 +1471,7 @@ const renderCommandes = () => {
                                 return `
                                     <tr>
                                         <td>${cmd.id.slice(-6)}</td>
-                                        <td>${client?.nom || 'N/A'}</td>
+                                        <td>${client?.societe || client?.nom || 'N/A'}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
                                         <td>${articlesPreview}${cmd.items.length > 2 ? '...' : ''} (${totalItems})</td>
@@ -1510,16 +1510,16 @@ const showCommandeModal = (id = null) => {
     
     const itemsHtml = commande ? commande.items.map((item, idx) => `
         <div class="item-row" data-index="${idx}">
-            <select name="items[${idx}][aromeId]" required>
+            <select name="aromeId" required>
                 ${aromes.map(a => `<option value="${a.id}" ${item.aromeId === a.id ? 'selected' : ''}>${a.nom}</option>`).join('')}
             </select>
-            <select name="items[${idx}][formatId]" required>
+            <select name="formatId" required>
                 ${formats.map(f => `<option value="${f.id}" ${item.formatId === f.id ? 'selected' : ''}>${f.nom}</option>`).join('')}
             </select>
-            <input type="number" name="items[${idx}][quantite]" value="${item.quantite}" min="1" required>
+            <input type="number" name="quantite" value="${item.quantite}" min="1" required>
             <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
         </div>
-    `).join('') : '<div class="item-row"><select name="items[0][aromeId]" required></select><select name="items[0][formatId]" required></select><input type="number" name="items[0][quantite]" value="1" min="1" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>';
+    `).join('') : '<div class="item-row"><select name="aromeId" required></select><select name="formatId" required></select><input type="number" name="quantite" value="1" min="1" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>';
     
     // Populate arome options
     const aromeOptions = aromes.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
@@ -1531,7 +1531,7 @@ const showCommandeModal = (id = null) => {
                 <div class="form-group">
                     <label>Client</label>
                     <select name="clientId" required>
-                        ${clients.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${c.nom}</option>`).join('')}
+                        ${clients.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group">
@@ -1562,26 +1562,25 @@ const showCommandeModal = (id = null) => {
     `);
     
     // Set initial options in selects
-    document.querySelectorAll('#itemsContainer select[name*="aromeId"]').forEach(sel => {
+    document.querySelectorAll('#itemsContainer select[name="aromeId"]').forEach(sel => {
         if (!sel.value) sel.innerHTML = aromeOptions;
     });
-    document.querySelectorAll('#itemsContainer select[name*="formatId"]').forEach(sel => {
+    document.querySelectorAll('#itemsContainer select[name="formatId"]').forEach(sel => {
         if (!sel.value) sel.innerHTML = formatOptions;
     });
 };
 
 const addItem = () => {
     const container = document.getElementById('itemsContainer');
-    const index = container.querySelectorAll('.item-row').length;
     const aromeOptions = container.dataset.aromes;
     const formatOptions = container.dataset.formats;
     
     const div = document.createElement('div');
     div.className = 'item-row';
     div.innerHTML = `
-        <select name="items[${index}][aromeId]" required>${aromeOptions}</select>
-        <select name="items[${index}][formatId]" required>${formatOptions}</select>
-        <input type="number" name="items[${index}][quantite]" value="1" min="1" required>
+        <select name="aromeId" required>${aromeOptions}</select>
+        <select name="formatId" required>${formatOptions}</select>
+        <input type="number" name="quantite" value="1" min="1" required>
         <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
     `;
     container.appendChild(div);
@@ -1593,15 +1592,20 @@ const saveCommande = (id) => {
     
     const items = [];
     const itemRows = document.querySelectorAll('.item-row');
-    itemRows.forEach((row, idx) => {
-        const aromeId = row.querySelector(`select[name="items[${idx}][aromeId]"]`)?.value || row.querySelector('[name*="aromeId"]')?.value;
-        const formatId = row.querySelector(`select[name="items[${idx}][formatId]"]`)?.value || row.querySelector('[name*="formatId"]')?.value;
-        const quantite = row.querySelector(`input[name="items[${idx}][quantite]"]`)?.value || row.querySelector('[name*="quantite"]')?.value;
+    itemRows.forEach((row) => {
+        const aromeId = row.querySelector('select[name="aromeId"]')?.value;
+        const formatId = row.querySelector('select[name="formatId"]')?.value;
+        const quantite = row.querySelector('input[name="quantite"]')?.value;
         
         if (aromeId && formatId && quantite) {
             items.push({ aromeId, formatId, quantite: parseInt(quantite) });
         }
     });
+    
+    if (items.length === 0) {
+        showToast('Ajoutez au moins un article', 'error');
+        return;
+    }
     
     const commande = {
         id: id || generateId(),
