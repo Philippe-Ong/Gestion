@@ -8,6 +8,11 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Fonctionnalités
 
+### Dashboard
+- Vue d'ensemble du stock (total bouteilles, expirations)
+- Commandes en attente
+- Heures travaillé aujourd'hui
+
 ### Stock
 - Gestion des lots de production (arôme, format, quantité)
 - Suivi des dates (production, DLV, DLC)
@@ -22,12 +27,14 @@ Application de gestion pour votre entreprise de thé froid.
 - Historique des pointages avec filtres
 - Statistiques: heures totales, jours travaillés, moyenne/jour
 - Graphique de répartition par employé
-- Export CSV
+- Export Excel
 
 ### Commandes
 - Gestion des commandes clients
 - Articles multiples (arôme, format, quantité)
+- Affichage par société client
 - Suivi du statut (en attente, produite, livrée, annulée)
+- Filtres par client et statut
 
 ### Production
 - Planificateur de production
@@ -40,18 +47,32 @@ Application de gestion pour votre entreprise de thé froid.
 - **Formats**: Gestion des formats (0.25l, 0.5l, 1l)
 - **Recettes**: Ingrédients par litre pour chaque arôme
 - **Clients**: 
-  - Ajout manuel
+  - Société, Prénom & Nom, Adresse, NPA & Localité
+  - Tarifs (25cl/50cl/100cl), Mode facturation, Coordonnées
   - Import/Export Excel
   - Import/Export CSV
+- **Sauvegarde & Restauration**:
+  - Export JSON complet de toutes les données
+  - Import depuis un fichier JSON
+
+### Synchronisation Cloud
+- Synchronisation avec Firebase Firestore
+- Bouton "🔄 Sync" pour synchroniser manuellement
+- Sauvegarde automatique des données non-vides
 
 ## Technologies
 
 - HTML5, CSS3, Vanilla JavaScript
 - Stockage local (localStorage)
+- Firebase Firestore (sync cloud)
 - Hébergement: GitHub Pages
 
-## Données
+## Sauvegarde
 
-Les données sont stockées dans le navigateur (localStorage). Pour réinitialiser:
-- Allez dans Paramètres → Clients → "Effacer tout"
-- Ou nettoyez les données du site dans les paramètres du navigateur
+Pour sauvegarder vos données:
+1. Allez dans **Paramètres** → **Sauvegarde & Restauration**
+2. Cliquez sur **"Sauvegarder tout (JSON)"**
+
+Pour restaurer:
+1. Cliquez sur **"Restaurer depuis JSON"**
+2. Sélectionnez votre fichier de sauvegarde
