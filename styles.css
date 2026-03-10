@@ -777,16 +777,51 @@ input[type="checkbox"] {
     }
 }
 
+.sidebar-close {
+    display: none;
+}
+
+.sidebar-header {
+    display: none;
+}
+
 @media (max-width: 768px) {
+    .sidebar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+    }
+    
+    .sidebar-close {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: var(--text-light);
+        border-radius: var(--radius);
+    }
+    
+    .sidebar-close:hover {
+        background: var(--bg-secondary);
+        color: var(--text);
+    }
+    
+    .sidebar-close svg {
+        width: 20px;
+        height: 20px;
+    }
+    
+    .sidebar .logo {
+        padding: 0;
+    }
+    
     .sidebar {
-        transform: translateX(-100%);
-        width: 280px;
-    }
-    
-    .sidebar.open {
-        transform: translateX(0);
-    }
-    
     .main-content {
         margin-left: 0;
     }
