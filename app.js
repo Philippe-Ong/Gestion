@@ -37,9 +37,8 @@ const DB = {
     syncToFirebase: async (key, data) => {
         if (!window.firebaseReady || !window.firebaseDb) return;
         try {
-            const { setDoc, doc } = window.firebaseModules;
+            const { setDoc, doc } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
             await setDoc(doc(window.firebaseDb, 'data', key), { data: data, updatedAt: new Date().toISOString() });
-            console.log('Synced to Firebase:', key);
         } catch(e) {
             console.error('Firebase sync error:', e);
         }
@@ -48,20 +47,18 @@ const DB = {
     loadFromFirebase: async () => {
         if (!window.firebaseReady || !window.firebaseDb) return;
         try {
-            const { getDocs, collection } = window.firebaseModules || await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+            const { getDocs, collection } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
             const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
-            snapshot.forEach(doc => {
-                const key = doc.id;
-                const localData = DB.get(key);
-                const cloudData = doc.data().data;
-                // Use cloud data (most recent) or merge
-                if (cloudData && cloudData.length > 0) {
+            snapshot.forEach(docSnap => {
+                const key = docSnap.id;
+                const cloudData = docSnap.data().data;
+                if (cloudData && cloudData.length >= 0) {
                     localStorage.setItem('thecol_' + key, JSON.stringify(cloudData));
                 }
             });
             DB.firebaseSynced = true;
-            showToast('Données synchronisées');
-            router(); // Refresh current view
+            showToast('Données synchronisées depuis le cloud');
+            router();
         } catch(e) {
             console.error('Firebase load error:', e);
         }
@@ -82,13 +79,10 @@ const DB = {
     }
 };
 
-// Make firebase modules available
-window.addEventListener('load', async () => {
-    if (window.firebaseReady) {
-        const firebaseModule = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
-        window.firebaseModules = firebaseModule;
-    }
-});
+// Manual sync function
+window.forceFirebaseSync = () => {
+    DB.loadFromFirebase();
+};
 
 // Default values from Stock project
 const DEFAULT_AROMES = ['hibiscus', 'mure sauvage', 'poire à botzi', 'sureau', 'herbes des alpes'];
