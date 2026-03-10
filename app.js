@@ -12,8 +12,10 @@ const getLocalDateISOString = () => {
     return date.toISOString().split('T')[0];
 };
 
-// Data Storage
+// Data Storage with Firebase sync
 const DB = {
+    firebaseSynced: false,
+    
     get: (key) => {
         const data = localStorage.getItem('thecol_' + key);
         try {
@@ -23,9 +25,48 @@ const DB = {
             return [];
         }
     },
+    
     set: (key, data) => {
         localStorage.setItem('thecol_' + key, JSON.stringify(data));
+        // Sync to Firebase if available
+        if (window.firebaseReady && window.firebaseDb) {
+            DB.syncToFirebase(key, data);
+        }
     },
+    
+    syncToFirebase: async (key, data) => {
+        if (!window.firebaseReady || !window.firebaseDb) return;
+        try {
+            const { setDoc, doc } = window.firebaseModules;
+            await setDoc(doc(window.firebaseDb, 'data', key), { data: data, updatedAt: new Date().toISOString() });
+            console.log('Synced to Firebase:', key);
+        } catch(e) {
+            console.error('Firebase sync error:', e);
+        }
+    },
+    
+    loadFromFirebase: async () => {
+        if (!window.firebaseReady || !window.firebaseDb) return;
+        try {
+            const { getDocs, collection } = window.firebaseModules || await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+            const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
+            snapshot.forEach(doc => {
+                const key = doc.id;
+                const localData = DB.get(key);
+                const cloudData = doc.data().data;
+                // Use cloud data (most recent) or merge
+                if (cloudData && cloudData.length > 0) {
+                    localStorage.setItem('thecol_' + key, JSON.stringify(cloudData));
+                }
+            });
+            DB.firebaseSynced = true;
+            showToast('Données synchronisées');
+            router(); // Refresh current view
+        } catch(e) {
+            console.error('Firebase load error:', e);
+        }
+    },
+    
     init: () => {
         const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
         tables.forEach(table => {
@@ -33,8 +74,21 @@ const DB = {
                 DB.set(table, []);
             }
         });
+        
+        // Try to load from Firebase on init
+        if (window.firebaseReady) {
+            setTimeout(() => DB.loadFromFirebase(), 1000);
+        }
     }
 };
+
+// Make firebase modules available
+window.addEventListener('load', async () => {
+    if (window.firebaseReady) {
+        const firebaseModule = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+        window.firebaseModules = firebaseModule;
+    }
+});
 
 // Default values from Stock project
 const DEFAULT_AROMES = ['hibiscus', 'mure sauvage', 'poire à botzi', 'sureau', 'herbes des alpes'];
