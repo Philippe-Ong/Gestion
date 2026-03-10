@@ -5,12 +5,23 @@ const generateId = () => '_' + Math.random().toString(36).substr(2, 9);
 const formatDate = (date) => new Date(date).toLocaleDateString('fr-CH');
 const formatDateTime = (date) => new Date(date).toLocaleString('fr-CH');
 const formatTime = (time) => time.substring(0, 5);
+const getLocalDateISOString = () => {
+    const date = new Date();
+    const offset = date.getTimezoneOffset();
+    date.setMinutes(date.getMinutes() - offset);
+    return date.toISOString().split('T')[0];
+};
 
 // Data Storage
 const DB = {
     get: (key) => {
         const data = localStorage.getItem('thecol_' + key);
-        return data ? JSON.parse(data) : [];
+        try {
+            return data ? JSON.parse(data) : [];
+        } catch (e) {
+            console.error('Error parsing data for key ' + key, e);
+            return [];
+        }
     },
     set: (key, data) => {
         localStorage.setItem('thecol_' + key, JSON.stringify(data));
@@ -159,7 +170,7 @@ const renderDashboard = () => {
     const employes = DB.get('employees') || [];
     
     const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
+    const todayStr = getLocalDateISOString();
     const oneMonthFromNow = new Date();
     oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
     
@@ -404,7 +415,7 @@ const renderStock = () => {
 const showNouveauLotModal = () => {
     const aromes = DB.get('aromes').filter(a => a.actif);
     const formats = DB.get('formats').filter(f => f.actif);
-    const prodDate = new Date().toISOString().split('T')[0];
+    const prodDate = getLocalDateISOString();
     const dates = calculateDates(prodDate);
     
     modal.show('Nouveau lot de production', `
@@ -724,7 +735,7 @@ const saveEditLot = (lotId) => {
 const renderPointage = () => {
     const pointages = DB.get('pointages') || [];
     const employes = DB.get('employees') || [];
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDateISOString();
     
     const currentTime = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
     
@@ -836,7 +847,7 @@ const showPointageModal = (type) => {
             </div>
             <div class="form-group">
                 <label>Date</label>
-                <input type="date" name="date" value="${new Date().toISOString().split('T')[0]}" required>
+                <input type="date" name="date" value="${getLocalDateISOString()}" required>
             </div>
             <div class="form-group">
                 <label>Heure</label>
@@ -871,7 +882,7 @@ const showSaisieManuelleModal = () => {
             </div>
             <div class="form-group">
                 <label>Date</label>
-                <input type="date" name="date" value="${new Date().toISOString().split('T')[0]}" required>
+                <input type="date" name="date" value="${getLocalDateISOString()}" required>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -1185,7 +1196,7 @@ const saveCommande = (id) => {
     const commande = {
         id: id || generateId(),
         clientId: formData.get('clientId'),
-        dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : new Date().toISOString().split('T')[0],
+        dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : getLocalDateISOString(),
         dateLivraison: formData.get('dateLivraison'),
         statut: formData.get('statut'),
         items
@@ -1237,7 +1248,7 @@ const renderProduction = () => {
                 <div class="form-group" style="margin-bottom: 0;">
                     <label>Période des commandes</label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="date" id="prodDateDebut" value="${today.toISOString().split('T')[0]}">
+                        <input type="date" id="prodDateDebut" value="${getLocalDateISOString()}">
                         <input type="date" id="prodDateFin" value="${weekEnd.toISOString().split('T')[0]}">
                         <button class="btn btn-primary" onclick="calculerProduction()">Calculer</button>
                     </div>
@@ -1560,6 +1571,14 @@ const saveEmploye = (id) => {
 };
 
 const deleteEmploye = (id) => {
+    const pointages = DB.get('pointages');
+    const hasPointages = pointages.some(p => p.employeId === id);
+    
+    if (hasPointages) {
+        alert('Impossible de supprimer cet employé car il possède des pointages enregistrés. Vous pouvez le désactiver à la place.');
+        return;
+    }
+
     if (confirm('Êtes-vous sûr de vouloir supprimer cet employé ?')) {
         const employes = DB.get('employees').filter(e => e.id !== id);
         DB.set('employees', employes);
@@ -1622,6 +1641,17 @@ const saveArome = (id) => {
 };
 
 const deleteArome = (id) => {
+    const commandes = DB.get('commandes');
+    const recettes = DB.get('recettes');
+    
+    const isUsedInCommandes = commandes.some(c => c.items.some(i => i.aromeId === id));
+    const isUsedInRecettes = recettes.some(r => r.aromeId === id);
+    
+    if (isUsedInCommandes || isUsedInRecettes) {
+        alert('Impossible de supprimer cet arôme car il est utilisé dans des commandes ou des recettes. Vous pouvez le désactiver à la place.');
+        return;
+    }
+
     if (confirm('Êtes-vous sûr de vouloir supprimer cet arôme ?')) {
         const aromes = DB.get('aromes').filter(a => a.id !== id);
         DB.set('aromes', aromes);
@@ -1686,6 +1716,14 @@ const saveFormat = (id) => {
 };
 
 const deleteFormat = (id) => {
+    const commandes = DB.get('commandes');
+    const isUsedInCommandes = commandes.some(c => c.items.some(i => i.formatId === id));
+    
+    if (isUsedInCommandes) {
+        alert('Impossible de supprimer ce format car il est utilisé dans des commandes. Vous pouvez le désactiver à la place.');
+        return;
+    }
+
     if (confirm('Êtes-vous sûr de vouloir supprimer ce format ?')) {
         const formats = DB.get('formats').filter(f => f.id !== id);
         DB.set('formats', formats);
@@ -1889,6 +1927,14 @@ const saveClient = (id) => {
 };
 
 const deleteClient = (id) => {
+    const commandes = DB.get('commandes');
+    const isUsedInCommandes = commandes.some(c => c.clientId === id);
+    
+    if (isUsedInCommandes) {
+        alert('Impossible de supprimer ce client car il a des commandes associées. Vous pouvez le désactiver à la place.');
+        return;
+    }
+
     if (confirm('Êtes-vous sûr de vouloir supprimer ce client ?')) {
         const clients = DB.get('clients').filter(c => c.id !== id);
         DB.set('clients', clients);
