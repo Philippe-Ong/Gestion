@@ -1923,6 +1923,20 @@ const renderParametres = () => {
                       `).join('')}
                 </ul>
             </div>
+            
+            <div class="settings-card" style="grid-column: 1 / -1;">
+                <div class="settings-card-header">
+                    <h3>Sauvegarde & Restauration</h3>
+                </div>
+                <div style="display: flex; gap: 12px; flex-wrap: wrap; padding: 12px;">
+                    <button class="btn btn-primary" onclick="exportAllData()">💾 Sauvegarder tout (JSON)</button>
+                    <button class="btn btn-secondary" onclick="document.getElementById('importDataFile').click()">📂 Restaurer depuis JSON</button>
+                    <input type="file" id="importDataFile" accept=".json" style="display:none" onchange="importAllData(event)">
+                </div>
+                <p class="text-muted" style="font-size: 12px; padding: 0 12px 12px;">
+                    La sauvegarde inclut: employés, aromes, formats, recettes, clients, lots, commandes et pointages.
+                </p>
+            </div>
         </div>
     `;
     
@@ -2535,6 +2549,51 @@ const resetClients = () => {
         showToast('Clients effacés');
         renderParametres();
     }
+};
+
+// Export all data to JSON
+const exportAllData = () => {
+    const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
+    const data = {};
+    tables.forEach(table => {
+        data[table] = DB.get(table) || [];
+    });
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const date = new Date().toISOString().split('T')[0];
+    a.href = url;
+    a.download = `sauvegarde_${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Sauvegarde créée');
+};
+
+// Import all data from JSON
+const importAllData = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const data = JSON.parse(e.target.result);
+            const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
+            let count = 0;
+            tables.forEach(table => {
+                if (data[table] && Array.isArray(data[table])) {
+                    DB.set(table, data[table]);
+                    count++;
+                }
+            });
+            showToast(`${count} tables restaurées`);
+            router();
+        } catch(err) {
+            showToast('Erreur: fichier invalide', 'error');
+        }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
 };
 
 // Initialize app
