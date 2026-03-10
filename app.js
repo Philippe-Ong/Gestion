@@ -1844,7 +1844,12 @@ const renderParametres = () => {
             <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
                     <h3>Clients</h3>
-                    <button class="btn btn-sm btn-primary" onclick="showClientModal()">+ Ajouter</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-sm btn-secondary" onclick="exportClientsCSV()">Exporter CSV</button>
+                        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('importClientsFile').click()">Importer</button>
+                        <input type="file" id="importClientsFile" accept=".csv,.xlsx" style="display:none" onchange="importClients(event)">
+                        <button class="btn btn-sm btn-primary" onclick="showClientModal()">+ Ajouter</button>
+                    </div>
                 </div>
                 <ul class="settings-list">
                     ${clients.length === 0 ? '<li class="settings-item text-muted">Aucun client</li>' : 
@@ -2298,6 +2303,78 @@ const deleteClient = (id) => {
         showToast('Client supprimé');
         renderParametres();
     }
+};
+
+const exportClientsCSV = () => {
+    const clients = DB.get('clients') || [];
+    
+    let csv = 'Nom,Adresse,Email,Téléphone,Actif\n';
+    
+    clients.forEach(c => {
+        csv += `"${c.nom || ''}","${c.adresse || ''}","${c.email || ''}","${c.telephone || ''}","${c.actif ? 'Oui' : 'Non'}"\n`;
+    });
+    
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `clients_${getLocalDateISOString()}.csv`;
+    link.click();
+    
+    showToast('Clients exportés');
+};
+
+const importClients = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const text = e.target.result;
+        const lines = text.split('\n');
+        
+        if (lines.length < 2) {
+            showToast('Fichier vide ou invalide', 'error');
+            return;
+        }
+        
+        // Skip header
+        const newClients = [];
+        for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            
+            // Parse CSV (simple split by comma)
+            const parts = line.split(',').map(p => p.replace(/"/g, '').trim());
+            
+            if (parts.length >= 1 && parts[0]) {
+                newClients.push({
+                    id: generateId(),
+                    nom: parts[0] || '',
+                    adresse: parts[1] || '',
+                    email: parts[2] || '',
+                    telephone: parts[3] || '',
+                    actif: parts[4]?.toLowerCase() === 'oui' || parts[4]?.toLowerCase() === 'yes' || true
+                });
+            }
+        }
+        
+        if (newClients.length === 0) {
+            showToast('Aucun client trouvé dans le fichier', 'error');
+            return;
+        }
+        
+        if (confirm(`${newClients.length} client(s) vont être importé(s). Voulez-vous continuer ?`)) {
+            const clients = DB.get('clients') || [];
+            clients.push(...newClients);
+            DB.set('clients', clients);
+            showToast(`${newClients.length} client(s) importé(s)`);
+            renderParametres();
+        }
+    };
+    reader.readAsText(file);
+    
+    // Reset file input
+    event.target.value = '';
 };
 
 // Mobile menu toggle
