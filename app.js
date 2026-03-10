@@ -594,13 +594,13 @@ const renderSellableSummary = (lots, aromes, formats, today) => {
     const summary = (aromes || []).filter(a => a && a.actif).map(arome => {
         const formatsData = (formats || []).filter(f => f && f.actif).map(format => {
             const total = sellableLots
-                .filter(l => l.arome === a.nom && l.format === format.nom)
+                .filter(l => l.arome === arome.nom && l.format === format.nom)
                 .reduce((sum, l) => sum + l.quantite, 0);
             return { format: format.nom, total };
         }).filter(f => f.total > 0);
         
         const totalArome = formatsData.reduce((sum, f) => sum + f.total, 0);
-        return { arome: a.nom, couleur: a.couleur, formats: formatsData, total: totalArome };
+        return { arome: arome.nom, couleur: arome.couleur, formats: formatsData, total: totalArome };
     }).filter(item => item.total > 0);
     
     if (summary.length === 0) return '';
