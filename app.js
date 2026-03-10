@@ -1844,11 +1844,13 @@ const renderParametres = () => {
             <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
                     <h3>Clients</h3>
-                    <div style="display: flex; gap: 8px;">
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                         <button class="btn btn-sm btn-secondary" onclick="exportClientsCSV()">Exporter CSV</button>
-                        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('importClientsFile').click()">Importer</button>
-                        <input type="file" id="importClientsFile" accept=".csv,.xlsx" style="display:none" onchange="importClients(event)">
+                        <button class="btn btn-sm btn-secondary" onclick="exportClientsExcel()">Exporter Excel</button>
+                        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('importClientsFile').click()">Importer Excel</button>
+                        <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" onchange="importClientsExcel(event)">
                         <button class="btn btn-sm btn-primary" onclick="showClientModal()">+ Ajouter</button>
+                        <button class="btn btn-sm btn-danger" onclick="resetClients()">Effacer tout</button>
                     </div>
                 </div>
                 <ul class="settings-list">
@@ -1856,7 +1858,7 @@ const renderParametres = () => {
                       clients.map(c => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <span>${c.nom}</span>
+                                <span>${c.nom || ''}</span>
                                 <span class="text-muted">${c.email || ''}</span>
                                 <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
@@ -2308,10 +2310,11 @@ const deleteClient = (id) => {
 const exportClientsCSV = () => {
     const clients = DB.get('clients') || [];
     
-    let csv = 'Nom,Adresse,Email,Téléphone,Actif\n';
+    let csv = 'Nom,Adresse,Email,Telephone,Actif\n';
     
     clients.forEach(c => {
-        csv += `"${c.nom || ''}","${c.adresse || ''}","${c.email || ''}","${c.telephone || ''}","${c.actif ? 'Oui' : 'Non'}"\n`;
+        const escape = (s) => String(s || '').replace(/"/g, '""');
+        csv += `"${escape(c.nom)}","${escape(c.adresse)}","${escape(c.email)}","${escape(c.telephone)}","${c.actif ? 'Oui' : 'Non'}"\n`;
     });
     
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -2323,64 +2326,86 @@ const exportClientsCSV = () => {
     showToast('Clients exportés');
 };
 
-const importClients = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-    
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const text = e.target.result;
-        const lines = text.split('\n');
-        
-        if (lines.length < 2) {
-            showToast('Fichier vide ou invalide', 'error');
-            return;
-        }
-        
-        // Skip header
-        const newClients = [];
-        for (let i = 1; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            
-            // Parse CSV (simple split by comma)
-            const parts = line.split(',').map(p => p.replace(/"/g, '').trim());
-            
-            if (parts.length >= 1 && parts[0]) {
-                newClients.push({
-                    id: generateId(),
-                    nom: parts[0] || '',
-                    adresse: parts[1] || '',
-                    email: parts[2] || '',
-                    telephone: parts[3] || '',
-                    actif: parts[4]?.toLowerCase() === 'oui' || parts[4]?.toLowerCase() === 'yes' || true
-                });
-            }
-        }
-        
-        if (newClients.length === 0) {
-            showToast('Aucun client trouvé dans le fichier', 'error');
-            return;
-        }
-        
-        if (confirm(`${newClients.length} client(s) vont être importé(s). Voulez-vous continuer ?`)) {
-            const clients = DB.get('clients') || [];
-            clients.push(...newClients);
-            DB.set('clients', clients);
-            showToast(`${newClients.length} client(s) importé(s)`);
-            renderParametres();
-        }
+// Excel: Export/Import Clients
+const exportClientsExcel = () => {
+  const clients = DB.get('clients') || [];
+  const data = clients.map(c => ({
+    Nom: c.nom,
+    Adresse: c.adresse,
+    Email: c.email,
+    Téléphone: c.telephone,
+    Actif: c.actif ? 'Oui' : 'Non'
+  }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Clients');
+  const date = new Date().toISOString().split('T')[0];
+  XLSX.writeFile(wb, `clients_${date}.xlsx`);
+  showToast('Clients exportés (Excel)');
+};
+
+const importClientsExcel = (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const data = e.target.result;
+    const wb = XLSX.read(data, { type: 'array' });
+    const wsName = wb.SheetNames[0];
+    const ws = wb.Sheets[wsName];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    if (!rows || rows.length < 2) {
+      showToast('Fichier Excel vide ou invalide', 'error');
+      return;
+    }
+    const headers = rows[0];
+    const idx = {
+      nom: headers.findIndex(h => String(h).toLowerCase() === 'nom') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'nom') : 0,
+      adresse: headers.findIndex(h => String(h).toLowerCase() === 'adresse') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'adresse') : 1,
+      email: headers.findIndex(h => String(h).toLowerCase() === 'email') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'email') : 2,
+      telephone: headers.findIndex(h => String(h).toLowerCase() === 'telephone') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'telephone') : 3,
+      actif: headers.findIndex(h => String(h).toLowerCase() === 'actif') >= 0 ? headers.findIndex(h => String(h).toLowerCase() === 'actif') : 4
     };
-    reader.readAsText(file);
-    
-    // Reset file input
-    event.target.value = '';
+    const newClients = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.length === 0) continue;
+      newClients.push({
+        id: generateId(),
+        nom: row[idx.nom] ?? '',
+        adresse: row[idx.adresse] ?? '',
+        email: row[idx.email] ?? '',
+        telephone: row[idx.telephone] ?? '',
+        actif: ((row[idx.actif] ?? 'Oui').toString().toLowerCase() === 'oui')
+      });
+    }
+    if (newClients.length > 0) {
+      const clients = DB.get('clients') || [];
+      clients.push(...newClients);
+      DB.set('clients', clients);
+      showToast(`${newClients.length} client(s) importé(s) depuis Excel`);
+      renderParametres();
+    } else {
+      showToast('Aucun client détecté dans le fichier Excel', 'error');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  event.target.value = '';
 };
 
 // Mobile menu toggle
 document.getElementById('menuToggle')?.addEventListener('click', () => {
     document.querySelector('.sidebar').classList.toggle('open');
 });
+
+// Reset clients data if corrupted
+const resetClients = () => {
+    if (confirm('Voulez-vous effacer tous les clients et recommencer ?')) {
+        DB.set('clients', []);
+        showToast('Clients effacés');
+        renderParametres();
+    }
+};
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', () => {
