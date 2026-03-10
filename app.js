@@ -49,16 +49,23 @@ const DB = {
         try {
             const { getDocs, collection } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
             const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
+            let hasData = false;
             snapshot.forEach(docSnap => {
                 const key = docSnap.id;
                 const cloudData = docSnap.data().data;
-                if (cloudData && cloudData.length >= 0) {
+                // Only update if cloud data exists and has content
+                if (cloudData && Array.isArray(cloudData) && cloudData.length > 0) {
                     localStorage.setItem('thecol_' + key, JSON.stringify(cloudData));
+                    hasData = true;
                 }
             });
-            DB.firebaseSynced = true;
-            showToast('Données synchronisées depuis le cloud');
-            router();
+            if (hasData) {
+                DB.firebaseSynced = true;
+                showToast('Données synchronisées depuis le cloud');
+                router();
+            } else {
+                showToast('Aucune donnée dans le cloud');
+            }
         } catch(e) {
             console.error('Firebase load error:', e);
         }
@@ -72,10 +79,8 @@ const DB = {
             }
         });
         
-        // Try to load from Firebase on init
-        if (window.firebaseReady) {
-            setTimeout(() => DB.loadFromFirebase(), 1000);
-        }
+        // Ne plus charger automatiquement depuis Firebase
+        // Utiliser le bouton "Sync" manuellement
     }
 };
 
