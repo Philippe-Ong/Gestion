@@ -633,6 +633,12 @@ input[type="checkbox"] {
     gap: 20px;
 }
 
+@media (max-width: 768px) {
+    .production-summary {
+        grid-template-columns: 1fr;
+    }
+}
+
 .production-item {
     padding: 16px;
     background: var(--bg-secondary);
