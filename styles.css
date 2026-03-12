@@ -845,10 +845,17 @@ input[type="checkbox"] {
     
     .main-content {
         margin-left: 0;
+        max-width: 480px;
+        margin: 0 auto;
+        min-height: 100vh;
     }
     
     .menu-toggle {
         display: block;
+    }
+    
+    body {
+        justify-content: flex-start;
     }
     
     .content {
