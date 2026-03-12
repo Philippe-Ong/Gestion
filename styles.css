@@ -991,6 +991,135 @@ input[type="checkbox"] {
     .toast {
         min-width: auto;
     }
+    
+    /* Mobile table styles */
+    .table-container {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    
+    table {
+        font-size: 12px;
+        min-width: 600px;
+    }
+    
+    th, td {
+        padding: 8px 6px;
+        white-space: nowrap;
+    }
+    
+    /* Mobile filters */
+    .filters {
+        flex-direction: column;
+        gap: 8px;
+    }
+    
+    .filters select, .filters input {
+        width: 100%;
+        max-width: 100%;
+    }
+    
+    /* Mobile settings */
+    .settings-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .settings-card {
+        margin-bottom: 16px;
+    }
+    
+    .settings-card-header {
+        flex-direction: column;
+        gap: 8px;
+        align-items: flex-start;
+    }
+    
+    .settings-card-header > div {
+        flex-wrap: wrap;
+        width: 100%;
+    }
+    
+    .settings-card-header .btn {
+        flex: 1;
+        min-width: calc(50% - 4px);
+        text-align: center;
+    }
+    
+    .settings-list {
+        max-height: 300px;
+        overflow-y: auto;
+    }
+    
+    .settings-item {
+        flex-direction: column;
+        gap: 8px;
+        padding: 12px 0;
+    }
+    
+    .settings-item-info {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        width: 100%;
+    }
+    
+    .settings-item-actions {
+        width: 100%;
+        justify-content: flex-end;
+        gap: 8px;
+    }
+    
+    /* Mobile sellable grid */
+    .sellable-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    /* Mobile form groups */
+    .form-row {
+        grid-template-columns: 1fr;
+    }
+    
+    .form-group {
+        margin-bottom: 12px;
+    }
+    
+    /* Mobile modal */
+    .modal {
+        width: 95%;
+        max-height: 90vh;
+        margin: 5vh auto;
+    }
+    
+    .modal-body {
+        padding: 12px;
+        max-height: 60vh;
+        overflow-y: auto;
+    }
+    
+    /* Mobile header actions */
+    .header-actions {
+        gap: 8px;
+    }
+    
+    /* Mobile cards */
+    .card {
+        padding: 12px;
+    }
+    
+    .card-header {
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+    }
+    
+    /* Mobile stat cards */
+    .stat-card {
+        padding: 12px;
+    }
+    
+    .stat-content h3 {
+        font-size: 20px;
+    }
 }
 
 /* Sellable Summary */
