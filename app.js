@@ -1678,12 +1678,27 @@ const calculerProduction = () => {
     const aromes = DB.get('aromes');
     const formats = DB.get('formats');
     const recettes = DB.get('recettes');
+    const lots = DB.get('lots') || [];
     
     // All non-cancelled, non-delivered orders
     const commandesPeriode = commandes.filter(c => 
         c.statut !== 'annulee' &&
         c.statut !== 'livrée'
     );
+    
+    // Calculate available stock (non-expired)
+    const now = new Date();
+    const stockDisponible = {};
+    lots.filter(lot => {
+        if (!lot.dlc) return true;
+        return new Date(lot.dlc) >= now;
+    }).forEach(lot => {
+        const key = `${lot.aromeId}-${lot.formatId}`;
+        if (!stockDisponible[key]) {
+            stockDisponible[key] = 0;
+        }
+        stockDisponible[key] += lot.quantite || 0;
+    });
     
     // Calculate totals by arome and format
     const besoins = {};
@@ -1698,11 +1713,19 @@ const calculerProduction = () => {
         });
     });
     
-    // Calculate liters per arome
+    // Calculate production needed (total - available stock)
+    const productionNecesaire = {};
+    Object.entries(besoins).forEach(([key, b]) => {
+        const disponible = stockDisponible[key] || 0;
+        const aProduire = Math.max(0, b.quantite - disponible);
+        productionNecesaire[key] = { ...b, disponible, aProduire };
+    });
+    
+    // Calculate liters per arome (for production needed only)
     const litresParArome = {};
-    Object.values(besoins).forEach(b => {
+    Object.values(productionNecesaire).filter(b => b.aProduire > 0).forEach(b => {
         const format = formats.find(f => f.id === b.formatId);
-        const litres = (format?.contenanceCl || 0) * b.quantite / 100;
+        const litres = (format?.contenanceCl || 0) * b.aProduire / 100;
         if (!litresParArome[b.aromeId]) litresParArome[b.aromeId] = 0;
         litresParArome[b.aromeId] += litres;
     });
@@ -1728,13 +1751,16 @@ const calculerProduction = () => {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/></svg>
                     Bouteilles à produire
                 </h4>
-                ${Object.values(besoins).length === 0 ? '<p class="text-muted">Aucune commande dans cette période</p>' : 
-                  Object.values(besoins).map(b => {
+                ${Object.values(productionNecesaire).length === 0 ? '<p class="text-muted">Aucune commande</p>' : 
+                  Object.values(productionNecesaire).map(b => {
                       const arome = aromes.find(a => a.id === b.aromeId);
                       const format = formats.find(f => f.id === b.formatId);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
                           <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${arome?.nom || 'N/A'} ${format?.nom || ''}</span>
-                          <strong>${b.quantite} bt</strong>
+                          <div style="text-align: right;">
+                              <div style="font-size: 12px; color: var(--text-muted);">Stock: ${b.disponible} bt</div>
+                              <strong>À produire: ${b.aProduire} bt</strong>
+                          </div>
                       </div>`;
                   }).join('')}
             </div>
@@ -1742,9 +1768,9 @@ const calculerProduction = () => {
             <div class="production-item">
                 <h4>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M20.2 7.8l-7.7 7.7-4-4-5.7 5.7"/></svg>
-                    Litres par arôme
+                    Litres à produire (par arôme)
                 </h4>
-                ${Object.entries(litresParArome).length === 0 ? '<p class="text-muted">Aucun litre à produire</p>' : 
+                ${Object.entries(litresParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : 
                   Object.entries(litresParArome).map(([aromeId, litres]) => {
                       const arome = aromes.find(a => a.id === aromeId);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
@@ -1772,7 +1798,7 @@ const calculerProduction = () => {
         </div>
         
         <div style="margin-top: 24px; padding: 16px; background: var(--bg-secondary); border-radius: var(--radius);">
-            <strong>Résumé:</strong> ${commandesPeriode.length} commande(s) à produire pour cette période
+            <strong>Résumé:</strong> ${commandesPeriode.length} commande(s) à produire - Stock déduit automatiquement
         </div>
     `;
     
