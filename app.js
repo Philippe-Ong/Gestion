@@ -1686,28 +1686,30 @@ const calculerProduction = () => {
         c.statut !== 'livrée'
     );
     
-    // Calculate available stock (non-expired)
+    // Calculate available stock (non-expired) - using arome/format names
     const now = new Date();
     const stockDisponible = {};
     lots.filter(lot => {
         if (!lot.dlc) return true;
         return new Date(lot.dlc) >= now;
     }).forEach(lot => {
-        const key = `${lot.aromeId}-${lot.formatId}`;
+        const key = `${lot.arome}-${lot.format}`;
         if (!stockDisponible[key]) {
             stockDisponible[key] = 0;
         }
         stockDisponible[key] += lot.quantite || 0;
     });
     
-    // Calculate totals by arome and format
+    // Calculate totals by arome and format (using names from commands)
     const besoins = {};
     
     commandesPeriode.forEach(cmd => {
         cmd.items.forEach(item => {
-            const key = `${item.aromeId}-${item.formatId}`;
+            const arome = aromes.find(a => a.id === item.aromeId);
+            const format = formats.find(f => f.id === item.formatId);
+            const key = `${arome?.nom || ''}-${format?.nom || ''}`;
             if (!besoins[key]) {
-                besoins[key] = { aromeId: item.aromeId, formatId: item.formatId, quantite: 0 };
+                besoins[key] = { aromeId: item.aromeId, formatId: item.formatId, aromeNom: arome?.nom || '', formatNom: format?.nom || '', quantite: 0 };
             }
             besoins[key].quantite += item.quantite;
         });
@@ -1724,16 +1726,17 @@ const calculerProduction = () => {
     // Calculate liters per arome (for production needed only)
     const litresParArome = {};
     Object.values(productionNecesaire).filter(b => b.aProduire > 0).forEach(b => {
-        const format = formats.find(f => f.id === b.formatId);
+        const format = formats.find(f => f.nom === b.formatNom);
         const litres = (format?.contenanceCl || 0) * b.aProduire / 100;
-        if (!litresParArome[b.aromeId]) litresParArome[b.aromeId] = 0;
-        litresParArome[b.aromeId] += litres;
+        if (!litresParArome[b.aromeNom]) litresParArome[b.aromeNom] = 0;
+        litresParArome[b.aromeNom] += litres;
     });
     
     // Calculate ingredients needed
     const ingredientsTotal = {};
-    Object.entries(litresParArome).forEach(([aromeId, litres]) => {
-        const recette = recettes.find(r => r.aromeId === aromeId);
+    Object.entries(litresParArome).forEach(([aromeNom, litres]) => {
+        const arome = aromes.find(a => a.nom === aromeNom);
+        const recette = recettes.find(r => r.aromeId === arome?.id);
         if (recette) {
             recette.ingredients.forEach(ing => {
                 const besoin = ing.quantite * litres;
@@ -1753,10 +1756,9 @@ const calculerProduction = () => {
                 </h4>
                 ${Object.values(productionNecesaire).length === 0 ? '<p class="text-muted">Aucune commande</p>' : 
                   Object.values(productionNecesaire).map(b => {
-                      const arome = aromes.find(a => a.id === b.aromeId);
-                      const format = formats.find(f => f.id === b.formatId);
+                      const arome = aromes.find(a => a.nom === b.aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
-                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${arome?.nom || 'N/A'} ${format?.nom || ''}</span>
+                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${b.aromeNom} ${b.formatNom}</span>
                           <div style="text-align: right;">
                               <div style="font-size: 12px; color: var(--text-muted);">Stock: ${b.disponible} bt</div>
                               <strong>À produire: ${b.aProduire} bt</strong>
@@ -1771,10 +1773,10 @@ const calculerProduction = () => {
                     Litres à produire (par arôme)
                 </h4>
                 ${Object.entries(litresParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : 
-                  Object.entries(litresParArome).map(([aromeId, litres]) => {
-                      const arome = aromes.find(a => a.id === aromeId);
+                  Object.entries(litresParArome).map(([aromeNom, litres]) => {
+                      const arome = aromes.find(a => a.nom === aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
-                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${arome?.nom || 'N/A'}</span>
+                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${aromeNom}</span>
                           <strong>${litres.toFixed(1)} L</strong>
                       </div>`;
                   }).join('')}
