@@ -1054,7 +1054,7 @@ const getPointageStats = (pointages, employes) => {
     if (statsPeriod === 'week') {
         const day = now.getDay();
         const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-        startDate = new Date(now.setDate(diff));
+        startDate = new Date(now.getFullYear(), now.getMonth(), diff);
         endDate = new Date(startDate);
         endDate.setDate(startDate.getDate() + 6);
     } else if (statsPeriod === 'month') {
@@ -1065,8 +1065,14 @@ const getPointageStats = (pointages, employes) => {
         endDate = new Date(now.getFullYear(), 11, 31);
     }
     
-    const startStr = getLocalDateISOString.call(startDate);
-    const endStr = getLocalDateISOString.call(endDate);
+    const formatDateISO = (d) => {
+        const offset = d.getTimezoneOffset();
+        d.setMinutes(d.getMinutes() - offset);
+        return d.toISOString().split('T')[0];
+    };
+    
+    const startStr = formatDateISO(startDate);
+    const endStr = formatDateISO(endDate);
     
     let filtered = pointages.filter(p => p.date >= startStr && p.date <= endStr && p.heureFin);
     
@@ -1646,31 +1652,19 @@ const renderProduction = () => {
     const recettes = DB.get('recettes') || [];
     
     const today = new Date();
-    const weekEnd = new Date();
-    weekEnd.setDate(weekEnd.getDate() + 7);
     
     let html = `
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Planificateur de production</h3>
-            </div>
-            
-            <div class="filters">
-                <div class="form-group" style="margin-bottom: 0;">
-                    <label>Période des commandes</label>
-                    <div style="display: flex; gap: 8px;">
-                        <input type="date" id="prodDateDebut" value="${getLocalDateISOString()}">
-                        <input type="date" id="prodDateFin" value="${weekEnd.toISOString().split('T')[0]}">
-                        <button class="btn btn-primary" onclick="calculerProduction()">Calculer</button>
-                    </div>
-                </div>
+                <button class="btn btn-primary" onclick="calculerProduction()">Calculer</button>
             </div>
             
             <div id="productionResult">
                 <div class="empty-state">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                    <h3>Sélectionnez une période</h3>
-                    <p>Choisissez les dates des commandes à produire et cliquez sur "Calculer"</p>
+                    <h3>Cliquez sur "Calculer"</h3>
+                    <p>Toutes les commandes non livrées seront incluses dans le calcul</p>
                 </div>
             </div>
         </div>
@@ -1685,13 +1679,8 @@ const calculerProduction = () => {
     const formats = DB.get('formats');
     const recettes = DB.get('recettes');
     
-    const dateDebut = document.getElementById('prodDateDebut').value;
-    const dateFin = document.getElementById('prodDateFin').value;
-    
-    // Filter commandes in period
+    // All non-cancelled, non-delivered orders
     const commandesPeriode = commandes.filter(c => 
-        c.dateLivraison >= dateDebut && 
-        c.dateLivraison <= dateFin &&
         c.statut !== 'annulee' &&
         c.statut !== 'livrée'
     );
