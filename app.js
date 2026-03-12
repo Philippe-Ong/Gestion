@@ -44,7 +44,7 @@ const DB = {
         }
     },
     
-    loadFromFirebase: async () => {
+    loadFromFirebase: async (showNotification = true) => {
         if (!window.firebaseReady || !window.firebaseDb) return;
         try {
             const { getDocs, collection } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
@@ -53,7 +53,6 @@ const DB = {
             snapshot.forEach(docSnap => {
                 const key = docSnap.id;
                 const cloudData = docSnap.data().data;
-                // Only update if cloud data exists and has content
                 if (cloudData && Array.isArray(cloudData) && cloudData.length > 0) {
                     localStorage.setItem('thecol_' + key, JSON.stringify(cloudData));
                     hasData = true;
@@ -61,9 +60,8 @@ const DB = {
             });
             if (hasData) {
                 DB.firebaseSynced = true;
-                showToast('Données synchronisées depuis le cloud');
-                router();
-            } else {
+                if (showNotification) showToast('Données synchronisées depuis le cloud');
+            } else if (showNotification) {
                 showToast('Aucune donnée dans le cloud');
             }
         } catch(e) {
@@ -75,12 +73,15 @@ const DB = {
         const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
         tables.forEach(table => {
             if (!localStorage.getItem('thecol_' + table)) {
-                DB.set(table, []);
+                localStorage.setItem('thecol_' + table, '[]');
             }
         });
-        
-        // Ne plus charger automatiquement depuis Firebase
-        // Utiliser le bouton "Sync" manuellement
+    },
+    
+    // Sync from Firebase on page load
+    initFromFirebase: async () => {
+        if (!window.firebaseReady || !window.firebaseDb) return;
+        await DB.loadFromFirebase();
     }
 };
 
@@ -101,25 +102,6 @@ const DEFAULT_COULEURS = {
 };
 
 // Initialize default data if empty
-const initDefaultData = () => {
-    if (DB.get('aromes').length === 0) {
-        DB.set('aromes', DEFAULT_AROMES.map(nom => ({
-            id: generateId(),
-            nom,
-            couleur: DEFAULT_COULEURS[nom] || '#5D7B3E',
-            actif: true
-        })));
-    }
-    if (DB.get('formats').length === 0) {
-        DB.set('formats', DEFAULT_FORMATS.map(nom => ({
-            id: generateId(),
-            nom,
-            contenanceCl: parseFloat(nom) * 100,
-            actif: true
-        })));
-    }
-};
-
 // Calculate dates (same as Stock project)
 const calculateDates = (productionDate) => {
     const prod = new Date(productionDate);
@@ -2616,8 +2598,17 @@ const importAllData = (event) => {
 };
 
 // Initialize app
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     DB.init();
-    initDefaultData();
+    // Wait for Firebase to be ready, then sync
+    const waitForFirebase = () => new Promise(resolve => {
+        const check = () => {
+            if (window.firebaseReady) return resolve();
+            setTimeout(check, 100);
+        };
+        check();
+    });
+    await waitForFirebase();
+    await DB.loadFromFirebase(false);
     router();
 });
