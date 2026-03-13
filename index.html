@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=1.6">
+    <link rel="stylesheet" href="styles.css?v=1.7">
 </head>
 <body>
     <aside class="sidebar">
@@ -56,10 +56,10 @@
             </button>
             <h2 id="pageTitle">Dashboard</h2>
             <div class="header-actions" id="headerActions">
+                <span style="font-size: 11px; color: var(--text-lighter);">v1.7</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
-                <span style="font-size: 11px; color: var(--text-lighter);">v1.6</span>
             </div>
         </header>
 
@@ -106,16 +106,22 @@
             window.firebaseReady = true;
             window.firebaseDb = db;
             console.log('Firebase connected');
-            // Show sync button
-            setTimeout(() => {
+            window.showSyncButton = () => {
                 const btn = document.getElementById('syncBtn');
                 if(btn) btn.style.display = 'inline-flex';
-            }, 500);
+            };
+            window.showSyncButton();
         } catch(e) {
             console.log('Firebase error:', e);
             window.firebaseReady = false;
         }
     </script>
-    <script src="app.js?v=1.6"></script>
+    <script src="app.js?v=1.7"></script>
+    <script>
+        // Backup: show sync button after load
+        setTimeout(() => {
+            if(window.firebaseReady) window.showSyncButton?.();
+        }, 1000);
+    </script>
 </body>
 </html>
