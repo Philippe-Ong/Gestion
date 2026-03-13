@@ -291,8 +291,6 @@ const renderDashboard = () => {
             <p>Total: <strong>${heuresAujourdhui.toFixed(1)}h</strong></p>
         </div>
     `;
-    
-    document.getElementById('headerActions').innerHTML = '';
 };
 
 // Stock Management
