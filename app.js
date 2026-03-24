@@ -1536,8 +1536,6 @@ const showCommandeModal = (id = null) => {
                 </div>
                 <button type="button" class="btn btn-sm btn-secondary mt-4" onclick="addItem()">+ Ajouter un article</button>
             </div>
-                <button type="button" class="btn btn-sm btn-secondary mt-4" onclick="addItem()">+ Ajouter un article</button>
-            </div>
             <div class="form-group">
                 <label>Statut</label>
                 <select name="statut">
