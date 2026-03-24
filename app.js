@@ -70,7 +70,7 @@ const DB = {
     },
     
     init: () => {
-        const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
+        const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire'];
         tables.forEach(table => {
             if (!localStorage.getItem('thecol_' + table)) {
                 localStorage.setItem('thecol_' + table, '[]');
@@ -179,6 +179,7 @@ const navigateTo = (page) => {
         pointage: 'Pointage',
         commandes: 'Commandes',
         production: 'Planificateur de production',
+        inventaire: 'Inventaire',
         parametres: 'Paramètres'
     };
     document.getElementById('pageTitle').textContent = titles[page] || 'Dashboard';
@@ -189,6 +190,7 @@ const navigateTo = (page) => {
         pointage: renderPointage,
         commandes: renderCommandes,
         production: renderProduction,
+        inventaire: renderInventaire,
         parametres: renderParametres
     };
     
@@ -1838,6 +1840,179 @@ const renderProduction = () => {
     document.getElementById('content').innerHTML = html;
 };
 
+// Inventaire
+const renderInventaire = () => {
+    const items = DB.get('inventaire') || [];
+    const consommables = items.filter(i => i.categorie === 'consommable');
+    const equipement = items.filter(i => i.categorie === 'equipement');
+    
+    const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Inventaire</h3>
+                <div class="card-actions">
+                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('consommable')">+ Consommable</button>
+                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('equipement')">+ Équipement</button>
+                </div>
+            </div>
+            
+            <!-- Consommables Section -->
+            <div class="inventaire-section">
+                <h4>Consommables</h4>
+                <div class="inventaire-grid">
+                    ${consommables.length === 0 ? '<p class="text-muted">Aucun consommable</p>' : 
+                      consommables.map(item => {
+                          const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
+                          return `
+                            <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
+                                <span class="inventaire-item-name">${item.nom}</span>
+                                <div class="inventaire-qty-controls">
+                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
+                                    <span class="inventaire-qty">${item.quantite} ${item.unite}</span>
+                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', 1)">+</button>
+                                </div>
+                                <div class="inventaire-item-actions">
+                                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('consommable', '${item.id}')">✏️</button>
+                                    <button class="btn btn-sm btn-danger" onclick="deleteInventaireItem('${item.id}')">×</button>
+                                </div>
+                            </div>
+                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
+                          `;
+                      }).join('')}
+                </div>
+            </div>
+            
+            <!-- Équipement Section (collapsible) -->
+            <div class="inventaire-section">
+                <div class="inventaire-section-header" onclick="toggleEquipementSection()">
+                    <h4>Équipement</h4>
+                    <span class="inventaire-toggle" id="equipementToggle">▶</span>
+                </div>
+                <div class="inventaire-grid collapse-content" id="equipementContent">
+                    ${equipement.length === 0 ? '<p class="text-muted">Aucun équipement</p>' : 
+                      equipement.map(item => {
+                          const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
+                          return `
+                            <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
+                                <span class="inventaire-item-name">${item.nom}</span>
+                                <div class="inventaire-qty-controls">
+                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
+                                    <span class="inventaire-qty">${item.quantite} ${item.unite}</span>
+                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', 1)">+</button>
+                                </div>
+                                <div class="inventaire-item-actions">
+                                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('equipement', '${item.id}')">✏️</button>
+                                    <button class="btn btn-sm btn-danger" onclick="deleteInventaireItem('${item.id}')">×</button>
+                                </div>
+                            </div>
+                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
+                          `;
+                      }).join('')}
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.getElementById('content').innerHTML = html;
+};
+
+// Toggle equipement section
+const toggleEquipementSection = () => {
+    const content = document.getElementById('equipementContent');
+    const toggle = document.getElementById('equipementToggle');
+    content.classList.toggle('open');
+    toggle.textContent = content.classList.contains('open') ? '▼' : '▶';
+};
+
+// Show inventaire modal
+const showInventaireModal = (categorie, id = null) => {
+    const items = DB.get('inventaire') || [];
+    const item = id ? items.find(i => i.id === id) : null;
+    
+    const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
+    
+    modal.show(id ? 'Modifier item' : 'Nouvel item', `
+        <form id="inventaireForm">
+            <input type="hidden" name="categorie" value="${categorie}">
+            <div class="form-group">
+                <label>Nom</label>
+                <input type="text" name="nom" value="${item?.nom || ''}" required>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Quantité</label>
+                    <input type="number" name="quantite" value="${item?.quantite || 0}" min="0" required>
+                </div>
+                <div class="form-group">
+                    <label>Unité</label>
+                    <select name="unite" required>
+                        ${unités.map(u => `<option value="${u}" ${item?.unite === u ? 'selected' : ''}>${u}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Seuil d'alerte (stock bas)</label>
+                <input type="number" name="seuilAlerte" value="${item?.seuilAlerte || 0}" min="0">
+                <small class="text-muted">Alerte quand la quantité est en dessous de ce seuil</small>
+            </div>
+        </form>
+    `, `
+        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
+        <button class="btn btn-primary" onclick="saveInventaireItem('${id || ''}')">Enregistrer</button>
+    `);
+};
+
+// Save inventaire item
+const saveInventaireItem = (id) => {
+    const form = document.getElementById('inventaireForm');
+    const formData = new FormData(form);
+    
+    const item = {
+        id: id || generateId(),
+        categorie: formData.get('categorie'),
+        nom: formData.get('nom'),
+        quantite: parseInt(formData.get('quantite')) || 0,
+        unite: formData.get('unite'),
+        seuilAlerte: parseInt(formData.get('seuilAlerte')) || 0
+    };
+    
+    const items = DB.get('inventaire');
+    if (id) {
+        const index = items.findIndex(i => i.id === id);
+        items[index] = item;
+    } else {
+        items.push(item);
+    }
+    DB.set('inventaire', items);
+    
+    modal.hide();
+    showToast('Item enregistré');
+    renderInventaire();
+};
+
+// Update inventaire quantity
+const updateInventaireQty = (id, delta) => {
+    const items = DB.get('inventaire');
+    const item = items.find(i => i.id === id);
+    if (item) {
+        item.quantite = Math.max(0, (item.quantite || 0) + delta);
+        DB.set('inventaire', items);
+        renderInventaire();
+    }
+};
+
+// Delete inventaire item
+const deleteInventaireItem = (id) => {
+    if (confirm('Supprimer cet item ?')) {
+        const items = DB.get('inventaire').filter(i => i.id !== id);
+        DB.set('inventaire', items);
+        showToast('Item supprimé');
+        renderInventaire();
+    }
+};
+
 // Settings
 const renderParametres = () => {
     const employes = DB.get('employees') || [];
@@ -2602,7 +2777,7 @@ const resetClients = () => {
 
 // Export all data to JSON
 const exportAllData = () => {
-    const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
+    const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire'];
     const data = {};
     tables.forEach(table => {
         data[table] = DB.get(table) || [];
@@ -2627,7 +2802,7 @@ const importAllData = (event) => {
     reader.onload = (e) => {
         try {
             const data = JSON.parse(e.target.result);
-            const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages'];
+            const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire'];
             let count = 0;
             tables.forEach(table => {
                 if (data[table] && Array.isArray(data[table])) {

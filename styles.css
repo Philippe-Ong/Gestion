@@ -626,6 +626,126 @@ input[type="checkbox"] {
     margin: 0 auto 24px;
 }
 
+/* Inventaire */
+.inventaire-section {
+    margin-bottom: 24px;
+}
+
+.inventaire-section h4 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.inventaire-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    padding: 8px 0;
+}
+
+.inventaire-section-header h4 {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.inventaire-toggle {
+    font-size: 12px;
+    color: var(--text-light);
+    transition: transform 0.2s ease;
+}
+
+.inventaire-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+}
+
+@media (max-width: 768px) {
+    .inventaire-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.inventaire-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+}
+
+.inventaire-item.alerte {
+    border-color: var(--warning);
+    background: var(--warning-light, #FFF3CD);
+}
+
+.inventaire-item-name {
+    flex: 1;
+    font-weight: 500;
+}
+
+.inventaire-qty-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.inventaire-qty-controls .btn {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.inventaire-qty {
+    min-width: 60px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.inventaire-item-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.inventaire-item-actions .btn {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+}
+
+.inventaire-alerte-text {
+    font-size: 11px;
+    color: var(--warning);
+    margin-top: -8px;
+    margin-bottom: 8px;
+    padding-left: 12px;
+}
+
+.collapse-content {
+    display: none;
+}
+
+.collapse-content.open {
+    display: block;
+}
+
 /* Production planner */
 .production-summary {
     display: grid;
