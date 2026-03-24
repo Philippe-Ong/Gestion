@@ -670,6 +670,46 @@ input[type="checkbox"] {
     border-bottom: none;
 }
 
+/* Cuves production */
+.cuve-arome {
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.cuve-arome:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+}
+
+.cuve-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    margin-bottom: 12px;
+}
+
+.cuve-detail {
+    margin-left: 28px;
+    margin-bottom: 12px;
+    padding: 12px;
+    background: var(--white);
+    border-radius: var(--radius);
+    border: 1px solid var(--border-light);
+}
+
+.cuve-detail:last-child {
+    margin-bottom: 0;
+}
+
+.cuve-title {
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--primary);
+    font-size: 13px;
+}
+
 /* Tabs */
 .tabs {
     display: flex;

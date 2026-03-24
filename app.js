@@ -1700,7 +1700,7 @@ const renderProduction = () => {
         litresParArome[b.aromeNom] += litres;
     });
     
-    // Calculate ingredients needed
+    // Calculate ingredients needed (for total display)
     const ingredientsTotal = {};
     Object.entries(litresParArome).forEach(([aromeNom, litres]) => {
         const arome = aromes.find(a => a.nom === aromeNom);
@@ -1711,6 +1711,42 @@ const renderProduction = () => {
                 if (!ingredientsTotal[ing.nom]) ingredientsTotal[ing.nom] = { quantite: 0, unite: ing.unite };
                 ingredientsTotal[ing.nom].quantite += besoin;
             });
+        }
+    });
+    
+    // Calculate cuves per arome (max 25L per cuve)
+    const CUVE_MAX = 25;
+    const cuvesParArome = {};
+    
+    Object.entries(litresParArome).forEach(([aromeNom, litresTotal]) => {
+        const nombreCuves = Math.ceil(litresTotal / CUVE_MAX);
+        cuvesParArome[aromeNom] = [];
+        
+        let litresRestants = litresTotal;
+        for (let i = 0; i < nombreCuves; i++) {
+            const litresCuve = Math.min(litresRestants, CUVE_MAX);
+            
+            const arome = aromes.find(a => a.nom === aromeNom);
+            const recette = recettes.find(r => r.aromeId === arome?.id);
+            const ingredientsCuve = [];
+            
+            if (recette) {
+                recette.ingredients.forEach(ing => {
+                    ingredientsCuve.push({
+                        nom: ing.nom,
+                        quantite: (ing.quantite * litresCuve).toFixed(2),
+                        unite: ing.unite
+                    });
+                });
+            }
+            
+            cuvesParArome[aromeNom].push({
+                numero: i + 1,
+                litres: litresCuve,
+                ingredients: ingredientsCuve
+            });
+            
+            litresRestants -= litresCuve;
         }
     });
     
@@ -1750,20 +1786,38 @@ const renderProduction = () => {
                   }).join('')}
             </div>
             
-            <div class="production-item">
+            <div class="production-item" style="grid-column: 1 / -1;">
                 <h4>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-                    Ingrédients nécessaires
+                    Production par cuves (max 25L)
                 </h4>
-                ${Object.keys(ingredientsTotal).length === 0 ? '<p class="text-muted">Aucune recette définie</p>' : 
-                  `<ul class="ingredient-list">
-                    ${Object.entries(ingredientsTotal).map(([nom, data]) => `
-                        <li>
-                            <span>${nom}</span>
-                            <strong>${data.quantite.toFixed(2)} ${data.unite}</strong>
-                        </li>
-                    `).join('')}
-                  </ul>`}
+                ${Object.entries(cuvesParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : 
+                  Object.entries(cuvesParArome).map(([aromeNom, cuves]) => {
+                      const arome = aromes.find(a => a.nom === aromeNom);
+                      const totalLitres = cuves.reduce((sum, c) => sum + c.litres, 0);
+                      return `
+                        <div class="cuve-arome">
+                          <div class="cuve-header">
+                            <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
+                            <strong>${aromeNom}</strong>
+                            <span> - ${totalLitres.toFixed(1)}L (${cuves.length} cuve${cuves.length > 1 ? 's' : ''})</span>
+                          </div>
+                          ${cuves.map(cuve => `
+                            <div class="cuve-detail">
+                              <div class="cuve-title">Cuve ${cuve.numero} (${cuve.litres.toFixed(1)}L)</div>
+                              <ul class="ingredient-list">
+                                ${cuve.ingredients.map(ing => `
+                                  <li>
+                                    <span>${ing.nom}</span>
+                                    <strong>${ing.quantite} ${ing.unite}</strong>
+                                  </li>
+                                `).join('')}
+                              </ul>
+                            </div>
+                          `).join('')}
+                        </div>
+                      `;
+                  }).join('')}
             </div>
         </div>
         
