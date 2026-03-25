@@ -1057,6 +1057,7 @@ input[type="checkbox"] {
     /* Base mobile resets */
     body {
         font-size: 14px;
+        overflow-x: hidden;
     }
 
     .content {
@@ -1093,6 +1094,7 @@ input[type="checkbox"] {
 
     .main-content {
         margin-left: 0;
+        overflow-x: hidden;
     }
 
     .menu-toggle {
