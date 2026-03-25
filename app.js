@@ -39,8 +39,8 @@ const DB = {
     
     set: (key, data) => {
         localStorage.setItem('thecol_' + key, JSON.stringify(data));
-        // Sync to Firebase if available and only if data is not empty
-        if (window.firebaseReady && window.firebaseDb && data && data.length > 0) {
+        // Sync to Firebase if available
+        if (window.firebaseReady && window.firebaseDb) {
             DB.syncToFirebase(key, data);
         }
     },
