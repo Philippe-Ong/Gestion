@@ -1516,7 +1516,7 @@ const renderCommandes = () => {
                                         <td class="actions-cell">
                                             <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
                                             ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="livrerCommande('${cmd.id}')">Livrer</button>` : ''}
-                                            ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="archiverCommande('${cmd.id}')">Archiver</button>` : ''}
+                                            ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="restaurerCommande('${cmd.id}')">Restaurer</button>` : ''}
                                             ${cmd.statut !== 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
                                             <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
                                         </td>
@@ -1737,6 +1737,9 @@ const livrerCommande = (id) => {
     
     const cmd = commandes[cmdIndex];
     
+    // Normaliser les noms pour comparaison (minuscules, sans espaces)
+    const normalize = (s) => (s || '').toString().toLowerCase().trim();
+    
     // FIFO: trier lots par date de production (plus ancien primero)
     const sortedLots = [...lots].sort((a, b) => 
         new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01')
@@ -1747,13 +1750,13 @@ const livrerCommande = (id) => {
     cmd.items.forEach(item => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
-        const aromeNom = arome?.nom || item.aromeId;
-        const formatNom = format?.nom || item.formatId;
+        const aromeNom = normalize(arome?.nom || item.aromeId);
+        const formatNom = normalize(format?.nom || item.formatId);
         
         let qtyToDeduct = item.quantite;
         
         for (let lot of sortedLots) {
-            if (lot.arome === aromeNom && lot.format === formatNom && lot.quantite > 0) {
+            if (normalize(lot.arome) === aromeNom && normalize(lot.format) === formatNom && lot.quantite > 0) {
                 if (lot.quantite >= qtyToDeduct) {
                     lot.quantite -= qtyToDeduct;
                     totalDeducted += qtyToDeduct;
@@ -1781,6 +1784,13 @@ const archiverCommande = (id) => {
     if (confirm('Archiver cette commande? Elle sera déplacée vers les archives.')) {
         showToast('Commande archivée');
         renderCommandes();
+    }
+};
+
+const restaurerCommande = (id) => {
+    if (confirm('Restaurer cette commande? Elle redeviendra "produite".')) {
+        updateCommandeStatut(id, 'produite');
+        showToast('Commande restaurée');
     }
 };
 
