@@ -1727,8 +1727,54 @@ const updateCommandeStatut = (id, statut) => {
 };
 
 const livrerCommande = (id) => {
+    const commandes = DB.get('commandes');
+    let lots = DB.get('lots') || [];
+    const aromes = DB.get('aromes');
+    const formats = DB.get('formats');
+    
+    const cmdIndex = commandes.findIndex(c => c.id === id);
+    if (cmdIndex === -1) return;
+    
+    const cmd = commandes[cmdIndex];
+    
+    // FIFO: trier lots par date de production (plus ancien primero)
+    const sortedLots = [...lots].sort((a, b) => 
+        new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01')
+    );
+    
+    let totalDeducted = 0;
+    
+    cmd.items.forEach(item => {
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = formats.find(f => f.id === item.formatId);
+        const aromeNom = arome?.nom || item.aromeId;
+        const formatNom = format?.nom || item.formatId;
+        
+        let qtyToDeduct = item.quantite;
+        
+        for (let lot of sortedLots) {
+            if (lot.arome === aromeNom && lot.format === formatNom && lot.quantite > 0) {
+                if (lot.quantite >= qtyToDeduct) {
+                    lot.quantite -= qtyToDeduct;
+                    totalDeducted += qtyToDeduct;
+                    qtyToDeduct = 0;
+                    break;
+                } else {
+                    totalDeducted += lot.quantite;
+                    qtyToDeduct -= lot.quantite;
+                    lot.quantite = 0;
+                }
+            }
+        }
+    });
+    
+    // Mettre à jour les lots dans la base
+    lots = sortedLots.map(l => l).filter(l => l.quantite > 0);
+    DB.set('lots', lots);
+    
+    // Mettre à jour le statut
     updateCommandeStatut(id, 'livrée');
-    showToast('Commande marquée comme livrée');
+    showToast(`Commande livrée - ${totalDeducted} bouteille(s) déduite(s) du stock`);
 };
 
 const archiverCommande = (id) => {
