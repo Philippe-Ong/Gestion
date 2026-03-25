@@ -1179,6 +1179,12 @@ input[type="checkbox"] {
         left: 0;
         background: var(--white);
         z-index: 1;
+        border-right: 2px solid var(--border);
+        box-shadow: 2px 0 4px rgba(0,0,0,0.1);
+    }
+    
+    thead th:first-child {
+        z-index: 2;
     }
     
     /* Filters - stack vertically */
