@@ -1,24 +1,24 @@
 :root {
-    --primary: #0891B2;
-    --primary-dark: #0E7490;
-    --primary-light: #22D3EE;
-    --accent: #22C55E;
-    --bg: #ECFEFF;
-    --bg-secondary: #CFFAFE;
+    --primary: #5D7B3E;
+    --primary-dark: #4A6530;
+    --primary-light: #8BA66B;
+    --accent: #2C4A2E;
+    --bg: #FAFBF7;
+    --bg-secondary: #F5F7F2;
     --white: #FFFFFF;
-    --text: #164E63;
-    --text-light: #0E7490;
-    --text-lighter: #0891B2;
-    --border: #99F6E4;
-    --border-light: #CCFBF1;
-    --danger: #DC2626;
-    --danger-light: #EF4444;
-    --warning: #F59E0B;
-    --warning-light: #FCD34D;
-    --success: #22C55E;
-    --success-light: #4ADE80;
-    --shadow: 0 2px 8px rgba(8, 145, 178, 0.08);
-    --shadow-lg: 0 4px 20px rgba(8, 145, 178, 0.12);
+    --text: #333333;
+    --text-light: #666666;
+    --text-lighter: #999999;
+    --border: #E0E0E0;
+    --border-light: #EEEEEE;
+    --danger: #C0392B;
+    --danger-light: #E74C3C;
+    --warning: #F39C12;
+    --warning-light: #F1C40F;
+    --success: #27AE60;
+    --success-light: #2ECC71;
+    --shadow: 0 2px 8px rgba(0,0,0,0.08);
+    --shadow-lg: 0 4px 20px rgba(0,0,0,0.12);
     --radius: 8px;
     --radius-sm: 4px;
     --radius-lg: 12px;
@@ -32,7 +32,7 @@
 }
 
 body {
-    font-family: 'Inter', sans-serif;
+    font-family: 'Outfit', sans-serif;
     background: var(--bg);
     color: var(--text);
     font-size: 15px;
