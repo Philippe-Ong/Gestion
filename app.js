@@ -1842,7 +1842,35 @@ const renderProduction = () => {
 
 // Inventaire
 const renderInventaire = () => {
-    const items = DB.get('inventaire') || [];
+    // Initialize default consumables if list is empty
+    const defaultConsommables = [
+        { nom: 'Eau', unite: 'L', seuilAlerte: 0 },
+        { nom: 'Sucre', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Citron', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Menthe', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Hibiscus', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Mûre sauvage', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Poire à botzi', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Sureau', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Herbes des alpes', unite: 'kg', seuilAlerte: 0 },
+        { nom: 'Capsules', unite: 'pcs', seuilAlerte: 0 },
+        { nom: 'Étiquettes', unite: 'pcs', seuilAlerte: 0 },
+        { nom: 'Bouteilles vides 25cl', unite: 'pcs', seuilAlerte: 0 },
+        { nom: 'Bouteilles vides 50cl', unite: 'pcs', seuilAlerte: 0 },
+        { nom: 'Bouteilles vides 1L', unite: 'pcs', seuilAlerte: 0 }
+    ];
+    
+    let items = DB.get('inventaire');
+    if (items.length === 0) {
+        items = defaultConsommables.map(item => ({
+            ...item,
+            id: generateId(),
+            categorie: 'consommable',
+            quantite: 0
+        }));
+        DB.set('inventaire', items);
+    }
+    
     const consommables = items.filter(i => i.categorie === 'consommable');
     const equipement = items.filter(i => i.categorie === 'equipement');
     
