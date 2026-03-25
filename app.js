@@ -362,7 +362,7 @@ const renderStock = () => {
         
         <div class="card" style="margin-bottom: 24px;">
             <button class="flex items-center gap-2" style="background:none;border:none;cursor:pointer;font-size:16px;font-weight:500;color:var(--text);padding:10px 0;" onclick="toggleHistory()">
-                <span id="historyArrow" style="font-size:12px;">▶</span> Stock
+                <span id="historyArrow" style="font-size:12px;">▶</span> Historique de production
             </button>
             <div id="historyContent" style="display:none;margin-top:16px;">
                 <div class="table-container" style="max-height:300px;overflow-y:auto;">
@@ -388,7 +388,7 @@ const renderStock = () => {
         
         <div class="card">
             <div class="card-header">
-                <h3 class="card-title">Historique de production</h3>
+                <h3 class="card-title">Stock</h3>
                 <button class="btn btn-primary" onclick="showNouveauLotModal()">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                     Nouveau lot
