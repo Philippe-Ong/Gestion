@@ -924,6 +924,11 @@ input[type="checkbox"] {
     color: var(--text);
 }
 
+.form-group-btn-end {
+    display: flex;
+    align-items: flex-end;
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
     .settings-grid {
@@ -1543,5 +1548,76 @@ input[type="checkbox"] {
     .nav-item {
         padding: 14px 16px;
         min-height: 44px;
+    }
+
+    /* Inventaire */
+    .inventaire-grid {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+
+    .inventaire-item {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px;
+    }
+
+    .inventaire-item-name {
+        flex: 1 1 100%;
+        font-size: 14px;
+    }
+
+    .inventaire-qty-controls {
+        flex: 1;
+    }
+
+    .inventaire-qty-controls .btn {
+        width: 36px;
+        height: 36px;
+        font-size: 18px;
+    }
+
+    .inventaire-qty {
+        min-width: 50px;
+        font-size: 13px;
+    }
+
+    .inventaire-item-actions {
+        gap: 6px;
+    }
+
+    .inventaire-item-actions .btn {
+        width: 36px;
+        height: 36px;
+        font-size: 14px;
+    }
+
+    .inventaire-section-header {
+        padding: 10px 0;
+    }
+
+    .inventaire-alerte-text {
+        font-size: 11px;
+        padding-left: 10px;
+    }
+
+    .card-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        width: 100%;
+    }
+
+    .card-actions .btn {
+        flex: 1;
+    }
+
+    /* Pointage employes form */
+    .form-group-btn-end {
+        display: block;
+    }
+
+    .form-group-btn-end .btn {
+        width: 100%;
     }
 }

@@ -348,7 +348,7 @@ const renderStock = () => {
         ${renderSellableSummary(lots, aromes, formats, today)}
         
         <div class="card" style="margin-bottom: 24px;">
-            <button class="flex items-center gap-2" style="background:none;border:none;cursor:pointer;font-size:16px;font-weight:500;color:var(--text);" onclick="toggleHistory()">
+            <button class="flex items-center gap-2" style="background:none;border:none;cursor:pointer;font-size:16px;font-weight:500;color:var(--text);padding:10px 0;" onclick="toggleHistory()">
                 <span id="historyArrow" style="font-size:12px;">▶</span> Historique de production
             </button>
             <div id="historyContent" style="display:none;margin-top:16px;">
@@ -944,7 +944,7 @@ const renderPointage = (tab = 'pointage') => {
             <div class="card">
                 <h3 class="card-title" style="margin-bottom: 16px;">Gérer les employés</h3>
                 <div class="form-row" style="margin-bottom: 20px;">
-                    <div class="form-group" style="flex: 1;">
+                    <div class="form-group">
                         <label>Nouvel employé</label>
                         <input type="text" id="newEmployeeName" placeholder="Nom de l'employé">
                     </div>
@@ -952,7 +952,7 @@ const renderPointage = (tab = 'pointage') => {
                         <label>Prénom</label>
                         <input type="text" id="newEmployeePrenom" placeholder="Prénom">
                     </div>
-                    <div class="form-group" style="display: flex; align-items: flex-end;">
+                    <div class="form-group form-group-btn-end">
                         <button class="btn btn-success" onclick="addNewEmployee()">Ajouter</button>
                     </div>
                 </div>
