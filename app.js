@@ -189,6 +189,7 @@ const navigateTo = (page) => {
         stock: 'Gestion du stock',
         pointage: 'Pointage',
         commandes: 'Commandes',
+        archives: 'Archives',
         production: 'Planificateur de production',
         inventaire: 'Inventaire',
         parametres: 'Paramètres'
@@ -200,6 +201,7 @@ const navigateTo = (page) => {
         stock: renderStock,
         pointage: renderPointage,
         commandes: renderCommandes,
+        archives: renderArchives,
         production: renderProduction,
         inventaire: renderInventaire,
         parametres: renderParametres
@@ -1414,10 +1416,16 @@ const renderCommandes = () => {
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Liste des commandes</h3>
-                <button class="btn btn-primary" onclick="showCommandeModal()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                    Nouvelle commande
-                </button>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" onclick="checkStockAndUpdateCommandes()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                        Vérifier stock
+                    </button>
+                    <button class="btn btn-primary" onclick="showCommandeModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        Nouvelle commande
+                    </button>
+                </div>
             </div>
             
             <div class="filters">
@@ -1434,7 +1442,7 @@ const renderCommandes = () => {
                 </select>
             </div>
             
-            <div class="table-container">
+            <div class="table-container" id="commandesTableContainer">
                 <table>
                     <thead>
                         <tr>
@@ -1486,8 +1494,11 @@ const renderCommandes = () => {
                                                 <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'annulee')">Annulée</div>
                                             </div>
                                         </td>
-                                        <td>
-                                            <button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>
+                                        <td class="actions-cell">
+                                            <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
+                                            ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="livrerCommande('${cmd.id}')">Livrer</button>` : ''}
+                                            ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="archiverCommande('${cmd.id}')">Archiver</button>` : ''}
+                                            ${cmd.statut !== 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
                                             <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
                                         </td>
                                     </tr>
@@ -1695,9 +1706,125 @@ const updateCommandeStatut = (id, statut) => {
     }
 };
 
+const livrerCommande = (id) => {
+    updateCommandeStatut(id, 'livrée');
+    showToast('Commande marquée comme livrée');
+};
+
+const archiverCommande = (id) => {
+    if (confirm('Archiver cette commande? Elle sera déplacée vers les archives.')) {
+        showToast('Commande archivée');
+        renderCommandes();
+    }
+};
+
 document.addEventListener('click', () => {
     document.querySelectorAll('.status-dropdown.active').forEach(d => d.classList.remove('active'));
 });
+
+const checkStockAndUpdateCommandes = () => {
+    const commandes = DB.get('commandes');
+    const lots = DB.get('lots') || [];
+    const formats = DB.get('formats');
+    const now = new Date();
+    
+    const stockDisponible = {};
+    lots.filter(lot => {
+        if (!lot.dlc) return true;
+        return new Date(lot.dlc) >= now;
+    }).forEach(lot => {
+        const key = `${lot.arome}-${lot.format}`;
+        if (!stockDisponible[key]) {
+            stockDisponible[key] = 0;
+        }
+        stockDisponible[key] += lot.quantite || 0;
+    });
+    
+    let updatedCount = 0;
+    const updatedCommandes = commandes.map(cmd => {
+        if (cmd.statut !== 'en_attente') return cmd;
+        
+        const needed = {};
+        cmd.items.forEach(item => {
+            const format = formats.find(f => f.id === item.formatId);
+            const aromeName = item.aromeId;
+            const formatName = format?.nom || item.formatId;
+            const key = `${aromeName}-${formatName}`;
+            if (!needed[key]) needed[key] = 0;
+            needed[key] += item.quantite;
+        });
+        
+        let canProduce = true;
+        Object.entries(needed).forEach(([key, qty]) => {
+            const disponible = stockDisponible[key] || 0;
+            if (disponible < qty) canProduce = false;
+        });
+        
+        if (canProduce) {
+            updatedCount++;
+            return { ...cmd, statut: 'produite' };
+        }
+        return cmd;
+    });
+    
+    DB.set('commandes', updatedCommandes);
+    renderCommandes();
+    
+    if (updatedCount > 0) {
+        showToast(`${updatedCount} commande(s) mise(s) en production`);
+    } else {
+        showToast('Aucune commande à mettre en production');
+    }
+};
+
+const showCommandeDetails = (id) => {
+    const commandes = DB.get('commandes');
+    const clients = DB.get('clients');
+    const aromes = DB.get('aromes');
+    const formats = DB.get('formats');
+    
+    const commande = commandes.find(c => c.id === id);
+    if (!commande) return;
+    
+    const client = clients.find(c => c.id === commande.clientId);
+    const clientName = client ? (client.societe || client.nom) : 'N/A';
+    
+    const itemsHtml = commande.items.map(item => {
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = formats.find(f => f.id === item.formatId);
+        return `<tr>
+            <td>${arome?.nom || '?'}</td>
+            <td>${format?.nom || '?'}</td>
+            <td>${item.quantite}</td>
+        </tr>`;
+    }).join('');
+    
+    const totalItems = commande.items.reduce((sum, i) => sum + i.quantite, 0);
+    
+    modal.show(`Commande #${getCommandeNumero(commande)}`, `
+        <div class="commande-details">
+            <p><strong>Client:</strong> ${clientName}</p>
+            <p><strong>Date commande:</strong> ${formatDate(commande.dateCommande)}</p>
+            <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
+            <p><strong>Statut:</strong> ${commande.statut}</p>
+            <p><strong>Total:</strong> ${totalItems} articles</p>
+            <table class="details-table">
+                <thead>
+                    <tr>
+                        <th>Arôme</th>
+                        <th>Format</th>
+                        <th>Quantité</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${itemsHtml}
+                </tbody>
+            </table>
+        </div>
+    `, `
+        <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
+    `);
+};
 
 const deleteCommande = (id) => {
     if (confirm('Êtes-vous sûr de vouloir supprimer cette commande ?')) {
