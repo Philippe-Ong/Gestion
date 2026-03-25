@@ -12,6 +12,17 @@ const getLocalDateISOString = () => {
     return date.toISOString().split('T')[0];
 };
 
+const getNextCommandeNumero = () => {
+    let counter = parseInt(localStorage.getItem('thecol_compteur_commandes') || '0');
+    counter++;
+    localStorage.setItem('thecol_compteur_commandes', counter.toString());
+    return counter.toString().padStart(5, '0');
+};
+
+const getCommandeNumero = (commande) => {
+    return commande.numero || commande.id.slice(-5);
+};
+
 // Data Storage with Firebase sync
 const DB = {
     firebaseSynced: false,
@@ -1458,7 +1469,7 @@ const renderCommandes = () => {
                                 
                                 return `
                                     <tr>
-                                        <td>${cmd.id.slice(-6)}</td>
+                                        <td>${getCommandeNumero(cmd)}</td>
                                         <td>${client?.societe || client?.nom || 'N/A'}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
@@ -1531,12 +1542,30 @@ const showCommandeModal = (id = null) => {
                     <input type="date" name="dateLivraison" value="${commande?.dateLivraison || ''}" required>
                 </div>
             </div>
-<div class="form-group">
+            <div class="form-group">
                 <label>Articles</label>
-                <div id="itemsContainer" data-aromes='${aromeOptionsJson}' data-formats='${formatOptionsJson}'>
-                    ${itemsHtml}
+                <div class="items-matrix-container">
+                    <table class="items-matrix">
+                        <thead>
+                            <tr>
+                                <th>Arome</th>
+                                ${formats.map(f => `<th>${f.nom}</th>`).join('')}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${aromes.map(a => `
+                                <tr>
+                                    <td>${a.nom}</td>
+                                    ${formats.map(f => {
+                                        const item = commande?.items?.find(i => i.aromeId === a.id && i.formatId === f.id);
+                                        const qty = item ? item.quantite : '';
+                                        return `<td><input type="number" name="items[${a.id}][${f.id}]" value="${qty}" min="0" placeholder="0" class="item-qty-input"></td>`;
+                                    }).join('')}
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
                 </div>
-                <button type="button" class="btn btn-sm btn-secondary mt-4" onclick="addItem()">+ Ajouter un article</button>
             </div>
             <div class="form-group">
                 <label>Statut</label>
@@ -1592,14 +1621,15 @@ const saveCommande = (id) => {
     const formData = new FormData(form);
     
     const items = [];
-    const itemRows = document.querySelectorAll('.item-row');
-    itemRows.forEach((row) => {
-        const aromeId = row.querySelector('select[name="aromeId"]')?.value;
-        const formatId = row.querySelector('select[name="formatId"]')?.value;
-        const quantite = row.querySelector('input[name="quantite"]')?.value;
-        
-        if (aromeId && formatId && quantite) {
-            items.push({ aromeId, formatId, quantite: parseInt(quantite) });
+    const qtyInputs = document.querySelectorAll('.item-qty-input');
+    qtyInputs.forEach(input => {
+        const qty = parseInt(input.value) || 0;
+        if (qty > 0) {
+            const name = input.name;
+            const match = name.match(/items\[([^\]]+)\]\[([^\]]+)\]/);
+            if (match) {
+                items.push({ aromeId: match[1], formatId: match[2], quantite: qty });
+            }
         }
     });
     
@@ -1610,6 +1640,7 @@ const saveCommande = (id) => {
     
     const commande = {
         id: id || generateId(),
+        numero: id ? DB.get('commandes').find(c => c.id === id)?.numero : getNextCommandeNumero(),
         clientId: formData.get('clientId'),
         dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : getLocalDateISOString(),
         dateLivraison: formData.get('dateLivraison'),

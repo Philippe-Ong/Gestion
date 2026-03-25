@@ -1506,6 +1506,44 @@ input[type="checkbox"] {
         grid-column: 1 / -1;
     }
     
+    /* Items matrix table */
+    .items-matrix-container {
+        overflow-x: auto;
+        max-width: 100%;
+    }
+    
+    .items-matrix {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+    }
+    
+    .items-matrix th,
+    .items-matrix td {
+        padding: 8px;
+        text-align: center;
+        border: 1px solid var(--border);
+    }
+    
+    .items-matrix th {
+        background: var(--bg-secondary);
+        font-weight: 600;
+    }
+    
+    .items-matrix td:first-child {
+        text-align: left;
+        font-weight: 500;
+        background: var(--bg-secondary);
+    }
+    
+    .item-qty-input {
+        width: 60px;
+        min-width: 60px;
+        padding: 6px 4px;
+        text-align: center;
+        font-size: 13px;
+    }
+    
     /* Badges */
     .badge {
         font-size: 11px;
