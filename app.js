@@ -1835,6 +1835,127 @@ const deleteCommande = (id) => {
     }
 };
 
+// Archives
+const renderArchives = () => {
+    const savedFilterYear = localStorage.getItem('thecol_filter_archive_year') || '';
+    const savedFilterClient = localStorage.getItem('thecol_filter_archive_client') || '';
+    
+    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée');
+    const clients = DB.get('clients') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    
+    const years = [...new Set(commandes.map(c => c.dateCommande ? c.dateCommande.substring(0, 4) : '2024'))].sort().reverse();
+    
+    const filteredCommandes = commandes.filter(c => {
+        const year = c.dateCommande ? c.dateCommande.substring(0, 4) : '2024';
+        const matchesYear = !savedFilterYear || year === savedFilterYear;
+        const matchesClient = !savedFilterClient || c.clientId === savedFilterClient;
+        return matchesYear && matchesClient;
+    });
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Archives des commandes</h3>
+                <button class="btn btn-secondary" onclick="exportArchivesExcel()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Exporter Excel
+                </button>
+            </div>
+            
+            <div class="filters">
+                <select id="filterArchiveYear" onchange="localStorage.setItem('thecol_filter_archive_year', this.value); renderArchives()">
+                    <option value="">Toutes les années</option>
+                    ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
+                </select>
+                <select id="filterArchiveClient" onchange="localStorage.setItem('thecol_filter_archive_client', this.value); renderArchives()">
+                    <option value="">Tous les clients</option>
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
+                </select>
+            </div>
+            
+            <div class="table-container" id="archivesTableContainer">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>N°</th>
+                            <th>Client</th>
+                            <th>Date commande</th>
+                            <th>Date livraison</th>
+                            <th>Articles</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${filteredCommandes.length === 0 ? '<tr><td colspan="6" class="text-center">Aucune commande archivée</td></tr>' : 
+                          filteredCommandes.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande))
+                            .map(cmd => {
+                                const client = clients.find(cl => cl.id === cmd.clientId);
+                                const totalItems = cmd.items.reduce((sum, i) => sum + i.quantite, 0);
+                                const articlesPreview = cmd.items.slice(0, 2).map(i => {
+                                    const a = aromes.find(a => a.id === i.aromeId);
+                                    const f = formats.find(f => f.id === i.formatId);
+                                    return `${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+                                }).join(', ');
+                                
+                                return `
+                                    <tr>
+                                        <td>${getCommandeNumero(cmd)}</td>
+                                        <td>${client?.societe || client?.nom || 'N/A'}</td>
+                                        <td>${formatDate(cmd.dateCommande)}</td>
+                                        <td>${formatDate(cmd.dateLivraison)}</td>
+                                        <td>${articlesPreview}${cmd.items.length > 2 ? '...' : ''} (${totalItems})</td>
+                                        <td>
+                                            <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    
+    document.getElementById('content').innerHTML = html;
+};
+
+const exportArchivesExcel = () => {
+    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée');
+    const clients = DB.get('clients');
+    const aromes = DB.get('aromes');
+    const formats = DB.get('formats');
+    
+    const data = commandes.map(cmd => {
+        const client = clients.find(c => c.id === cmd.clientId);
+        const items = cmd.items.map(item => {
+            const a = aromes.find(a => a.id === item.aromeId);
+            const f = formats.find(f => f.id === item.formatId);
+            return `${item.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+        }).join(', ');
+        
+        return {
+            'N°': getCommandeNumero(cmd),
+            'Client': client?.societe || client?.nom || 'N/A',
+            'Date commande': cmd.dateCommande,
+            'Date livraison': cmd.dateLivraison,
+            'Articles': items,
+            'Total': cmd.items.reduce((sum, i) => sum + i.quantite, 0)
+        };
+    });
+    
+    if (typeof XLSX !== 'undefined') {
+        const ws = XLSX.utils.json_to_sheet(data);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Archives');
+        XLSX.writeFile(wb, `archives_commandes_${getLocalDateISOString()}.xlsx`);
+        showToast('Export Excel réussi');
+    } else {
+        showToast('Erreur: Bibliothèque Excel non chargée', 'error');
+    }
+};
+
 // Production Planner
 const renderProduction = () => {
     const commandes = DB.get('commandes');
