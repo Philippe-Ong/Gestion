@@ -2774,24 +2774,33 @@ const importClientsExcel = (event) => {
 };
 
 // Mobile menu toggle
-document.getElementById('menuToggle')?.addEventListener('click', () => {
-    document.querySelector('.sidebar').classList.toggle('open');
-});
+const openSidebar = () => {
+    document.querySelector('.sidebar').classList.add('open');
+    document.getElementById('sidebarOverlay')?.classList.add('active');
+};
 
 const closeSidebar = () => {
     document.querySelector('.sidebar').classList.remove('open');
+    document.getElementById('sidebarOverlay')?.classList.remove('active');
 };
 
-// Close sidebar when clicking outside on mobile
-document.addEventListener('click', (e) => {
+document.getElementById('menuToggle')?.addEventListener('click', () => {
     const sidebar = document.querySelector('.sidebar');
-    const toggle = document.getElementById('menuToggle');
-    if (window.innerWidth <= 768 && 
-        sidebar?.classList.contains('open') && 
-        !sidebar.contains(e.target) && 
-        !toggle?.contains(e.target)) {
-        sidebar.classList.remove('open');
+    if (sidebar.classList.contains('open')) {
+        closeSidebar();
+    } else {
+        openSidebar();
     }
+});
+
+// Close sidebar on overlay tap
+document.getElementById('sidebarOverlay')?.addEventListener('click', closeSidebar);
+
+// Close sidebar when navigating on mobile
+document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+        if (window.innerWidth <= 768) closeSidebar();
+    });
 });
 
 // Reset clients data if corrupted
