@@ -1402,6 +1402,9 @@ const deletePointage = (id) => {
 
 // Commandes
 const renderCommandes = () => {
+    const savedFilterClient = localStorage.getItem('thecol_filter_client') || '';
+    const savedFilterStatut = localStorage.getItem('thecol_filter_statut') || '';
+    
     const commandes = DB.get('commandes') || [];
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
@@ -1474,7 +1477,15 @@ const renderCommandes = () => {
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
                                         <td>${articlesPreview}${cmd.items.length > 2 ? '...' : ''} (${totalItems})</td>
-                                        <td><span class="badge ${badgeClass}">${cmd.statut}</span></td>
+                                        <td class="status-cell">
+                                            <span class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')">${cmd.statut}</span>
+                                            <div class="status-dropdown" id="statusDropdown-${cmd.id}">
+                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'en_attente')">En attente</div>
+                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'produite')">Produite</div>
+                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'livrée')">Livrée</div>
+                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'annulee')">Annulée</div>
+                                            </div>
+                                        </td>
                                         <td>
                                             <button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>
                                             <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
@@ -1663,6 +1674,30 @@ const saveCommande = (id) => {
 };
 
 const editCommande = (id) => showCommandeModal(id);
+
+const showStatusDropdown = (event, id) => {
+    event.stopPropagation();
+    document.querySelectorAll('.status-dropdown.active').forEach(d => {
+        if (d.id !== 'statusDropdown-' + id) d.classList.remove('active');
+    });
+    const dropdown = document.getElementById('statusDropdown-' + id);
+    dropdown.classList.toggle('active');
+};
+
+const updateCommandeStatut = (id, statut) => {
+    const commandes = DB.get('commandes');
+    const index = commandes.findIndex(c => c.id === id);
+    if (index !== -1) {
+        commandes[index].statut = statut;
+        DB.set('commandes', commandes);
+        document.querySelectorAll('.status-dropdown.active').forEach(d => d.classList.remove('active'));
+        renderCommandes();
+    }
+};
+
+document.addEventListener('click', () => {
+    document.querySelectorAll('.status-dropdown.active').forEach(d => d.classList.remove('active'));
+});
 
 const deleteCommande = (id) => {
     if (confirm('Êtes-vous sûr de vouloir supprimer cette commande ?')) {

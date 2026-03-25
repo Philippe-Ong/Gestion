@@ -583,6 +583,50 @@ input[type="checkbox"] {
     color: var(--text-light);
 }
 
+/* Status dropdown */
+.status-cell {
+    position: relative;
+}
+
+.status-badge {
+    cursor: pointer;
+    user-select: none;
+}
+
+.status-badge:hover {
+    opacity: 0.8;
+}
+
+.status-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    z-index: 100;
+    min-width: 120px;
+    overflow: hidden;
+}
+
+.status-dropdown.active {
+    display: block;
+}
+
+.status-option {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.status-option:hover {
+    background: var(--bg-secondary);
+}
+
 /* Color dots */
 .color-dot {
     width: 12px;
