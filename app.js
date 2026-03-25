@@ -369,6 +369,7 @@ const renderStock = () => {
                     <table>
                         <thead>
                             <tr>
+                                <th>Lot</th>
                                 <th>Date prod.</th>
                                 <th>Arôme</th>
                                 <th>Format</th>
@@ -535,10 +536,11 @@ const toggleHistory = () => {
 const renderHistoryTable = () => {
     const history = DB.get('history') || [];
     if (history.length === 0) {
-        return '<tr><td colspan="6" class="text-center">Aucun historique</td></tr>';
+        return '<tr><td colspan="7" class="text-center">Aucun historique</td></tr>';
     }
     return history.map(record => `
         <tr>
+            <td>#${String(record.lotId || record.id).slice(-6)}</td>
             <td>${formatDate(record.productionDate)}</td>
             <td>${record.arome}</td>
             <td>${record.format}</td>
@@ -608,6 +610,7 @@ const saveLot = () => {
     // Add to production history
     history.unshift({
         id: `PROD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        lotId: newId,
         arome,
         format,
         quantity: quantite,
@@ -1746,6 +1749,7 @@ const livrerCommande = (id) => {
     );
     
     let totalDeducted = 0;
+    const lotsUtilises = [];
     
     cmd.items.forEach(item => {
         const arome = aromes.find(a => a.id === item.aromeId);
@@ -1757,16 +1761,19 @@ const livrerCommande = (id) => {
         
         for (let lot of sortedLots) {
             if (normalize(lot.arome) === aromeNom && normalize(lot.format) === formatNom && lot.quantite > 0) {
-                if (lot.quantite >= qtyToDeduct) {
-                    lot.quantite -= qtyToDeduct;
-                    totalDeducted += qtyToDeduct;
-                    qtyToDeduct = 0;
-                    break;
-                } else {
-                    totalDeducted += lot.quantite;
-                    qtyToDeduct -= lot.quantite;
-                    lot.quantite = 0;
-                }
+                const qtyTaken = Math.min(lot.quantite, qtyToDeduct);
+                lotsUtilises.push({
+                    lotId: lot.id,
+                    arome: lot.arome,
+                    format: lot.format,
+                    quantite: qtyTaken
+                });
+                
+                lot.quantite -= qtyTaken;
+                totalDeducted += qtyTaken;
+                qtyToDeduct -= qtyTaken;
+                
+                if (qtyToDeduct <= 0) break;
             }
         }
     });
@@ -1774,6 +1781,10 @@ const livrerCommande = (id) => {
     // Mettre à jour les lots dans la base
     lots = sortedLots.map(l => l).filter(l => l.quantite > 0);
     DB.set('lots', lots);
+    
+    // Stocker les lots utilisés dans la commande
+    commandes[cmdIndex].lotsUtilises = lotsUtilises;
+    DB.set('commandes', commandes);
     
     // Mettre à jour le statut
     updateCommandeStatut(id, 'livrée');
@@ -1877,6 +1888,17 @@ const showCommandeDetails = (id) => {
         </tr>`;
     }).join('');
     
+    const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0 
+        ? commande.lotsUtilises.map(lot => `
+            <tr>
+                <td>#${String(lot.lotId).slice(-6)}</td>
+                <td>${lot.arome}</td>
+                <td>${lot.format}</td>
+                <td>${lot.quantite}</td>
+            </tr>
+        `).join('')
+        : '';
+    
     const totalItems = commande.items.reduce((sum, i) => sum + i.quantite, 0);
     
     modal.show(`Commande #${getCommandeNumero(commande)}`, `
@@ -1898,6 +1920,22 @@ const showCommandeDetails = (id) => {
                     ${itemsHtml}
                 </tbody>
             </table>
+            ${lotsUtilisesHtml ? `
+            <h4 style="margin-top:20px;">Lots utilisés</h4>
+            <table class="details-table">
+                <thead>
+                    <tr>
+                        <th>Lot</th>
+                        <th>Arôme</th>
+                        <th>Format</th>
+                        <th>Quantité</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lotsUtilisesHtml}
+                </tbody>
+            </table>
+            ` : ''}
         </div>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
