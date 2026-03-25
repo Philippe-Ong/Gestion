@@ -1406,8 +1406,12 @@ const deletePointage = (id) => {
 const renderCommandes = () => {
     const savedFilterClient = localStorage.getItem('thecol_filter_client') || '';
     const savedFilterStatut = localStorage.getItem('thecol_filter_statut') || '';
+    const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
     
-    const commandes = DB.get('commandes') || [];
+    const allCommandes = DB.get('commandes') || [];
+    const commandes = showArchives 
+        ? allCommandes.filter(c => c.statut === 'livrée')
+        : allCommandes.filter(c => c.statut !== 'livrée');
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
@@ -1415,32 +1419,47 @@ const renderCommandes = () => {
     let html = `
         <div class="card">
             <div class="card-header">
-                <h3 class="card-title">Liste des commandes</h3>
+                <h3 class="card-title">${showArchives ? 'Archives' : 'Liste des commandes'}</h3>
                 <div class="header-actions">
+                    ${!showArchives ? `
                     <button class="btn btn-secondary" onclick="checkStockAndUpdateCommandes()">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
                         Vérifier stock
                     </button>
+                    ` : ''}
+                    <button class="btn btn-secondary" onclick="toggleArchives()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+                        ${showArchives ? '← Commandes' : 'Archives'}
+                    </button>
+                    ${!showArchives ? `
                     <button class="btn btn-primary" onclick="showCommandeModal()">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                         Nouvelle commande
                     </button>
+                    ` : `
+                    <button class="btn btn-secondary" onclick="exportArchivesExcel()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        Exporter Excel
+                    </button>
+                    `}
                 </div>
             </div>
             
+            ${!showArchives ? `
             <div class="filters">
-                <select id="filterClient" onchange="renderCommandes()">
+                <select id="filterClient" onchange="localStorage.setItem('thecol_filter_client', this.value); renderCommandes()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}">${c.societe || c.nom}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
                 </select>
-                <select id="filterStatut" onchange="renderCommandes()">
+                <select id="filterStatut" onchange="localStorage.setItem('thecol_filter_statut', this.value); renderCommandes()">
                     <option value="">Tous les statuts</option>
-                    <option value="en_attente">En attente</option>
-                    <option value="produite">Produite</option>
-                    <option value="livrée">Livrée</option>
-                    <option value="annulee">Annulée</option>
+                    <option value="en_attente" ${savedFilterStatut === 'en_attente' ? 'selected' : ''}>En attente</option>
+                    <option value="produite" ${savedFilterStatut === 'produite' ? 'selected' : ''}>Produite</option>
+                    <option value="livrée" ${savedFilterStatut === 'livrée' ? 'selected' : ''}>Livrée</option>
+                    <option value="annulee" ${savedFilterStatut === 'annulee' ? 'selected' : ''}>Annulée</option>
                 </select>
             </div>
+            ` : ''}
             
             <div class="table-container" id="commandesTableContainer">
                 <table>
@@ -1507,6 +1526,7 @@ const renderCommandes = () => {
                     </tbody>
                 </table>
             </div>
+            ${!showArchives ? '' : ''}
         </div>
     `;
     
@@ -1726,6 +1746,7 @@ const checkStockAndUpdateCommandes = () => {
     const commandes = DB.get('commandes');
     const lots = DB.get('lots') || [];
     const formats = DB.get('formats');
+    const aromes = DB.get('aromes');
     const now = new Date();
     
     const stockDisponible = {};
@@ -1747,7 +1768,8 @@ const checkStockAndUpdateCommandes = () => {
         const needed = {};
         cmd.items.forEach(item => {
             const format = formats.find(f => f.id === item.formatId);
-            const aromeName = item.aromeId;
+            const arome = aromes.find(a => a.id === item.aromeId);
+            const aromeName = arome?.nom || item.aromeId;
             const formatName = format?.nom || item.formatId;
             const key = `${aromeName}-${formatName}`;
             if (!needed[key]) needed[key] = 0;
@@ -1833,6 +1855,12 @@ const deleteCommande = (id) => {
         showToast('Commande supprimée');
         renderCommandes();
     }
+};
+
+const toggleArchives = () => {
+    const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
+    localStorage.setItem('thecol_show_archives', showArchives ? 'false' : 'true');
+    renderCommandes();
 };
 
 // Archives
