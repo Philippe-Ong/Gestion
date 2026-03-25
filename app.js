@@ -362,7 +362,7 @@ const renderStock = () => {
         
         <div class="card" style="margin-bottom: 24px;">
             <button class="flex items-center gap-2" style="background:none;border:none;cursor:pointer;font-size:16px;font-weight:500;color:var(--text);padding:10px 0;" onclick="toggleHistory()">
-                <span id="historyArrow" style="font-size:12px;">▶</span> Historique de production
+                <span id="historyArrow" style="font-size:12px;">▶</span> Stock
             </button>
             <div id="historyContent" style="display:none;margin-top:16px;">
                 <div class="table-container" style="max-height:300px;overflow-y:auto;">
@@ -538,9 +538,11 @@ const renderHistoryTable = () => {
     if (history.length === 0) {
         return '<tr><td colspan="7" class="text-center">Aucun historique</td></tr>';
     }
-    return history.map(record => `
+    return history.map(record => {
+        const lotNum = record.lotId ? `#${String(record.lotId)}` : 'N/A';
+        return `
         <tr>
-            <td>#${String(record.lotId || record.id).slice(-6)}</td>
+            <td>${lotNum}</td>
             <td>${formatDate(record.productionDate)}</td>
             <td>${record.arome}</td>
             <td>${record.format}</td>
@@ -548,7 +550,7 @@ const renderHistoryTable = () => {
             <td>${new Date(record.dateAdded).toLocaleDateString('fr-CH')}</td>
             <td><button class="btn btn-sm btn-danger" onclick="deleteHistoryRecord('${record.id}')">✕</button></td>
         </tr>
-    `).join('');
+    `}).join('');
 };
 
 const deleteHistoryRecord = (recordId) => {
