@@ -2627,10 +2627,31 @@ const renderParametres = () => {
                     La sauvegarde inclut: employés, aromes, formats, recettes, clients, lots, commandes et pointages.
                 </p>
             </div>
+            
+            <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--danger);">
+                <div class="settings-card-header">
+                    <h3>Réinitialisation</h3>
+                </div>
+                <div style="padding: 12px;">
+                    <button class="btn btn-danger" onclick="resetCounters()">Réinitialiser les compteurs</button>
+                    <p style="margin-top: 8px; font-size: 12px; color: var(--text-light);">
+                        Remet les numéros de lots et de commandes à 1. Cette action est irréversible.
+                    </p>
+                </div>
+            </div>
         </div>
     `;
     
     document.getElementById('content').innerHTML = html;
+};
+
+// Settings - Counters
+const resetCounters = () => {
+    if (confirm('Réinitialiser les compteurs de lots et de commandes? Cette action est irréversible.')) {
+        localStorage.removeItem('thecol_lot_counter');
+        localStorage.removeItem('thecol_compteur_commandes');
+        showToast('Compteurs réinitialisés - les prochain lot sera #000001 et la prochaine commande sera 00001');
+    }
 };
 
 // Settings - Employes
