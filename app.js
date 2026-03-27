@@ -23,6 +23,17 @@ const getCommandeNumero = (commande) => {
     return commande.numero || commande.id.slice(-5);
 };
 
+const getNextBLNumero = () => {
+    let counter = parseInt(localStorage.getItem('thecol_compteur_bl') || '0');
+    counter++;
+    localStorage.setItem('thecol_compteur_bl', counter.toString());
+    return counter.toString().padStart(5, '0');
+};
+
+const getBLNumero = (livraison) => {
+    return livraison.numeroBL || livraison.id.slice(-5);
+};
+
 // Data Storage with Firebase sync
 const DB = {
     firebaseSynced: false,
@@ -189,6 +200,7 @@ const navigateTo = (page) => {
         stock: 'Gestion du stock',
         pointage: 'Pointage',
         commandes: 'Commandes',
+        livraisons: 'Livraisons',
         archives: 'Archives',
         production: 'Planificateur de production',
         inventaire: 'Inventaire',
@@ -1791,6 +1803,15 @@ const livrerCommande = (id) => {
     // Mettre à jour le statut
     updateCommandeStatut(id, 'livrée');
     showToast(`Commande livrée - ${totalDeducted} bouteille(s) déduite(s) du stock`);
+    
+    // Proposer de générer un bulletin de livraison
+    if (confirm('Générer un bulletin de livraison maintenant?')) {
+        const livraison = generateBL(id);
+        if (livraison) {
+            showToast(`BL-${getBLNumero(livraison)} créé`);
+            exportBLExcel(livraison.id);
+        }
+    }
 };
 
 const archiverCommande = (id) => {
@@ -1900,6 +1921,9 @@ const showCommandeDetails = (id) => {
             </tr>
         `).join('')
         : '';
+    
+    const livraisons = DB.get('livraisons') || [];
+    const livraison = livraisons.find(l => l.commandeId === id);
     
     const totalItems = commande.items.reduce((sum, i) => sum + i.quantite, 0);
     
@@ -2078,6 +2102,252 @@ const exportArchivesExcel = () => {
     } else {
         showToast('Erreur: Bibliothèque Excel non chargée', 'error');
     }
+};
+
+// Livraisons / Bulletins de Livraison
+const renderLivraisons = () => {
+    const livraisons = DB.get('livraisons') || [];
+    const commandes = DB.get('commandes') || [];
+    const clients = DB.get('clients') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    
+    const savedFilterYear = localStorage.getItem('thecol_filter_livraison_year') || '';
+    const savedFilterClient = localStorage.getItem('thecol_filter_livraison_client') || '';
+    
+    const years = [...new Set(livraisons.map(l => l.dateBL ? l.dateBL.substring(0, 4) : '2024'))].sort().reverse();
+    
+    const filteredLivraisons = livraisons.filter(l => {
+        const year = l.dateBL ? l.dateBL.substring(0, 4) : '2024';
+        const matchesYear = !savedFilterYear || year === savedFilterYear;
+        const matchesClient = !savedFilterClient || l.clientId === savedFilterClient;
+        return matchesYear && matchesClient;
+    });
+    
+    let html = `
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Bulletins de Livraison</h3>
+            </div>
+            
+            <div class="filters">
+                <select id="filterLivraisonYear" onchange="localStorage.setItem('thecol_filter_livraison_year', this.value); renderLivraisons()">
+                    <option value="">Toutes les années</option>
+                    ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
+                </select>
+                <select id="filterLivraisonClient" onchange="localStorage.setItem('thecol_filter_livraison_client', this.value); renderLivraisons()">
+                    <option value="">Tous les clients</option>
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
+                </select>
+            </div>
+            
+            <div class="table-container" id="livraisonsTableContainer">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>N° BL</th>
+                            <th>N° Commande</th>
+                            <th>Client</th>
+                            <th>Date BL</th>
+                            <th>Articles</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${filteredLivraisons.length === 0 ? '<tr><td colspan="6" class="text-center">Aucun bulletin de livraison</td></tr>' : 
+                          filteredLivraisons.sort((a, b) => new Date(b.dateBL) - new Date(a.dateBL))
+                            .map(liv => {
+                                const commande = commandes.find(c => c.id === liv.commandeId);
+                                const client = clients.find(cl => cl.id === liv.clientId);
+                                const totalItems = liv.lignes.reduce((sum, l) => sum + l.quantite, 0);
+                                const articlesPreview = liv.lignes.slice(0, 2).map(l => {
+                                    const a = aromes.find(a => a.id === l.aromeId);
+                                    const f = formats.find(f => f.id === l.formatId);
+                                    return `${l.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+                                }).join(', ');
+                                
+                                return `
+                                    <tr>
+                                        <td>BL-${getBLNumero(liv)}</td>
+                                        <td>#${commande ? getCommandeNumero(commande) : liv.commandeId.slice(-5)}</td>
+                                        <td>${client?.societe || client?.nom || 'N/A'}</td>
+                                        <td>${formatDate(liv.dateBL)}</td>
+                                        <td>${articlesPreview}${liv.lignes.length > 2 ? '...' : ''} (${totalItems})</td>
+                                        <td>
+                                            <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
+                                            <button class="btn btn-sm btn-primary" onclick="exportBLExcel('${liv.id}')">Export Excel</button>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    
+    document.getElementById('content').innerHTML = html;
+};
+
+const showLivraisonDetails = (id) => {
+    const livraisons = DB.get('livraisons') || [];
+    const clients = DB.get('clients') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const commandes = DB.get('commandes') || [];
+    
+    const livraison = livraisons.find(l => l.id === id);
+    if (!livraison) return;
+    
+    const client = clients.find(c => c.id === livraison.clientId);
+    const commande = commandes.find(c => c.id === livraison.commandeId);
+    
+    const lignesHtml = livraison.lignes.map(l => {
+        const a = aromes.find(a => a.id === l.aromeId);
+        const f = formats.find(f => f.id === l.formatId);
+        return `<tr>
+            <td>${a?.nom || '?'}</td>
+            <td>${f?.nom || '?'}</td>
+            <td>${l.quantite}</td>
+        </tr>`;
+    }).join('');
+    
+    const totalItems = livraison.lignes.reduce((sum, l) => sum + l.quantite, 0);
+    
+    modal.show(`BL #${getBLNumero(livraison)}`, `
+        <div class="commande-details">
+            <p><strong>Client:</strong> ${client?.societe || client?.nom || 'N/A'}</p>
+            <p><strong>Date BL:</strong> ${formatDate(livraison.dateBL)}</p>
+            <p><strong>N° Commande:</strong> #${commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5)}</p>
+            <p><strong>Total:</strong> ${totalItems} articles</p>
+            <table class="details-table">
+                <thead>
+                    <tr>
+                        <th>Arôme</th>
+                        <th>Format</th>
+                        <th>Quantité</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lignesHtml}
+                </tbody>
+            </table>
+        </div>
+    `, `
+        <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
+        <button class="btn btn-primary" onclick="exportBLExcel('${id}')">Export Excel</button>
+    `);
+};
+
+const generateBL = (commandeId) => {
+    const commandes = DB.get('commandes') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    
+    const commande = commandes.find(c => c.id === commandeId);
+    if (!commande) {
+        showToast('Commande non trouvée', 'error');
+        return null;
+    }
+    
+    const lignes = commande.items.map(item => {
+        const a = aromes.find(ar => ar.id === item.aromeId);
+        const f = formats.find(fmt => fmt.id === item.formatId);
+        return {
+            aromeId: item.aromeId,
+            aromeNom: a?.nom || item.aromeId,
+            formatId: item.formatId,
+            formatNom: f?.nom || item.formatId,
+            quantite: item.quantite
+        };
+    });
+    
+    const livraison = {
+        id: generateId(),
+        numeroBL: getNextBLNumero(),
+        commandeId: commandeId,
+        clientId: commande.clientId,
+        dateBL: getLocalDateISOString(),
+        lignes: lignes,
+        retours: [],
+        facturationMode: '',
+        notes: '',
+        signatureNom: ''
+    };
+    
+    const livraisons = DB.get('livraisons') || [];
+    livraisons.push(livraison);
+    DB.set('livraisons', livraisons);
+    
+    return livraison;
+};
+
+const exportBLExcel = (livraisonId) => {
+    const livraisons = DB.get('livraisons') || [];
+    const clients = DB.get('clients') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const commandes = DB.get('commandes') || [];
+    
+    const livraison = livraisons.find(l => l.id === livraisonId);
+    if (!livraison) {
+        showToast('Livraison non trouvée', 'error');
+        return;
+    }
+    
+    const client = clients.find(c => c.id === livraison.clientId);
+    const commande = commandes.find(c => c.id === livraison.commandeId);
+    
+    if (typeof XLSX === 'undefined') {
+        showToast('Erreur: Bibliothèque Excel non chargée', 'error');
+        return;
+    }
+    
+    const wsData = [
+        ['THÉCOL GESTION', '', '', '', '', ''],
+        ['Bulletin de Livraison', '', '', '', '', ''],
+        ['', '', '', '', '', ''],
+        ['N° BL:', `BL-${getBLNumero(livraison)}`, '', '', 'Date:', livraison.dateBL],
+        ['', '', '', '', '', ''],
+        ['Client:', client?.societe || client?.nom || 'N/A', '', '', '', ''],
+        ['Adresse:', `${client?.adresse || ''} ${client?.npa || ''} ${client?.localite || ''}`.trim(), '', '', '', ''],
+        ['', '', '', '', '', ''],
+        ['N° Commande:', commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5), '', '', '', ''],
+        ['', '', '', '', '', ''],
+        ['LIGNES DE LIVRAISON', '', '', '', '', ''],
+        ['QTT', 'Description', 'Format cl', '', '', ''],
+        ...livraison.lignes.map(l => {
+            const a = aromes.find(ar => ar.id === l.aromeId);
+            const f = formats.find(fmt => fmt.id === l.formatId);
+            return [l.quantite.toString(), a?.nom || l.aromeId, f?.contenanceCl || l.formatId, '', '', ''];
+        }),
+        ['', '', '', '', '', ''],
+        ['Total articles:', livraison.lignes.reduce((s, l) => s + l.quantite, 0).toString(), '', '', '', ''],
+        ['', '', '', '', '', ''],
+        ['RETOURS CAISSES', '', '', '', '', ''],
+        ['Ancienne caisse', '', 'Nouvelle caisse', '', 'Livrée', 'Retour'],
+        ...(livraison.retours || []).map(r => [r.ancienneCaisse || '', '', r.nouvelleCaisse || '', '', r.livree || '', r.retour || '']),
+        ['', '', '', '', '', ''],
+        ['FACTURATION', '', '', '', '', ''],
+        ['Email', '', '', '', '', ''],
+        ['Poste', '', '', '', '', ''],
+        ['Autre', '', '', '', '', ''],
+        ['', '', '', '', '', ''],
+        ['SIGNATURE', '', '', '', '', ''],
+        ['Nom:', '', '', '', '', ''],
+        ['', '', '', '', '', ''],
+        ['', '', '', '', '', ''],
+    ];
+    
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    ws['!cols'] = [
+        {wch: 10}, {wch: 25}, {wch: 12}, {wch: 10}, {wch: 10}, {wch: 10}
+    ];
+    
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'BL');
+    XLSX.writeFile(wb, `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`);
+    showToast('Bulletin de livraison exporté');
 };
 
 // Production Planner
