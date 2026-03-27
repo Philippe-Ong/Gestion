@@ -213,6 +213,7 @@ const navigateTo = (page) => {
         stock: renderStock,
         pointage: renderPointage,
         commandes: renderCommandes,
+        livraisons: renderLivraisons,
         archives: renderArchives,
         production: renderProduction,
         inventaire: renderInventaire,
