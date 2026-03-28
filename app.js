@@ -2283,11 +2283,27 @@ const generateBL = (commandeId) => {
     return livraison;
 };
 
+const normalizeStr = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').trim();
+
+const matchProductRow = (aromeNom, fmtLabel, templateRows) => {
+    const nArome = normalizeStr(aromeNom);
+    const nFmt = normalizeStr(fmtLabel);
+    for (const [key, row] of Object.entries(templateRows)) {
+        const [tArome, tFmt] = key.split('|');
+        if (tFmt !== nFmt) continue;
+        if (tArome === nArome) return row;
+    }
+    for (const [key, row] of Object.entries(templateRows)) {
+        const [tArome, tFmt] = key.split('|');
+        if (tFmt !== nFmt) continue;
+        if (tArome.replace(/s/g, '') === nArome.replace(/s/g, '')) return row;
+    }
+    return null;
+};
+
 const exportBLExcel = (livraisonId) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
-    const aromes = DB.get('aromes') || [];
-    const formats = DB.get('formats') || [];
     const commandes = DB.get('commandes') || [];
     
     const livraison = livraisons.find(l => l.id === livraisonId);
@@ -2297,58 +2313,88 @@ const exportBLExcel = (livraisonId) => {
     }
     
     const client = clients.find(c => c.id === livraison.clientId);
-    const commande = commandes.find(c => c.id === livraison.commandeId);
     
     if (typeof XLSX === 'undefined') {
         showToast('Erreur: Bibliothèque Excel non chargée', 'error');
         return;
     }
     
-    const wsData = [
-        ['THÉCOL GESTION', '', '', '', '', ''],
-        ['Bulletin de Livraison', '', '', '', '', ''],
-        ['', '', '', '', '', ''],
-        ['N° BL:', `BL-${getBLNumero(livraison)}`, '', '', 'Date:', livraison.dateBL],
-        ['', '', '', '', '', ''],
-        ['Client:', client?.societe || client?.nom || 'N/A', '', '', '', ''],
-        ['Adresse:', `${client?.adresse || ''} ${client?.npa || ''} ${client?.localite || ''}`.trim(), '', '', '', ''],
-        ['', '', '', '', '', ''],
-        ['N° Commande:', commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5), '', '', '', ''],
-        ['', '', '', '', '', ''],
-        ['LIGNES DE LIVRAISON', '', '', '', '', ''],
-        ['QTT', 'Description', 'Format cl', '', '', ''],
-        ...livraison.lignes.map(l => {
-            const a = aromes.find(ar => ar.id === l.aromeId);
-            const f = formats.find(fmt => fmt.id === l.formatId);
-            return [l.quantite.toString(), a?.nom || l.aromeId, f?.contenanceCl || l.formatId, '', '', ''];
-        }),
-        ['', '', '', '', '', ''],
-        ['Total articles:', livraison.lignes.reduce((s, l) => s + l.quantite, 0).toString(), '', '', '', ''],
-        ['', '', '', '', '', ''],
-        ['RETOURS CAISSES', '', '', '', '', ''],
-        ['Ancienne caisse', '', 'Nouvelle caisse', '', 'Livrée', 'Retour'],
-        ...(livraison.retours || []).map(r => [r.ancienneCaisse || '', '', r.nouvelleCaisse || '', '', r.livree || '', r.retour || '']),
-        ['', '', '', '', '', ''],
-        ['FACTURATION', '', '', '', '', ''],
-        ['Email', '', '', '', '', ''],
-        ['Poste', '', '', '', '', ''],
-        ['Autre', '', '', '', '', ''],
-        ['', '', '', '', '', ''],
-        ['SIGNATURE', '', '', '', '', ''],
-        ['Nom:', '', '', '', '', ''],
-        ['', '', '', '', '', ''],
-        ['', '', '', '', '', ''],
-    ];
+    const formats = DB.get('formats') || [];
+    const lignesData = livraison.lignes.map(l => {
+        const fmt = formats.find(f => f.id === l.formatId);
+        const fmtLabel = fmt ? fmt.contenanceCl + ' cl' : l.formatNom;
+        return { aromeNom: l.aromeNom, fmtLabel, quantite: l.quantite };
+    });
     
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    ws['!cols'] = [
-        {wch: 10}, {wch: 25}, {wch: 12}, {wch: 10}, {wch: 10}, {wch: 10}
-    ];
+    const merged = {};
+    lignesData.forEach(l => {
+        const k = normalizeStr(l.aromeNom) + '|' + normalizeStr(l.fmtLabel);
+        merged[k] = (merged[k] || 0) + l.quantite;
+    });
     
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'BL');
-    XLSX.writeFile(wb, `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`);
-    showToast('Bulletin de livraison exporté');
+    const templatePath = 'templates/bl_template.xlsx';
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', templatePath, true);
+    xhr.responseType = 'arraybuffer';
+    
+    xhr.onload = () => {
+        if (xhr.status !== 200) {
+            showToast('Template non trouvé: ' + templatePath, 'error');
+            return;
+        }
+        
+        const wb = XLSX.read(xhr.response, { type: 'array' });
+        const ws = wb.Sheets['Bulletin de livraison'];
+        if (!ws) {
+            showToast('Feuille "Bulletin de livraison" introuvable', 'error');
+            return;
+        }
+        
+        const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:F60');
+        
+        const rowMapping = {};
+        for (let r = range.s.r; r <= range.e.r; r++) {
+            const cellC = ws[XLSX.utils.encode_cell({ r, c: 2 })];
+            const cellD = ws[XLSX.utils.encode_cell({ r, c: 3 })];
+            if (cellC && cellC.v && cellD && cellD.v) {
+                const key = normalizeStr(String(cellC.v)) + '|' + normalizeStr(String(cellD.v));
+                rowMapping[key] = r + 1;
+            }
+        }
+        
+        Object.entries(merged).forEach(([key, qty]) => {
+            const [aromeNom, fmtLabel] = key.split('|');
+            const row = matchProductRow(aromeNom, fmtLabel, rowMapping);
+            if (row) {
+                ws['A' + row] = { t: 'n', v: qty };
+            }
+        });
+        
+        ws['E3'] = { t: 's', v: `BL-${getBLNumero(livraison)}` };
+        ws['F5'] = { t: 's', v: livraison.dateBL };
+        
+        if (client) {
+            ws['F7'] = { t: 's', v: client.societe || client.nom || '' };
+            ws['F8'] = { t: 's', v: client.adresse || '' };
+            ws['F9'] = { t: 's', v: `${client.npa || ''} ${client.localite || ''}`.trim() };
+        }
+        
+        if (livraison.facturationMode) {
+            const factRow = livraison.facturationMode === 'email' ? 47 :
+                           livraison.facturationMode === 'poste' ? 48 : 49;
+            ws['D' + factRow] = { t: 's', v: '☑' };
+        }
+        
+        const filename = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
+        XLSX.writeFile(wb, filename);
+        showToast('Bulletin de livraison exporté');
+    };
+    
+    xhr.onerror = () => {
+        showToast('Erreur chargement template', 'error');
+    };
+    
+    xhr.send();
 };
 
 // Production Planner
