@@ -2500,6 +2500,22 @@ const exportBLExcel = (livraisonId) => {
                 const clientAdresse = client ? (client.adresse || '') : '';
                 const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
 
+                const promptNum = (label) => {
+                    const raw = prompt(label);
+                    if (raw === null) return null;
+                    const n = parseInt(raw, 10);
+                    return isNaN(n) || n < 0 ? 0 : n;
+                };
+                const CaisseRow = (label) => promptNum(label);
+                const cVerteLivree = CaisseRow('Caisses vertes livrées (IFCO)');
+                if (cVerteLivree === null) { showToast('Export annulé', 'warning'); return; }
+                const cNoireLivree = CaisseRow('Caisses noires livrées (IFCO)');
+                if (cNoireLivree === null) { showToast('Export annulé', 'warning'); return; }
+                const cVerteRetour = CaisseRow('Caisses vertes retour (IFCO)');
+                if (cVerteRetour === null) { showToast('Export annulé', 'warning'); return; }
+                const cNoireRetour = CaisseRow('Caisses noires retour (IFCO)');
+                if (cNoireRetour === null) { showToast('Export annulé', 'warning'); return; }
+
                 const setCellText = (cell, text) => {
                     cell.setAttribute('t', 's');
                     const fEls = cell.getElementsByTagName('f');
@@ -2575,9 +2591,14 @@ const exportBLExcel = (livraisonId) => {
                         }
                     }
 
-                    if (rowNum === 4) {
-                        const cellF = findCell(row, 'F4');
-                        if (cellF) setCellText(cellF, blNum);
+                    if (rowNum === 2) {
+                        let cellC2 = findCell(row, 'C2');
+                        if (!cellC2) {
+                            cellC2 = sheetDoc.createElementNS(NS, 'c');
+                            cellC2.setAttribute('r', 'C2');
+                            row.appendChild(cellC2);
+                        }
+                        setCellText(cellC2, blNum);
                     }
 
                     if (rowNum === 5) {
@@ -2620,6 +2641,36 @@ const exportBLExcel = (livraisonId) => {
                                 setCellText(cellD, ' ');
                             }
                         }
+                    }
+
+                    if (rowNum >= 48 && rowNum <= 51) {
+                        const caisseVals = { 48: cVerteLivree, 49: cNoireLivree, 50: cVerteRetour, 51: cNoireRetour };
+                        const qty = caisseVals[rowNum] !== undefined ? caisseVals[rowNum] : 0;
+                        const cellA = findCell(row, `A${rowNum}`);
+                        if (cellA) {
+                            let vA = cellA.getElementsByTagName('v')[0];
+                            if (vA) {
+                                vA.textContent = qty;
+                            } else {
+                                vA = sheetDoc.createElementNS(NS, 'v');
+                                vA.textContent = qty;
+                                cellA.appendChild(vA);
+                            }
+                            cellA.removeAttribute('t');
+                        }
+                    }
+
+                    if (rowNum >= 57 && rowNum <= 59) {
+                        const clearCols = ['D', 'E', 'F'];
+                        clearCols.forEach(col => {
+                            const cell = findCell(row, `${col}${rowNum}`);
+                            if (cell) {
+                                const vEl = cell.getElementsByTagName('v')[0];
+                                if (vEl) vEl.textContent = '';
+                                cell.removeAttribute('t');
+                                cell.removeAttribute('vm');
+                            }
+                        });
                     }
                 }
 
