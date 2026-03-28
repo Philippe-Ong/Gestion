@@ -2369,6 +2369,7 @@ const generateBL = (commandeId) => {
 const ROW_MAP = {
     'Poire à Botzi|25 cl': 15,
     'Poire à Botzi|50 cl': 16,
+    'Poire à Botzi|100 cl': 17,
     'Mûres Sauvages|25 cl': 21,
     'Mûres Sauvages|50 cl': 22,
     'Mûres Sauvages|100 cl': 23,
@@ -2385,6 +2386,7 @@ const ROW_MAP = {
     'Sureau|100 cl': 32,
     'Coing|25 cl': 33,
     'Coing|50 cl': 34,
+    'Coing|100 cl': 35,
     'Edition Noël|25 cl': 36,
     'Edition Noël|50 cl': 37,
     'Edition Noël|100 cl': 38
@@ -2519,6 +2521,11 @@ const exportBLExcel = (livraisonId) => {
                 const allRows = sheetDoc.getElementsByTagName('row');
                 const matchedKeys = new Set();
 
+                Object.entries(ROW_MAP).forEach(([mapKey, rNum]) => {
+                    const item = Object.values(merged).find(m => `${m.aromeNom}|${m.formatNom}` === mapKey);
+                    if (item) matchedKeys.add(mapKey);
+                });
+
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowNum = parseInt(row.getAttribute('r'));
@@ -2527,23 +2534,29 @@ const exportBLExcel = (livraisonId) => {
                         const cellA = findCell(row, `A${rowNum}`);
                         if (!cellA) continue;
 
-                        for (const item of Object.values(merged)) {
-                            const mapKey = `${item.aromeNom}|${item.formatNom}`;
-                            if (ROW_MAP[mapKey] === rowNum) {
-                                let vA = cellA.getElementsByTagName('v')[0];
-                                if (vA) {
-                                    vA.textContent = item.quantite;
-                                } else {
-                                    vA = sheetDoc.createElementNS(NS, 'v');
-                                    vA.textContent = item.quantite;
-                                    cellA.appendChild(vA);
-                                }
-                                row.removeAttribute('hidden');
-                                matchedKeys.add(mapKey);
-                                const cellB = findCell(row, `B${rowNum}`);
-                                if (cellB) setCellText(cellB, 'ThéCol - Thé Froid Artisanal');
-                                break;
+                        const mapKeyForRow = Object.entries(ROW_MAP).find(([, r]) => r === rowNum)?.[0];
+                        if (!mapKeyForRow) continue;
+
+                        const item = Object.values(merged).find(m => `${m.aromeNom}|${m.formatNom}` === mapKeyForRow);
+                        if (item) {
+                            let vA = cellA.getElementsByTagName('v')[0];
+                            if (vA) {
+                                vA.textContent = item.quantite;
+                            } else {
+                                vA = sheetDoc.createElementNS(NS, 'v');
+                                vA.textContent = item.quantite;
+                                cellA.appendChild(vA);
                             }
+                            row.removeAttribute('hidden');
+                            matchedKeys.add(mapKeyForRow);
+                            const cellB = findCell(row, `B${rowNum}`);
+                            if (cellB) setCellText(cellB, 'ThéCol - Thé Froid Artisanal');
+                        } else {
+                            row.setAttribute('hidden', '1');
+                            const vA = cellA.getElementsByTagName('v')[0];
+                            if (vA) vA.textContent = '0';
+                            const cellB = findCell(row, `B${rowNum}`);
+                            if (cellB) setCellText(cellB, ' ');
                         }
                     }
 
