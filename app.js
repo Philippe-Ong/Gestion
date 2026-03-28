@@ -2356,11 +2356,10 @@ const exportBLExcel = (livraisonId) => {
                 ssFile ? ssFile.async('string') : Promise.resolve(null)
             ]).then(([sheetXml, ssXml]) => {
                 let ssStrings = [];
-                let ssModified = false;
 
                 if (ssXml) {
-                    const parser = new DOMParser();
-                    const ssDoc = parser.parseFromString(ssXml, 'text/xml');
+                    const ssParser = new DOMParser();
+                    const ssDoc = ssParser.parseFromString(ssXml, 'text/xml');
                     const siEls = ssDoc.getElementsByTagName('si');
                     for (let i = 0; i < siEls.length; i++) {
                         const t = siEls[i].getElementsByTagName('t')[0];
@@ -2373,10 +2372,11 @@ const exportBLExcel = (livraisonId) => {
                     if (idx === -1) {
                         idx = ssStrings.length;
                         ssStrings.push(text);
-                        ssModified = true;
                     }
                     return idx;
                 };
+
+                const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
                 const parser = new DOMParser();
                 const sheetDoc = parser.parseFromString(sheetXml, 'text/xml');
@@ -2384,40 +2384,65 @@ const exportBLExcel = (livraisonId) => {
 
                 const blNum = `BL-${getBLNumero(livraison)}`;
                 const blDate = livraison.dateBL;
-                const clientName = client ? (client.societe || client.nom || '') : '';
+                const clientSociete = client ? (client.societe || '') : '';
+                const clientContact = client ? (client.nom || '') : '';
                 const clientAdresse = client ? (client.adresse || '') : '';
                 const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
+
+                const setCellText = (cell, text) => {
+                    cell.setAttribute('t', 's');
+                    const fEls = cell.getElementsByTagName('f');
+                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
+                    const idx = getOrAddSS(text);
+                    let vEl = cell.getElementsByTagName('v')[0];
+                    if (vEl) {
+                        vEl.textContent = idx;
+                    } else {
+                        vEl = sheetDoc.createElementNS(NS, 'v');
+                        vEl.textContent = idx;
+                        cell.appendChild(vEl);
+                    }
+                };
+
+                const findCell = (row, ref) => {
+                    const cells = row.getElementsByTagName('c');
+                    for (let c = 0; c < cells.length; c++) {
+                        if (cells[c].getAttribute('r') === ref) return cells[c];
+                    }
+                    return null;
+                };
+
+                const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').replace(/s+/g, '');
 
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowNum = parseInt(row.getAttribute('r'));
 
-                    if (rowNum >= 15 && rowNum <= 44) {
-                        const cells = row.getElementsByTagName('c');
-                        let cellA = null, cellC = null, cellD = null;
-                        for (let c = 0; c < cells.length; c++) {
-                            const ref = cells[c].getAttribute('r');
-                            if (ref === `A${rowNum}`) cellA = cells[c];
-                            if (ref === `C${rowNum}`) cellC = cells[c];
-                            if (ref === `D${rowNum}`) cellD = cells[c];
-                        }
+                    if (rowNum >= 15 && rowNum <= 38) {
+                        const cellA = findCell(row, `A${rowNum}`);
+                        const cellC = findCell(row, `C${rowNum}`);
+                        const cellD = findCell(row, `D${rowNum}`);
 
                         if (cellA && cellC && cellD) {
                             const vC = cellC.getElementsByTagName('v')[0];
                             const vD = cellD.getElementsByTagName('v')[0];
-                            if (vC && vD) {
+                            if (vC && vD && cellC.getAttribute('t') === 's' && cellD.getAttribute('t') === 's') {
                                 const aromeIdx = parseInt(vC.textContent);
                                 const formatIdx = parseInt(vD.textContent);
                                 const aromeName = ssStrings[aromeIdx] || '';
                                 const formatName = ssStrings[formatIdx] || '';
 
-                                let matched = false;
                                 for (const item of Object.values(merged)) {
-                                    if (item.aromeNom.trim().toLowerCase() === aromeName.trim().toLowerCase() &&
-                                        item.formatNom.trim().toLowerCase() === formatName.trim().toLowerCase()) {
-                                        const vA = cellA.getElementsByTagName('v')[0];
-                                        if (vA) vA.textContent = item.quantite;
-                                        matched = true;
+                                    if (norm(item.aromeNom) === norm(aromeName) && norm(item.formatNom) === norm(formatName)) {
+                                        let vA = cellA.getElementsByTagName('v')[0];
+                                        if (vA) {
+                                            vA.textContent = item.quantite;
+                                        } else {
+                                            vA = sheetDoc.createElementNS(NS, 'v');
+                                            vA.textContent = item.quantite;
+                                            cellA.appendChild(vA);
+                                        }
+                                        row.removeAttribute('hidden');
                                         break;
                                     }
                                 }
@@ -2425,130 +2450,60 @@ const exportBLExcel = (livraisonId) => {
                         }
                     }
 
-                    if (rowNum === 3) {
-                        const cells = row.getElementsByTagName('c');
-                        let cellE = null;
-                        for (let c = 0; c < cells.length; c++) {
-                            if (cells[c].getAttribute('r') === 'E3') { cellE = cells[c]; break; }
-                        }
-                        if (cellE) {
-                            const newIdx = getOrAddSS(blNum);
-                            cellE.setAttribute('t', 's');
-                            const vEl = cellE.getElementsByTagName('v')[0];
-                            if (vEl) vEl.textContent = newIdx; else {
-                                const v = sheetDoc.createElement('v');
-                                v.textContent = newIdx;
-                                cellE.appendChild(v);
-                            }
-                        }
+                    if (rowNum === 4) {
+                        const cellF = findCell(row, 'F4');
+                        if (cellF) setCellText(cellF, blNum);
                     }
 
                     if (rowNum === 5) {
-                        const cells = row.getElementsByTagName('c');
-                        let cellF = null;
-                        for (let c = 0; c < cells.length; c++) {
-                            if (cells[c].getAttribute('r') === 'F5') { cellF = cells[c]; break; }
-                        }
-                        if (cellF) {
-                            const newIdx = getOrAddSS(blDate);
-                            cellF.setAttribute('t', 's');
-                            const vEl = cellF.getElementsByTagName('v')[0];
-                            if (vEl) vEl.textContent = newIdx; else {
-                                const v = sheetDoc.createElement('v');
-                                v.textContent = newIdx;
-                                cellF.appendChild(v);
-                            }
-                        }
+                        const cellF = findCell(row, 'F5');
+                        if (cellF) setCellText(cellF, blDate);
                     }
 
-                    if (rowNum === 7 && clientName) {
-                        const cells = row.getElementsByTagName('c');
-                        let cellF = null;
-                        for (let c = 0; c < cells.length; c++) {
-                            if (cells[c].getAttribute('r') === 'F7') { cellF = cells[c]; break; }
-                        }
-                        if (cellF) {
-                            const newIdx = getOrAddSS(clientName);
-                            cellF.setAttribute('t', 's');
-                            const vEl = cellF.getElementsByTagName('v')[0];
-                            if (vEl) vEl.textContent = newIdx; else {
-                                const v = sheetDoc.createElement('v');
-                                v.textContent = newIdx;
-                                cellF.appendChild(v);
-                            }
-                        }
+                    if (rowNum === 7 && clientSociete) {
+                        const cellF = findCell(row, 'F7');
+                        if (cellF) setCellText(cellF, clientSociete);
                     }
 
-                    if (rowNum === 8 && clientAdresse) {
-                        const cells = row.getElementsByTagName('c');
-                        let cellF = null;
-                        for (let c = 0; c < cells.length; c++) {
-                            if (cells[c].getAttribute('r') === 'F8') { cellF = cells[c]; break; }
-                        }
-                        if (cellF) {
-                            const newIdx = getOrAddSS(clientAdresse);
-                            cellF.setAttribute('t', 's');
-                            const vEl = cellF.getElementsByTagName('v')[0];
-                            if (vEl) vEl.textContent = newIdx; else {
-                                const v = sheetDoc.createElement('v');
-                                v.textContent = newIdx;
-                                cellF.appendChild(v);
-                            }
-                        }
+                    if (rowNum === 8 && clientContact) {
+                        const cellF = findCell(row, 'F8');
+                        if (cellF) setCellText(cellF, clientContact);
                     }
 
-                    if (rowNum === 9 && clientLocalite) {
-                        const cells = row.getElementsByTagName('c');
-                        let cellF = null;
-                        for (let c = 0; c < cells.length; c++) {
-                            if (cells[c].getAttribute('r') === 'F9') { cellF = cells[c]; break; }
-                        }
-                        if (cellF) {
-                            const newIdx = getOrAddSS(clientLocalite);
-                            cellF.setAttribute('t', 's');
-                            const vEl = cellF.getElementsByTagName('v')[0];
-                            if (vEl) vEl.textContent = newIdx; else {
-                                const v = sheetDoc.createElement('v');
-                                v.textContent = newIdx;
-                                cellF.appendChild(v);
-                            }
-                        }
+                    if (rowNum === 9 && clientAdresse) {
+                        const cellF = findCell(row, 'F9');
+                        if (cellF) setCellText(cellF, clientAdresse);
+                    }
+
+                    if (rowNum === 10 && clientLocalite) {
+                        const cellF = findCell(row, 'F10');
+                        if (cellF) setCellText(cellF, clientLocalite);
+                    }
+
+                    if (rowNum === 54 && clientSociete) {
+                        const cellA = findCell(row, 'A54');
+                        if (cellA) setCellText(cellA, clientSociete);
                     }
 
                     if (rowNum >= 47 && rowNum <= 49 && livraison.facturationMode) {
                         const expectedMode = rowNum === 47 ? 'email' : rowNum === 48 ? 'poste' : 'autre';
                         if (livraison.facturationMode === expectedMode) {
-                            const cells = row.getElementsByTagName('c');
-                            let cellD = null;
-                            for (let c = 0; c < cells.length; c++) {
-                                if (cells[c].getAttribute('r') === `D${rowNum}`) { cellD = cells[c]; break; }
-                            }
-                            if (cellD) {
-                                const newIdx = getOrAddSS('☑');
-                                cellD.setAttribute('t', 's');
-                                const vEl = cellD.getElementsByTagName('v')[0];
-                                if (vEl) vEl.textContent = newIdx; else {
-                                    const v = sheetDoc.createElement('v');
-                                    v.textContent = newIdx;
-                                    cellD.appendChild(v);
-                                }
-                            }
+                            const cellD = findCell(row, `D${rowNum}`);
+                            if (cellD) setCellText(cellD, 'x');
                         }
                     }
                 }
 
                 let newSheetXml = new XMLSerializer().serializeToString(sheetDoc);
 
-                if (ssModified) {
-                    let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
-                    ssContent += `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
-                    ssStrings.forEach(s => {
-                        const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-                        ssContent += `<si><t xml:space="preserve">${esc}</t></si>`;
-                    });
-                    ssContent += '</sst>';
-                    zip.file('xl/sharedStrings.xml', ssContent);
-                }
+                let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+                ssContent += `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
+                ssStrings.forEach(s => {
+                    const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    ssContent += `<si><t xml:space="preserve">${esc}</t></si>`;
+                });
+                ssContent += '</sst>';
+                zip.file('xl/sharedStrings.xml', ssContent);
 
                 zip.file('xl/worksheets/sheet1.xml', newSheetXml);
 
