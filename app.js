@@ -2421,7 +2421,11 @@ const exportBLExcel = (livraisonId) => {
         }
         const fmtLabel = fmt.contenanceCl + ' cl';
         const key = `${l.aromeNom || ''}|${fmtLabel}`;
-        merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
+        if (merged[key]) {
+            merged[key].quantite += l.quantite;
+        } else {
+            merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
+        }
     });
 
     if (skippedCount > 0) {
@@ -2518,13 +2522,13 @@ const exportBLExcel = (livraisonId) => {
                     return null;
                 };
 
+                const normalize = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+                const itemKeyOf = (m) => `${normalize(m.aromeNom)}|${m.formatNom}`;
+
                 const allRows = sheetDoc.getElementsByTagName('row');
                 const matchedKeys = new Set();
-
-                Object.entries(ROW_MAP).forEach(([mapKey, rNum]) => {
-                    const item = Object.values(merged).find(m => `${m.aromeNom}|${m.formatNom}` === mapKey);
-                    if (item) matchedKeys.add(mapKey);
-                });
+                const mergedNormToKey = {};
+                Object.values(merged).forEach(m => { mergedNormToKey[itemKeyOf(m)] = m; });
 
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
@@ -2534,10 +2538,13 @@ const exportBLExcel = (livraisonId) => {
                         const cellA = findCell(row, `A${rowNum}`);
                         if (!cellA) continue;
 
-                        const mapKeyForRow = Object.entries(ROW_MAP).find(([, r]) => r === rowNum)?.[0];
-                        if (!mapKeyForRow) continue;
+                        const mapEntry = Object.entries(ROW_MAP).find(([, r]) => r === rowNum);
+                        if (!mapEntry) continue;
+                        const [mapKeyForRow, ] = mapEntry;
+                        const [mapArome, mapFormat] = mapKeyForRow.split('|');
+                        const normArome = normalize(mapArome);
+                        const item = mergedNormToKey[`${normArome}|${mapFormat}`];
 
-                        const item = Object.values(merged).find(m => `${m.aromeNom}|${m.formatNom}` === mapKeyForRow);
                         if (item) {
                             let vA = cellA.getElementsByTagName('v')[0];
                             if (vA) {
@@ -2548,7 +2555,7 @@ const exportBLExcel = (livraisonId) => {
                                 cellA.appendChild(vA);
                             }
                             row.removeAttribute('hidden');
-                            matchedKeys.add(mapKeyForRow);
+                            matchedKeys.add(itemKeyOf(item));
                             const cellB = findCell(row, `B${rowNum}`);
                             if (cellB) setCellText(cellB, 'ThéCol - Thé Froid Artisanal');
                         } else {
@@ -2613,9 +2620,9 @@ const exportBLExcel = (livraisonId) => {
                     ? serialized
                     : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + serialized;
 
-                const unmatched = Object.keys(merged).filter(k => !matchedKeys.has(k));
+                const unmatched = Object.values(merged).filter(m => !matchedKeys.has(itemKeyOf(m)));
                 if (unmatched.length > 0) {
-                    const labels = unmatched.slice(0, 3).map(k => `${k} (${merged[k].quantite}x)`).join(', ');
+                    const labels = unmatched.slice(0, 3).map(m => `${m.aromeNom} ${m.formatNom} (${m.quantite}x)`).join(', ');
                     const suffix = unmatched.length > 3 ? ` +${unmatched.length - 3}` : '';
                     showToast(`Lignes non reconnues: ${labels}${suffix}`, 'warning');
                 }
