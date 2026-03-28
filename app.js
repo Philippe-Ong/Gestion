@@ -2305,11 +2305,13 @@ const exportBLExcel = (livraisonId) => {
     const merged = {};
     lignesFiltered.forEach(l => {
         const fmt = formats.find(f => f.id === l.formatId);
-        if (!fmt) return;
+        if (!fmt) { console.warn('DEBUG: format non trouvé pour', l); return; }
         const fmtLabel = fmt.contenanceCl + ' cl';
         const key = `${l.aromeNom || ''}|${fmtLabel}`;
         merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
     });
+    console.log('DEBUG merged:', JSON.stringify(merged, null, 2));
+    console.log('DEBUG formats DB:', formats);
 
     const templatePath = 'templates/bl_template.xlsx';
     const xhr = new XMLHttpRequest();
@@ -2347,6 +2349,7 @@ const exportBLExcel = (livraisonId) => {
                         ssStrings.push(t ? t.textContent : '');
                     }
                 }
+                console.log('DEBUG ssStrings:', ssStrings.map((s,i) => `${i}: "${s}"`));
 
                 const getOrAddSS = (text) => {
                     let idx = ssStrings.indexOf(text);
@@ -2391,13 +2394,19 @@ const exportBLExcel = (livraisonId) => {
                                 const aromeName = ssStrings[aromeIdx] || '';
                                 const formatName = ssStrings[formatIdx] || '';
 
+                                let matched = false;
                                 for (const item of Object.values(merged)) {
                                     if (item.aromeNom.trim().toLowerCase() === aromeName.trim().toLowerCase() &&
                                         item.formatNom.trim().toLowerCase() === formatName.trim().toLowerCase()) {
                                         const vA = cellA.getElementsByTagName('v')[0];
                                         if (vA) vA.textContent = item.quantite;
+                                        matched = true;
+                                        console.log(`DEBUG MATCH row ${rowNum}: set qty=${item.quantite} for ${item.aromeNom} ${item.formatNom}`);
                                         break;
                                     }
+                                }
+                                if (!matched && aromeName) {
+                                    console.log(`DEBUG NO MATCH row ${rowNum}: template="${aromeName}" "${formatName}" vs merged=`, Object.entries(merged).map(([k,v]) => `${v.aromeNom}|${v.formatNom}`));
                                 }
                             }
                         }
