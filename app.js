@@ -2240,6 +2240,26 @@ const showLivraisonDetails = (id) => {
     `);
 };
 
+const AROME_BL_NAMES = {
+    'mure sauvage': 'Mûres Sauvages',
+    'poire a botzi': 'Poire à Botzi',
+    'poire à botzi': 'Poire à Botzi',
+    'herbes des alpes': 'Herbes des Alpes',
+    'sureau': 'Sureau',
+    'hibiscus': 'Hibiscus',
+    'coing': 'Coing',
+    'edition noel': 'Edition Noël',
+    'edition noel': 'Edition Noël',
+    'menthe': 'Menthe',
+    'menthe ': 'Menthe'
+};
+
+const getAromeBLName = (nom) => {
+    if (!nom) return nom;
+    const lower = nom.toLowerCase().trim();
+    return AROME_BL_NAMES[lower] || nom;
+};
+
 const generateBL = (commandeId) => {
     const commandes = DB.get('commandes') || [];
     const aromes = DB.get('aromes') || [];
@@ -2256,7 +2276,7 @@ const generateBL = (commandeId) => {
         const f = formats.find(fmt => fmt.id === item.formatId);
         return {
             aromeId: item.aromeId,
-            aromeNom: a?.nom || item.aromeId,
+            aromeNom: getAromeBLName(a?.nom) || item.aromeId,
             formatId: item.formatId,
             formatNom: f ? f.contenanceCl + ' cl' : item.formatId,
             quantite: item.quantite
@@ -2305,13 +2325,11 @@ const exportBLExcel = (livraisonId) => {
     const merged = {};
     lignesFiltered.forEach(l => {
         const fmt = formats.find(f => f.id === l.formatId);
-        if (!fmt) { console.warn('DEBUG: format non trouvé pour', l); return; }
+        if (!fmt) return;
         const fmtLabel = fmt.contenanceCl + ' cl';
         const key = `${l.aromeNom || ''}|${fmtLabel}`;
         merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
     });
-    console.log('DEBUG merged:', JSON.stringify(merged, null, 2));
-    console.log('DEBUG formats DB:', formats);
 
     const templatePath = 'templates/bl_template.xlsx';
     const xhr = new XMLHttpRequest();
@@ -2349,7 +2367,6 @@ const exportBLExcel = (livraisonId) => {
                         ssStrings.push(t ? t.textContent : '');
                     }
                 }
-                console.log('DEBUG ssStrings:', ssStrings.map((s,i) => `${i}: "${s}"`));
 
                 const getOrAddSS = (text) => {
                     let idx = ssStrings.indexOf(text);
@@ -2401,12 +2418,8 @@ const exportBLExcel = (livraisonId) => {
                                         const vA = cellA.getElementsByTagName('v')[0];
                                         if (vA) vA.textContent = item.quantite;
                                         matched = true;
-                                        console.log(`DEBUG MATCH row ${rowNum}: set qty=${item.quantite} for ${item.aromeNom} ${item.formatNom}`);
                                         break;
                                     }
-                                }
-                                if (!matched && aromeName) {
-                                    console.log(`DEBUG NO MATCH row ${rowNum}: template="${aromeName}" "${formatName}" vs merged=`, Object.entries(merged).map(([k,v]) => `${v.aromeNom}|${v.formatNom}`));
                                 }
                             }
                         }
