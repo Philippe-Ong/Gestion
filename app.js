@@ -2258,7 +2258,7 @@ const generateBL = (commandeId) => {
             aromeId: item.aromeId,
             aromeNom: a?.nom || item.aromeId,
             formatId: item.formatId,
-            formatNom: f?.nom || item.formatId,
+            formatNom: f ? f.contenanceCl + ' cl' : item.formatId,
             quantite: item.quantite
         };
     });
@@ -2305,8 +2305,10 @@ const exportBLExcel = (livraisonId) => {
     const merged = {};
     lignesFiltered.forEach(l => {
         const fmt = formats.find(f => f.id === l.formatId);
-        const fmtLabel = fmt ? fmt.contenanceCl + ' cl' : l.formatNom;
-        merged[`${l.aromeNom || ''}|${fmtLabel}`] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
+        if (!fmt) return;
+        const fmtLabel = fmt.contenanceCl + ' cl';
+        const key = `${l.aromeNom || ''}|${fmtLabel}`;
+        merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
     });
 
     const templatePath = 'templates/bl_template.xlsx';
