@@ -2249,9 +2249,7 @@ const AROME_BL_NAMES = {
     'hibiscus': 'Hibiscus',
     'coing': 'Coing',
     'edition noel': 'Edition Noël',
-    'edition noel': 'Edition Noël',
-    'menthe': 'Menthe',
-    'menthe ': 'Menthe'
+    'menthe': 'Menthe'
 };
 
 const getAromeBLName = (nom) => {
@@ -2303,6 +2301,30 @@ const generateBL = (commandeId) => {
     return livraison;
 };
 
+const ROW_MAP = {
+    'Poire à Botzi|25 cl': 15,
+    'Poire à Botzi|50 cl': 16,
+    'Mûres Sauvages|25 cl': 21,
+    'Mûres Sauvages|50 cl': 22,
+    'Mûres Sauvages|100 cl': 23,
+    'Herbes des Alpes|25 cl': 24,
+    'Herbes des Alpes|50 cl': 25,
+    'Herbes des Alpes|100 cl': 26,
+    'Menthe|25 cl': 18,
+    'Menthe|50 cl': 19,
+    'Menthe|100 cl': 20,
+    'Hibiscus|25 cl': 27,
+    'Hibiscus|50 cl': 28,
+    'Sureau|25 cl': 30,
+    'Sureau|50 cl': 31,
+    'Sureau|100 cl': 32,
+    'Coing|25 cl': 33,
+    'Coing|50 cl': 34,
+    'Edition Noël|25 cl': 36,
+    'Edition Noël|50 cl': 37,
+    'Edition Noël|100 cl': 38
+};
+
 const exportBLExcel = (livraisonId) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
@@ -2323,13 +2345,21 @@ const exportBLExcel = (livraisonId) => {
     }
 
     const merged = {};
+    let skippedCount = 0;
     lignesFiltered.forEach(l => {
         const fmt = formats.find(f => f.id === l.formatId);
-        if (!fmt) return;
+        if (!fmt) {
+            skippedCount++;
+            return;
+        }
         const fmtLabel = fmt.contenanceCl + ' cl';
         const key = `${l.aromeNom || ''}|${fmtLabel}`;
         merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
     });
+
+    if (skippedCount > 0) {
+        showToast(`${skippedCount} article(s) ignoré(s) — format introuvable`, 'warning');
+    }
 
     const templatePath = 'templates/bl_template.xlsx';
     const xhr = new XMLHttpRequest();
@@ -2360,6 +2390,10 @@ const exportBLExcel = (livraisonId) => {
                 if (ssXml) {
                     const ssParser = new DOMParser();
                     const ssDoc = ssParser.parseFromString(ssXml, 'text/xml');
+                    if (ssDoc.getElementsByTagName('parsererror').length > 0) {
+                        showToast('Erreur lecture des chaînes partagées', 'error');
+                        return;
+                    }
                     const siEls = ssDoc.getElementsByTagName('si');
                     for (let i = 0; i < siEls.length; i++) {
                         const t = siEls[i].getElementsByTagName('t')[0];
@@ -2367,14 +2401,169 @@ const exportBLExcel = (livraisonId) => {
                     }
                 }
 
+                const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+                const parser = new DOMParser();
+                const sheetDoc = parser.parseFromString(sheetXml, 'text/xml');
+
+                if (sheetDoc.getElementsByTagName('parsererror').length > 0) {
+                    showToast('Erreur parsing du template XML', 'error');
+                    return;
+                }
+
+                let ssModified = false;
                 const getOrAddSS = (text) => {
                     let idx = ssStrings.indexOf(text);
                     if (idx === -1) {
                         idx = ssStrings.length;
                         ssStrings.push(text);
+                        ssModified = true;
                     }
                     return idx;
                 };
+
+                const blNum = `BL-${getBLNumero(livraison)}`;
+                const blDate = livraison.dateBL;
+                const clientSociete = client ? (client.societe || '') : '';
+                const clientContact = client ? (client.nom || '') : '';
+                const clientAdresse = client ? (client.adresse || '') : '';
+                const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
+
+                const setCellText = (cell, text) => {
+                    cell.setAttribute('t', 's');
+                    const fEls = cell.getElementsByTagName('f');
+                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
+                    const idx = getOrAddSS(text);
+                    let vEl = cell.getElementsByTagName('v')[0];
+                    if (vEl) {
+                        vEl.textContent = idx;
+                    } else {
+                        vEl = sheetDoc.createElementNS(NS, 'v');
+                        vEl.textContent = idx;
+                        cell.appendChild(vEl);
+                    }
+                };
+
+                const findCell = (row, ref) => {
+                    const cells = row.getElementsByTagName('c');
+                    for (let c = 0; c < cells.length; c++) {
+                        if (cells[c].getAttribute('r') === ref) return cells[c];
+                    }
+                    return null;
+                };
+
+                const allRows = sheetDoc.getElementsByTagName('row');
+                for (let i = 0; i < allRows.length; i++) {
+                    const row = allRows[i];
+                    const rowNum = parseInt(row.getAttribute('r'));
+
+                    if (rowNum >= 15 && rowNum <= 38) {
+                        const cellA = findCell(row, `A${rowNum}`);
+                        if (!cellA) continue;
+
+                        for (const item of Object.values(merged)) {
+                            const mapKey = `${item.aromeNom}|${item.formatNom}`;
+                            if (ROW_MAP[mapKey] === rowNum) {
+                                let vA = cellA.getElementsByTagName('v')[0];
+                                if (vA) {
+                                    vA.textContent = item.quantite;
+                                } else {
+                                    vA = sheetDoc.createElementNS(NS, 'v');
+                                    vA.textContent = item.quantite;
+                                    cellA.appendChild(vA);
+                                }
+                                row.removeAttribute('hidden');
+                                break;
+                            }
+                        }
+                    }
+
+                    if (rowNum === 4) {
+                        const cellF = findCell(row, 'F4');
+                        if (cellF) setCellText(cellF, blNum);
+                    }
+
+                    if (rowNum === 5) {
+                        const cellF = findCell(row, 'F5');
+                        if (cellF) setCellText(cellF, blDate);
+                    }
+
+                    if (rowNum === 7 && clientSociete) {
+                        const cellF = findCell(row, 'F7');
+                        if (cellF) setCellText(cellF, clientSociete);
+                    }
+
+                    if (rowNum === 8 && clientContact) {
+                        const cellF = findCell(row, 'F8');
+                        if (cellF) setCellText(cellF, clientContact);
+                    }
+
+                    if (rowNum === 9 && clientAdresse) {
+                        const cellF = findCell(row, 'F9');
+                        if (cellF) setCellText(cellF, clientAdresse);
+                    }
+
+                    if (rowNum === 10 && clientLocalite) {
+                        const cellF = findCell(row, 'F10');
+                        if (cellF) setCellText(cellF, clientLocalite);
+                    }
+
+                    if (rowNum === 54 && clientSociete) {
+                        const cellA = findCell(row, 'A54');
+                        if (cellA) setCellText(cellA, clientSociete);
+                    }
+
+                    if (rowNum >= 47 && rowNum <= 49 && livraison.facturationMode !== '') {
+                        const expectedMode = rowNum === 47 ? 'email' : rowNum === 48 ? 'poste' : 'autre';
+                        if (livraison.facturationMode === expectedMode) {
+                            const cellD = findCell(row, `D${rowNum}`);
+                            if (cellD) setCellText(cellD, 'x');
+                        }
+                    }
+                }
+
+                const newSheetXml = new XMLSerializer().serializeToString(sheetDoc);
+
+                if (ssModified) {
+                    let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+                    ssContent += `<sst xmlns="${NS}" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
+                    ssStrings.forEach(s => {
+                        const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                        ssContent += `<si><t xml:space="preserve">${esc}</t></si>`;
+                    });
+                    ssContent += '</sst>';
+                    zip.file('xl/sharedStrings.xml', ssContent);
+                }
+
+                zip.file('xl/worksheets/sheet1.xml', newSheetXml);
+
+                zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }).then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    showToast('Bulletin de livraison exporté');
+                }).catch(err => {
+                    console.error('ZIP gen error:', err);
+                    showToast('Erreur génération fichier', 'error');
+                });
+            }).catch(err => {
+                console.error('Parse error:', err);
+                showToast('Erreur lecture template', 'error');
+            });
+        }).catch(err => {
+            console.error('JSZip error:', err);
+            showToast('Erreur ouverture template', 'error');
+        });
+    };
+
+    xhr.onerror = () => {
+        showToast('Erreur chargement template', 'error');
+    };
+
+    xhr.send();
+};
 
                 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
