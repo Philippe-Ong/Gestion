@@ -2555,41 +2555,45 @@ const exportBLExcel = (livraisonId) => {
                         if (cellF) setCellText(cellF, blDate);
                     }
 
-                    if (rowNum === 7 && clientSociete) {
+                    if (rowNum === 7) {
                         const cellF = findCell(row, 'F7');
-                        if (cellF) setCellText(cellF, clientSociete);
+                        if (cellF) setCellText(cellF, clientSociete || ' ');
                     }
 
-                    if (rowNum === 8 && clientContact) {
+                    if (rowNum === 8) {
                         const cellF = findCell(row, 'F8');
-                        if (cellF) setCellText(cellF, clientContact);
+                        if (cellF) setCellText(cellF, clientContact || ' ');
                     }
 
-                    if (rowNum === 9 && clientAdresse) {
+                    if (rowNum === 9) {
                         const cellF = findCell(row, 'F9');
-                        if (cellF) setCellText(cellF, clientAdresse);
+                        if (cellF) setCellText(cellF, clientAdresse || ' ');
                     }
 
-                    if (rowNum === 10 && clientLocalite) {
+                    if (rowNum === 10) {
                         const cellF = findCell(row, 'F10');
-                        if (cellF) setCellText(cellF, clientLocalite);
+                        if (cellF) setCellText(cellF, clientLocalite || ' ');
                     }
 
-                    if (rowNum === 54 && clientSociete) {
+                    if (rowNum === 54) {
                         const cellA = findCell(row, 'A54');
-                        if (cellA) setCellText(cellA, clientSociete);
+                        if (cellA) setCellText(cellA, clientSociete || ' ');
                     }
 
-                    if (rowNum >= 47 && rowNum <= 49 && livraison.facturationMode !== '') {
+                    if (rowNum >= 47 && rowNum <= 49) {
                         const expectedMode = rowNum === 47 ? 'email' : rowNum === 48 ? 'poste' : 'autre';
-                        if (livraison.facturationMode === expectedMode) {
-                            const cellD = findCell(row, `D${rowNum}`);
-                            if (cellD) setCellText(cellD, 'x');
+                        const cellD = findCell(row, `D${rowNum}`);
+                        if (cellD) {
+                            if (livraison.facturationMode === expectedMode) {
+                                setCellText(cellD, 'x');
+                            } else {
+                                setCellText(cellD, ' ');
+                            }
                         }
                     }
                 }
 
-                const newSheetXml = new XMLSerializer().serializeToString(sheetDoc);
+                const newSheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + new XMLSerializer().serializeToString(sheetDoc);
 
                 const unmatched = Object.keys(merged).filter(k => !matchedKeys.has(k));
                 if (unmatched.length > 0) {
