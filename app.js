@@ -2452,6 +2452,8 @@ const exportBLExcel = (livraisonId) => {
                 };
 
                 const allRows = sheetDoc.getElementsByTagName('row');
+                const matchedKeys = new Set();
+
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowNum = parseInt(row.getAttribute('r'));
@@ -2472,6 +2474,7 @@ const exportBLExcel = (livraisonId) => {
                                     cellA.appendChild(vA);
                                 }
                                 row.removeAttribute('hidden');
+                                matchedKeys.add(mapKey);
                                 break;
                             }
                         }
@@ -2522,6 +2525,13 @@ const exportBLExcel = (livraisonId) => {
                 }
 
                 const newSheetXml = new XMLSerializer().serializeToString(sheetDoc);
+
+                const unmatched = Object.keys(merged).filter(k => !matchedKeys.has(k));
+                if (unmatched.length > 0) {
+                    const labels = unmatched.slice(0, 3).map(k => `${k} (${merged[k].quantite}x)`).join(', ');
+                    const suffix = unmatched.length > 3 ? ` +${unmatched.length - 3}` : '';
+                    showToast(`Lignes non reconnues: ${labels}${suffix}`, 'warning');
+                }
 
                 if (ssModified) {
                     let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
