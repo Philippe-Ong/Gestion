@@ -2540,6 +2540,8 @@ const exportBLExcel = (livraisonId) => {
                                 }
                                 row.removeAttribute('hidden');
                                 matchedKeys.add(mapKey);
+                                const cellB = findCell(row, `B${rowNum}`);
+                                if (cellB) setCellText(cellB, 'ThéCol - Thé Froid Artisanal');
                                 break;
                             }
                         }
@@ -2593,7 +2595,10 @@ const exportBLExcel = (livraisonId) => {
                     }
                 }
 
-                const newSheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + new XMLSerializer().serializeToString(sheetDoc);
+                const serialized = new XMLSerializer().serializeToString(sheetDoc);
+                const newSheetXml = serialized.startsWith('<?xml')
+                    ? serialized
+                    : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + serialized;
 
                 const unmatched = Object.keys(merged).filter(k => !matchedKeys.has(k));
                 if (unmatched.length > 0) {
