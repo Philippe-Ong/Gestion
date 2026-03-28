@@ -2251,7 +2251,7 @@ const generateBL = (commandeId) => {
         return null;
     }
     
-    const lignes = commande.items.map(item => {
+    const lignes = commande.items.filter(item => item.quantite > 0).map(item => {
         const a = aromes.find(ar => ar.id === item.aromeId);
         const f = formats.find(fmt => fmt.id === item.formatId);
         return {
@@ -2283,117 +2283,277 @@ const generateBL = (commandeId) => {
     return livraison;
 };
 
-const normalizeStr = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').trim();
-
-const matchProductRow = (aromeNom, fmtLabel, templateRows) => {
-    const nArome = normalizeStr(aromeNom);
-    const nFmt = normalizeStr(fmtLabel);
-    for (const [key, row] of Object.entries(templateRows)) {
-        const [tArome, tFmt] = key.split('|');
-        if (tFmt !== nFmt) continue;
-        if (tArome === nArome) return row;
-    }
-    for (const [key, row] of Object.entries(templateRows)) {
-        const [tArome, tFmt] = key.split('|');
-        if (tFmt !== nFmt) continue;
-        if (tArome.replace(/s/g, '') === nArome.replace(/s/g, '')) return row;
-    }
-    return null;
-};
-
 const exportBLExcel = (livraisonId) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
-    const commandes = DB.get('commandes') || [];
-    
+    const formats = DB.get('formats') || [];
+
     const livraison = livraisons.find(l => l.id === livraisonId);
     if (!livraison) {
         showToast('Livraison non trouvée', 'error');
         return;
     }
-    
+
     const client = clients.find(c => c.id === livraison.clientId);
-    
-    if (typeof XLSX === 'undefined') {
-        showToast('Erreur: Bibliothèque Excel non chargée', 'error');
+
+    const lignesFiltered = livraison.lignes.filter(l => l.quantite > 0);
+    if (lignesFiltered.length === 0) {
+        showToast('Aucun article à livrer', 'warning');
         return;
     }
-    
-    const formats = DB.get('formats') || [];
-    const lignesData = livraison.lignes.map(l => {
+
+    const merged = {};
+    lignesFiltered.forEach(l => {
         const fmt = formats.find(f => f.id === l.formatId);
         const fmtLabel = fmt ? fmt.contenanceCl + ' cl' : l.formatNom;
-        return { aromeNom: l.aromeNom, fmtLabel, quantite: l.quantite };
+        merged[`${l.aromeNom || ''}|${fmtLabel}`] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
     });
-    
-    const merged = {};
-    lignesData.forEach(l => {
-        const k = normalizeStr(l.aromeNom) + '|' + normalizeStr(l.fmtLabel);
-        merged[k] = (merged[k] || 0) + l.quantite;
-    });
-    
+
     const templatePath = 'templates/bl_template.xlsx';
     const xhr = new XMLHttpRequest();
     xhr.open('GET', templatePath, true);
     xhr.responseType = 'arraybuffer';
-    
+
     xhr.onload = () => {
         if (xhr.status !== 200) {
             showToast('Template non trouvé: ' + templatePath, 'error');
             return;
         }
-        
-        const wb = XLSX.read(xhr.response, { type: 'array' });
-        const ws = wb.Sheets['Bulletin de livraison'];
-        if (!ws) {
-            showToast('Feuille "Bulletin de livraison" introuvable', 'error');
-            return;
-        }
-        
-        const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:F60');
-        
-        const rowMapping = {};
-        for (let r = range.s.r; r <= range.e.r; r++) {
-            const cellC = ws[XLSX.utils.encode_cell({ r, c: 2 })];
-            const cellD = ws[XLSX.utils.encode_cell({ r, c: 3 })];
-            if (cellC && cellC.v && cellD && cellD.v) {
-                const key = normalizeStr(String(cellC.v)) + '|' + normalizeStr(String(cellD.v));
-                rowMapping[key] = r + 1;
+
+        JSZip.loadAsync(xhr.response).then(zip => {
+            const sheetFile = zip.file('xl/worksheets/sheet1.xml');
+            const ssFile = zip.file('xl/sharedStrings.xml');
+
+            if (!sheetFile) {
+                showToast('Feuille non trouvée dans le template', 'error');
+                return;
             }
-        }
-        
-        Object.entries(merged).forEach(([key, qty]) => {
-            const [aromeNom, fmtLabel] = key.split('|');
-            const row = matchProductRow(aromeNom, fmtLabel, rowMapping);
-            if (row) {
-                ws['A' + row] = { t: 'n', v: qty };
-            }
+
+            Promise.all([
+                sheetFile.async('string'),
+                ssFile ? ssFile.async('string') : Promise.resolve(null)
+            ]).then(([sheetXml, ssXml]) => {
+                let ssStrings = [];
+                let ssModified = false;
+
+                if (ssXml) {
+                    const parser = new DOMParser();
+                    const ssDoc = parser.parseFromString(ssXml, 'text/xml');
+                    const siEls = ssDoc.getElementsByTagName('si');
+                    for (let i = 0; i < siEls.length; i++) {
+                        const t = siEls[i].getElementsByTagName('t')[0];
+                        ssStrings.push(t ? t.textContent : '');
+                    }
+                }
+
+                const getOrAddSS = (text) => {
+                    let idx = ssStrings.indexOf(text);
+                    if (idx === -1) {
+                        idx = ssStrings.length;
+                        ssStrings.push(text);
+                        ssModified = true;
+                    }
+                    return idx;
+                };
+
+                const parser = new DOMParser();
+                const sheetDoc = parser.parseFromString(sheetXml, 'text/xml');
+                const allRows = sheetDoc.getElementsByTagName('row');
+
+                const blNum = `BL-${getBLNumero(livraison)}`;
+                const blDate = livraison.dateBL;
+                const clientName = client ? (client.societe || client.nom || '') : '';
+                const clientAdresse = client ? (client.adresse || '') : '';
+                const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
+
+                for (let i = 0; i < allRows.length; i++) {
+                    const row = allRows[i];
+                    const rowNum = parseInt(row.getAttribute('r'));
+
+                    if (rowNum >= 15 && rowNum <= 44) {
+                        const cells = row.getElementsByTagName('c');
+                        let cellA = null, cellC = null, cellD = null;
+                        for (let c = 0; c < cells.length; c++) {
+                            const ref = cells[c].getAttribute('r');
+                            if (ref === `A${rowNum}`) cellA = cells[c];
+                            if (ref === `C${rowNum}`) cellC = cells[c];
+                            if (ref === `D${rowNum}`) cellD = cells[c];
+                        }
+
+                        if (cellA && cellC && cellD) {
+                            const vC = cellC.getElementsByTagName('v')[0];
+                            const vD = cellD.getElementsByTagName('v')[0];
+                            if (vC && vD) {
+                                const aromeIdx = parseInt(vC.textContent);
+                                const formatIdx = parseInt(vD.textContent);
+                                const aromeName = ssStrings[aromeIdx] || '';
+                                const formatName = ssStrings[formatIdx] || '';
+
+                                for (const item of Object.values(merged)) {
+                                    if (item.aromeNom.trim().toLowerCase() === aromeName.trim().toLowerCase() &&
+                                        item.formatNom.trim().toLowerCase() === formatName.trim().toLowerCase()) {
+                                        const vA = cellA.getElementsByTagName('v')[0];
+                                        if (vA) vA.textContent = item.quantite;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (rowNum === 3) {
+                        const cells = row.getElementsByTagName('c');
+                        let cellE = null;
+                        for (let c = 0; c < cells.length; c++) {
+                            if (cells[c].getAttribute('r') === 'E3') { cellE = cells[c]; break; }
+                        }
+                        if (cellE) {
+                            const newIdx = getOrAddSS(blNum);
+                            cellE.setAttribute('t', 's');
+                            const vEl = cellE.getElementsByTagName('v')[0];
+                            if (vEl) vEl.textContent = newIdx; else {
+                                const v = sheetDoc.createElement('v');
+                                v.textContent = newIdx;
+                                cellE.appendChild(v);
+                            }
+                        }
+                    }
+
+                    if (rowNum === 5) {
+                        const cells = row.getElementsByTagName('c');
+                        let cellF = null;
+                        for (let c = 0; c < cells.length; c++) {
+                            if (cells[c].getAttribute('r') === 'F5') { cellF = cells[c]; break; }
+                        }
+                        if (cellF) {
+                            const newIdx = getOrAddSS(blDate);
+                            cellF.setAttribute('t', 's');
+                            const vEl = cellF.getElementsByTagName('v')[0];
+                            if (vEl) vEl.textContent = newIdx; else {
+                                const v = sheetDoc.createElement('v');
+                                v.textContent = newIdx;
+                                cellF.appendChild(v);
+                            }
+                        }
+                    }
+
+                    if (rowNum === 7 && clientName) {
+                        const cells = row.getElementsByTagName('c');
+                        let cellF = null;
+                        for (let c = 0; c < cells.length; c++) {
+                            if (cells[c].getAttribute('r') === 'F7') { cellF = cells[c]; break; }
+                        }
+                        if (cellF) {
+                            const newIdx = getOrAddSS(clientName);
+                            cellF.setAttribute('t', 's');
+                            const vEl = cellF.getElementsByTagName('v')[0];
+                            if (vEl) vEl.textContent = newIdx; else {
+                                const v = sheetDoc.createElement('v');
+                                v.textContent = newIdx;
+                                cellF.appendChild(v);
+                            }
+                        }
+                    }
+
+                    if (rowNum === 8 && clientAdresse) {
+                        const cells = row.getElementsByTagName('c');
+                        let cellF = null;
+                        for (let c = 0; c < cells.length; c++) {
+                            if (cells[c].getAttribute('r') === 'F8') { cellF = cells[c]; break; }
+                        }
+                        if (cellF) {
+                            const newIdx = getOrAddSS(clientAdresse);
+                            cellF.setAttribute('t', 's');
+                            const vEl = cellF.getElementsByTagName('v')[0];
+                            if (vEl) vEl.textContent = newIdx; else {
+                                const v = sheetDoc.createElement('v');
+                                v.textContent = newIdx;
+                                cellF.appendChild(v);
+                            }
+                        }
+                    }
+
+                    if (rowNum === 9 && clientLocalite) {
+                        const cells = row.getElementsByTagName('c');
+                        let cellF = null;
+                        for (let c = 0; c < cells.length; c++) {
+                            if (cells[c].getAttribute('r') === 'F9') { cellF = cells[c]; break; }
+                        }
+                        if (cellF) {
+                            const newIdx = getOrAddSS(clientLocalite);
+                            cellF.setAttribute('t', 's');
+                            const vEl = cellF.getElementsByTagName('v')[0];
+                            if (vEl) vEl.textContent = newIdx; else {
+                                const v = sheetDoc.createElement('v');
+                                v.textContent = newIdx;
+                                cellF.appendChild(v);
+                            }
+                        }
+                    }
+
+                    if (rowNum >= 47 && rowNum <= 49 && livraison.facturationMode) {
+                        const expectedMode = rowNum === 47 ? 'email' : rowNum === 48 ? 'poste' : 'autre';
+                        if (livraison.facturationMode === expectedMode) {
+                            const cells = row.getElementsByTagName('c');
+                            let cellD = null;
+                            for (let c = 0; c < cells.length; c++) {
+                                if (cells[c].getAttribute('r') === `D${rowNum}`) { cellD = cells[c]; break; }
+                            }
+                            if (cellD) {
+                                const newIdx = getOrAddSS('☑');
+                                cellD.setAttribute('t', 's');
+                                const vEl = cellD.getElementsByTagName('v')[0];
+                                if (vEl) vEl.textContent = newIdx; else {
+                                    const v = sheetDoc.createElement('v');
+                                    v.textContent = newIdx;
+                                    cellD.appendChild(v);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let newSheetXml = new XMLSerializer().serializeToString(sheetDoc);
+
+                if (ssModified) {
+                    let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+                    ssContent += `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
+                    ssStrings.forEach(s => {
+                        const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                        ssContent += `<si><t xml:space="preserve">${esc}</t></si>`;
+                    });
+                    ssContent += '</sst>';
+                    zip.file('xl/sharedStrings.xml', ssContent);
+                }
+
+                zip.file('xl/worksheets/sheet1.xml', newSheetXml);
+
+                zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }).then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    showToast('Bulletin de livraison exporté');
+                }).catch(err => {
+                    console.error('ZIP gen error:', err);
+                    showToast('Erreur génération fichier', 'error');
+                });
+            }).catch(err => {
+                console.error('Parse error:', err);
+                showToast('Erreur lecture template', 'error');
+            });
+        }).catch(err => {
+            console.error('JSZip error:', err);
+            showToast('Erreur ouverture template', 'error');
         });
-        
-        ws['E3'] = { t: 's', v: `BL-${getBLNumero(livraison)}` };
-        ws['F5'] = { t: 's', v: livraison.dateBL };
-        
-        if (client) {
-            ws['F7'] = { t: 's', v: client.societe || client.nom || '' };
-            ws['F8'] = { t: 's', v: client.adresse || '' };
-            ws['F9'] = { t: 's', v: `${client.npa || ''} ${client.localite || ''}`.trim() };
-        }
-        
-        if (livraison.facturationMode) {
-            const factRow = livraison.facturationMode === 'email' ? 47 :
-                           livraison.facturationMode === 'poste' ? 48 : 49;
-            ws['D' + factRow] = { t: 's', v: '☑' };
-        }
-        
-        const filename = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
-        XLSX.writeFile(wb, filename);
-        showToast('Bulletin de livraison exporté');
     };
-    
+
     xhr.onerror = () => {
         showToast('Erreur chargement template', 'error');
     };
-    
+
     xhr.send();
 };
 
