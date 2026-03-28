@@ -2381,6 +2381,7 @@ const ROW_MAP = {
     'Menthe|100 cl': 20,
     'Hibiscus|25 cl': 27,
     'Hibiscus|50 cl': 28,
+    'Hibiscus|100 cl': 29,
     'Sureau|25 cl': 30,
     'Sureau|50 cl': 31,
     'Sureau|100 cl': 32,
@@ -2539,7 +2540,14 @@ const exportBLExcel = (livraisonId) => {
                         if (!cellA) continue;
 
                         const mapEntry = Object.entries(ROW_MAP).find(([, r]) => r === rowNum);
-                        if (!mapEntry) continue;
+                        if (!mapEntry) {
+                            row.setAttribute('hidden', '1');
+                            const vA = cellA.getElementsByTagName('v')[0];
+                            if (vA) vA.textContent = '0';
+                            const cellB = findCell(row, `B${rowNum}`);
+                            if (cellB) setCellText(cellB, ' ');
+                            continue;
+                        }
                         const [mapKeyForRow, ] = mapEntry;
                         const [mapArome, mapFormat] = mapKeyForRow.split('|');
                         const normArome = normalize(mapArome);
