@@ -40,8 +40,10 @@ const DB = {
     
     get: (key) => {
         const data = localStorage.getItem('thecol_' + key);
+        if (!data) return [];
         try {
-            return data ? JSON.parse(data) : [];
+            const parsed = JSON.parse(data);
+            return Array.isArray(parsed) ? parsed : [];
         } catch (e) {
             console.error('Error parsing data for key ' + key, e);
             return [];
@@ -49,8 +51,16 @@ const DB = {
     },
     
     set: (key, data) => {
-        localStorage.setItem('thecol_' + key, JSON.stringify(data));
-        // Sync to Firebase if available
+        try {
+            localStorage.setItem('thecol_' + key, JSON.stringify(data));
+        } catch (e) {
+            if (e.name === 'QuotaExceededError' || e.code === 22) {
+                showToast('Stockage local plein. Supprimez d\'anciennes données.', 'error');
+            } else {
+                console.error('Error saving data for key ' + key, e);
+            }
+            return;
+        }
         if (window.firebaseReady && window.firebaseDb) {
             DB.syncToFirebase(key, data);
         }
@@ -152,6 +162,7 @@ const getStatus = (dlc) => {
 // Toast Notifications
 const showToast = (message, type = 'success') => {
     const container = document.getElementById('toastContainer');
+    if (!container) return;
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     toast.innerHTML = `
@@ -166,16 +177,26 @@ const showToast = (message, type = 'success') => {
     setTimeout(() => toast.remove(), 3000);
 };
 
+const safeRender = (html) => {
+    const el = document.getElementById('content');
+    if (el) el.innerHTML = html;
+};
+
 // Modal
 const modal = {
     show: (title, body, footer) => {
-        document.getElementById('modalTitle').textContent = title;
-        document.getElementById('modalBody').innerHTML = body;
-        document.getElementById('modalFooter').innerHTML = footer;
-        document.getElementById('modalOverlay').classList.add('active');
+        const titleEl = document.getElementById('modalTitle');
+        const bodyEl = document.getElementById('modalBody');
+        const footerEl = document.getElementById('modalFooter');
+        const overlayEl = document.getElementById('modalOverlay');
+        if (titleEl) titleEl.textContent = title || '';
+        if (bodyEl) bodyEl.innerHTML = body || '';
+        if (footerEl) footerEl.innerHTML = footer || '';
+        if (overlayEl) overlayEl.classList.add('active');
     },
     hide: () => {
-        document.getElementById('modalOverlay').classList.remove('active');
+        const overlayEl = document.getElementById('modalOverlay');
+        if (overlayEl) overlayEl.classList.remove('active');
     }
 };
 
@@ -206,7 +227,8 @@ const navigateTo = (page) => {
         inventaire: 'Inventaire',
         parametres: 'Paramètres'
     };
-    document.getElementById('pageTitle').textContent = titles[page] || 'Dashboard';
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = titles[page] || 'Dashboard';
     
     const views = {
         dashboard: renderDashboard,
@@ -220,7 +242,15 @@ const navigateTo = (page) => {
         parametres: renderParametres
     };
     
-    (views[page] || renderDashboard)();
+    const contentEl = document.getElementById('content');
+    if (!contentEl) return;
+    
+    const viewFn = views[page];
+    if (typeof viewFn === 'function') {
+        viewFn();
+    } else {
+        renderDashboard();
+    }
 };
 
 window.addEventListener('hashchange', router);
@@ -252,16 +282,17 @@ const renderDashboard = () => {
         .filter(p => p.date === todayStr)
         .reduce((sum, p) => {
             if (!p.heureDebut || !p.heureFin) return sum;
-            const debut = parseInt(p.heureDebut.replace(':', ''));
-            const fin = parseInt(p.heureFin.replace(':', ''));
-            if (debut && fin) {
-                const minutes = (fin - debut) - (p.pause || 0);
-                return sum + minutes / 60;
+            const debut = parseInt(p.heureDebut.replace(':', ''), 10);
+            const fin = parseInt(p.heureFin.replace(':', ''), 10);
+            if (debut && fin && !isNaN(debut) && !isNaN(fin)) {
+                const pause = parseInt(p.pause, 10) || 0;
+                const minutes = (fin - debut) - pause;
+                return sum + (isNaN(minutes) ? 0 : minutes / 60);
             }
             return sum;
         }, 0);
 
-    document.getElementById('content').innerHTML = `
+    safeRender(`
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-icon green">
@@ -318,7 +349,7 @@ const renderDashboard = () => {
             </div>
             <p>Total: <strong>${heuresAujourdhui.toFixed(1)}h</strong></p>
         </div>
-    `;
+    `);
 };
 
 // Stock Management
@@ -471,7 +502,7 @@ const renderStock = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 const showNouveauLotModal = () => {
@@ -580,65 +611,73 @@ const deleteHistoryRecord = (recordId) => {
 };
 
 const saveLot = () => {
-    const form = document.getElementById('lotForm');
-    const formData = new FormData(form);
-    
-    const arome = formData.get('arome');
-    const format = formData.get('format');
-    const quantite = parseInt(formData.get('quantite'));
-    const dateProduction = formData.get('dateProduction');
-    const dlv = formData.get('dlv');
-    const dlc = formData.get('dlc');
-    
-    const lots = DB.get('lots');
-    const history = DB.get('history') || [];
-    
-    // Check if lot with same arome, format and production date exists
-    const existingLot = lots.find(l => 
-        l.arome === arome && 
-        l.format === format && 
-        l.dateProduction === dateProduction
-    );
-    
-    let newId;
-    if (existingLot) {
-        existingLot.quantite += quantite;
-        newId = existingLot.id;
-    } else {
-        // Generate sequential ID
-        const counter = parseInt(localStorage.getItem('thecol_lot_counter') || '0', 10);
-        newId = String(counter + 1).padStart(6, '0');
-        localStorage.setItem('thecol_lot_counter', String(counter + 1));
+    try {
+        const form = document.getElementById('lotForm');
+        if (!form) return;
+        const formData = new FormData(form);
         
-        const lot = {
-            id: newId,
+        const arome = formData.get('arome');
+        const format = formData.get('format');
+        const quantite = parseInt(formData.get('quantite'), 10);
+        const dateProduction = formData.get('dateProduction');
+        const dlv = formData.get('dlv');
+        const dlc = formData.get('dlc');
+        
+        if (!arome || !format || !dateProduction || isNaN(quantite) || quantite <= 0) {
+            showToast('Veuillez remplir tous les champs obligatoires', 'error');
+            return;
+        }
+        
+        const lots = DB.get('lots');
+        const history = DB.get('history') || [];
+        
+        const existingLot = lots.find(l => 
+            l.arome === arome && 
+            l.format === format && 
+            l.dateProduction === dateProduction
+        );
+        
+        let newId;
+        if (existingLot) {
+            existingLot.quantite = (existingLot.quantite || 0) + quantite;
+            newId = existingLot.id;
+        } else {
+            const counter = parseInt(localStorage.getItem('thecol_lot_counter') || '0', 10);
+            newId = String(counter + 1).padStart(6, '0');
+            localStorage.setItem('thecol_lot_counter', String(counter + 1));
+            
+            const lot = {
+                id: newId,
+                arome,
+                format,
+                quantite,
+                dateProduction,
+                dlv,
+                dlc
+            };
+            lots.push(lot);
+        }
+        
+        history.unshift({
+            id: `PROD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            lotId: newId,
             arome,
             format,
-            quantite,
-            dateProduction,
-            dlv,
-            dlc
-        };
-        lots.push(lot);
+            quantity: quantite,
+            productionDate: dateProduction,
+            dateAdded: new Date().toISOString()
+        });
+        
+        DB.set('lots', lots);
+        DB.set('history', history);
+        
+        modal.hide();
+        showToast('Lot créé avec succès');
+        renderStock();
+    } catch (e) {
+        console.error('Error saving lot:', e);
+        showToast('Erreur lors de la création du lot', 'error');
     }
-    
-    // Add to production history
-    history.unshift({
-        id: `PROD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        lotId: newId,
-        arome,
-        format,
-        quantity: quantite,
-        productionDate: dateProduction,
-        dateAdded: new Date().toISOString()
-    });
-    
-    DB.set('lots', lots);
-    DB.set('history', history);
-    
-    modal.hide();
-    showToast('Lot créé avec succès');
-    renderStock();
 };
 
 const deleteLot = (id) => {
@@ -1017,7 +1056,7 @@ const renderPointage = (tab = 'pointage') => {
         `;
     }
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
     
     // Update time every second if on pointage tab
     if (tab === 'pointage') {
@@ -1377,38 +1416,48 @@ const saveSaisieManuelle = () => {
 };
 
 const savePointage = (type) => {
-    const form = document.getElementById('pointageForm');
-    const formData = new FormData(form);
-    const employeId = formData.get('employeId');
-    const date = formData.get('date');
-    const heure = formData.get('heure');
-    
-    const pointages = DB.get('pointages');
-    
-    // Check if there's already a pointage for this employee on this date
-    let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
-    
-    if (!pointage) {
-        pointage = {
-            id: generateId(),
-            employeId,
-            date,
-            pause: parseInt(formData.get('pause')) || 0
-        };
-        pointages.push(pointage);
+    try {
+        const form = document.getElementById('pointageForm');
+        if (!form) return;
+        const formData = new FormData(form);
+        const employeId = formData.get('employeId');
+        const date = formData.get('date');
+        const heure = formData.get('heure');
+        
+        if (!employeId || !date || !heure) {
+            showToast('Veuillez remplir tous les champs', 'error');
+            return;
+        }
+        
+        const pointages = DB.get('pointages');
+        
+        let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
+        
+        if (!pointage) {
+            pointage = {
+                id: generateId(),
+                employeId,
+                date,
+                pause: parseInt(formData.get('pause'), 10) || 0
+            };
+            pointages.push(pointage);
+        }
+        
+        if (type === 'arrivee') {
+            pointage.heureDebut = heure;
+        } else {
+            pointage.heureFin = heure;
+            pointage.pause = parseInt(formData.get('pause'), 10) || 0;
+        }
+        
+        DB.set('pointages', pointages);
+        modal.hide();
+        showToast(type === 'arrivee' ? 'Arrivée pointée' : 'Départ pointé');
+        renderPointage();
+    } catch (e) {
+        console.error('Error saving pointage:', e);
+        showToast('Erreur lors du pointage', 'error');
     }
-    
-    if (type === 'arrivee') {
-        pointage.heureDebut = heure;
-    } else {
-        pointage.heureFin = heure;
-        pointage.pause = parseInt(formData.get('pause')) || 0;
-    }
-    
-    DB.set('pointages', pointages);
-    modal.hide();
-    showToast(type === 'arrivee' ? 'Arrivée pointée' : 'Départ pointé');
-    renderPointage();
 };
 
 const deletePointage = (id) => {
@@ -1548,7 +1597,7 @@ const renderCommandes = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 const showCommandeModal = (id = null) => {
@@ -1677,49 +1726,65 @@ const addItem = () => {
 };
 
 const saveCommande = (id) => {
-    const form = document.getElementById('commandeForm');
-    const formData = new FormData(form);
-    
-    const items = [];
-    const qtyInputs = document.querySelectorAll('.item-qty-input');
-    qtyInputs.forEach(input => {
-        const qty = parseInt(input.value) || 0;
-        if (qty > 0) {
-            const name = input.name;
-            const match = name.match(/items\[([^\]]+)\]\[([^\]]+)\]/);
-            if (match) {
-                items.push({ aromeId: match[1], formatId: match[2], quantite: qty });
+    try {
+        const form = document.getElementById('commandeForm');
+        if (!form) return;
+        const formData = new FormData(form);
+        
+        const items = [];
+        const qtyInputs = document.querySelectorAll('.item-qty-input');
+        qtyInputs.forEach(input => {
+            const qty = parseInt(input.value, 10) || 0;
+            if (qty > 0) {
+                const name = input.name;
+                const match = name.match(/items\[([^\]]+)\]\[([^\]]+)\]/);
+                if (match) {
+                    items.push({ aromeId: match[1], formatId: match[2], quantite: qty });
+                }
             }
+        });
+        
+        if (items.length === 0) {
+            showToast('Ajoutez au moins un article', 'error');
+            return;
         }
-    });
-    
-    if (items.length === 0) {
-        showToast('Ajoutez au moins un article', 'error');
-        return;
+        
+        const clientId = formData.get('clientId');
+        if (!clientId) {
+            showToast('Veuillez sélectionner un client', 'error');
+            return;
+        }
+        
+        const commande = {
+            id: id || generateId(),
+            numero: id ? DB.get('commandes').find(c => c.id === id)?.numero : getNextCommandeNumero(),
+            clientId,
+            dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : getLocalDateISOString(),
+            dateLivraison: formData.get('dateLivraison'),
+            statut: formData.get('statut'),
+            items
+        };
+        
+        const commandes = DB.get('commandes');
+        if (id) {
+            const index = commandes.findIndex(c => c.id === id);
+            if (index !== -1) {
+                commandes[index] = commande;
+            } else {
+                commandes.push(commande);
+            }
+        } else {
+            commandes.push(commande);
+        }
+        DB.set('commandes', commandes);
+        
+        modal.hide();
+        showToast('Commande enregistrée');
+        renderCommandes();
+    } catch (e) {
+        console.error('Error saving commande:', e);
+        showToast('Erreur lors de l\'enregistrement de la commande', 'error');
     }
-    
-    const commande = {
-        id: id || generateId(),
-        numero: id ? DB.get('commandes').find(c => c.id === id)?.numero : getNextCommandeNumero(),
-        clientId: formData.get('clientId'),
-        dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : getLocalDateISOString(),
-        dateLivraison: formData.get('dateLivraison'),
-        statut: formData.get('statut'),
-        items
-    };
-    
-    const commandes = DB.get('commandes');
-    if (id) {
-        const index = commandes.findIndex(c => c.id === id);
-        commandes[index] = commande;
-    } else {
-        commandes.push(commande);
-    }
-    DB.set('commandes', commandes);
-    
-    modal.hide();
-    showToast('Commande enregistrée');
-    renderCommandes();
 };
 
 const editCommande = (id) => showCommandeModal(id);
@@ -2067,7 +2132,7 @@ const renderArchives = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 const exportArchivesExcel = () => {
@@ -2187,7 +2252,7 @@ const renderLivraisons = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 const showLivraisonDetails = (id) => {
@@ -2770,7 +2835,7 @@ const renderProduction = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 // Inventaire
@@ -2876,7 +2941,7 @@ const renderInventaire = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 // Toggle equipement section
@@ -3137,7 +3202,7 @@ const renderParametres = () => {
         </div>
     `;
     
-    document.getElementById('content').innerHTML = html;
+    safeRender(html);
 };
 
 // Settings - Counters
