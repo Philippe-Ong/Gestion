@@ -79,6 +79,16 @@ const DB = {
     loadFromFirebase: async (showNotification = true) => {
         if (!window.firebaseReady || !window.firebaseDb) return;
         try {
+            // Backup before sync
+            const backup = {};
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k.startsWith('thecol_') && !k.startsWith('thecol_backup_')) {
+                    backup[k] = localStorage.getItem(k);
+                }
+            }
+            localStorage.setItem('thecol_backup_pre_sync', JSON.stringify(backup));
+
             const { getDocs, collection } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
             const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
             let hasData = false;
@@ -118,8 +128,18 @@ const DB = {
 };
 
 // Manual sync function
-window.forceFirebaseSync = () => {
-    DB.loadFromFirebase();
+window.forceFirebaseSync = async () => {
+    modal.show('Synchronisation', '<div style="text-align:center; padding: 20px;"><p>Synchronisation en cours avec le Cloud...</p><p>Veuillez patienter.</p></div>', '');
+    document.getElementById('modalClose').style.display = 'none'; // Lock modal
+    try {
+        await DB.loadFromFirebase(true);
+        renderCurrentView();
+    } catch(e) {
+        showToast('Erreur lors de la synchronisation', 'error');
+    } finally {
+        document.getElementById('modalClose').style.display = 'block';
+        modal.hide();
+    }
 };
 
 // Default values from Stock project
@@ -180,6 +200,20 @@ const showToast = (message, type = 'success') => {
 const safeRender = (html) => {
     const el = document.getElementById('content');
     if (el) el.innerHTML = html;
+};
+
+// UI Lock helper (Anti-Double Clic)
+const disableSaveBtn = (event) => {
+    if (!event || !event.target) return null;
+    const btn = event.target;
+    if (btn.tagName !== 'BUTTON') return null;
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = 'En cours...';
+    return () => {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    };
 };
 
 // Modal
@@ -252,6 +286,29 @@ const navigateTo = (page) => {
         renderDashboard();
     }
 };
+
+// Render Current View dynamically
+const renderCurrentView = () => {
+    const hash = window.location.hash.slice(1) || 'dashboard';
+    const page = hash.split('?')[0];
+    navigateTo(page);
+};
+
+// Global Error Handling
+window.addEventListener('error', (e) => {
+    if (e.message && e.message.includes('ResizeObserver')) return; // Ignore benign browser errors
+    showToast(`Erreur système : ${e.message}`, 'error');
+});
+window.addEventListener('unhandledrejection', (e) => {
+    showToast(`Erreur réseau/sync : ${e.reason || 'inconnue'}`, 'error');
+});
+
+// Cross-tab synchronization
+window.addEventListener('storage', (e) => {
+    if (e.key && e.key.startsWith('thecol_')) {
+        renderCurrentView();
+    }
+});
 
 window.addEventListener('hashchange', router);
 
@@ -552,7 +609,7 @@ const showNouveauLotModal = () => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveLot()">Créer le lot</button>
+        <button class="btn btn-primary" onclick="saveLot(event)">Créer le lot</button>
     `);
 };
 
@@ -610,7 +667,8 @@ const deleteHistoryRecord = (recordId) => {
     }
 };
 
-const saveLot = () => {
+const saveLot = (event) => {
+    const reenable = disableSaveBtn(event);
     try {
         const form = document.getElementById('lotForm');
         if (!form) return;
@@ -805,7 +863,7 @@ const showEditLotModal = (lotId) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveEditLot('${lotId}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveEditLot(event, '${lotId}')">Enregistrer</button>
     `);
 };
 
@@ -818,7 +876,8 @@ const updateEditLotDates = () => {
     }
 };
 
-const saveEditLot = (lotId) => {
+const saveEditLot = (event, lotId) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('editLotForm');
     const formData = new FormData(form);
     
@@ -897,7 +956,7 @@ const renderPointage = (tab = 'pointage') => {
                         <label>Pause (minutes)</label>
                         <input type="number" name="pause" value="0" min="0" style="max-width: 150px;">
                     </div>
-                    <button type="button" class="btn btn-primary" onclick="saveQuickPointage()">Ajouter</button>
+                    <button type="button" class="btn btn-primary" onclick="saveQuickPointage(event)">Ajouter</button>
                 </form>
             </div>
         `;
@@ -1185,7 +1244,8 @@ const getPointageStats = (pointages, employes) => {
     return { totalHours, daysWorked, avgHours, employeeStats };
 };
 
-const saveQuickPointage = () => {
+const saveQuickPointage = (event) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('quickPointageForm');
     const formData = new FormData(form);
     
@@ -1328,7 +1388,7 @@ const showPointageModal = (type) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="savePointage('${type}')">Valider</button>
+        <button class="btn btn-primary" onclick="savePointage(event, '${type}')">Valider</button>
     `);
 };
 
@@ -1369,11 +1429,12 @@ const showSaisieManuelleModal = () => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveSaisieManuelle()">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveSaisieManuelle(event)">Enregistrer</button>
     `);
 };
 
-const saveSaisieManuelle = () => {
+const saveSaisieManuelle = (event) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('saisieManuelleForm');
     const formData = new FormData(form);
     
@@ -1415,7 +1476,8 @@ const saveSaisieManuelle = () => {
     renderPointage();
 };
 
-const savePointage = (type) => {
+const savePointage = (event, type) => {
+    const reenable = disableSaveBtn(event);
     try {
         const form = document.getElementById('pointageForm');
         if (!form) return;
@@ -1688,7 +1750,7 @@ const showCommandeModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveCommande('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveCommande(event, '${id || ''}')">Enregistrer</button>
     `);
     
     // Set initial options in selects (for existing items that need options)
@@ -1725,7 +1787,8 @@ const addItem = () => {
     container.appendChild(div);
 };
 
-const saveCommande = (id) => {
+const saveCommande = (event, id) => {
+    const reenable = disableSaveBtn(event);
     try {
         const form = document.getElementById('commandeForm');
         if (!form) return;
@@ -3074,12 +3137,13 @@ const showInventaireModal = (categorie, id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveInventaireItem('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveInventaireItem(event, '${id || ''}')">Enregistrer</button>
     `);
 };
 
 // Save inventaire item
-const saveInventaireItem = (id) => {
+const saveInventaireItem = (event, id) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('inventaireForm');
     const formData = new FormData(form);
     
@@ -3331,11 +3395,12 @@ const showEmployeModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveEmploye('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveEmploye(event, '${id || ''}')">Enregistrer</button>
     `);
 };
 
-const saveEmploye = (id) => {
+const saveEmploye = (event, id) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('employeForm');
     const formData = new FormData(form);
     
@@ -3401,11 +3466,12 @@ const showAromeModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveArome('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveArome(event, '${id || ''}')">Enregistrer</button>
     `);
 };
 
-const saveArome = (id) => {
+const saveArome = (event, id) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('aromeForm');
     const formData = new FormData(form);
     
@@ -3476,11 +3542,12 @@ const showFormatModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveFormat('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveFormat(event, '${id || ''}')">Enregistrer</button>
     `);
 };
 
-const saveFormat = (id) => {
+const saveFormat = (event, id) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('formatForm');
     const formData = new FormData(form);
     
@@ -3575,7 +3642,7 @@ const showRecetteModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveRecette('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveRecette(event, '${id || ''}')">Enregistrer</button>
     `);
 };
 
@@ -3596,7 +3663,8 @@ const addIngredient = () => {
     container.appendChild(div);
 };
 
-const saveRecette = (id) => {
+const saveRecette = (event, id) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('recetteForm');
     const formData = new FormData(form);
     
@@ -3715,11 +3783,12 @@ const showClientModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveClient('${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" onclick="saveClient(event, '${id || ''}')">Enregistrer</button>
     `);
 };
 
-const saveClient = (id) => {
+const saveClient = (event, id) => {
+    const reenable = disableSaveBtn(event);
     const form = document.getElementById('clientForm');
     const formData = new FormData(form);
     
