@@ -2,6 +2,10 @@
 
 Application de gestion pour votre entreprise de thé froid.
 
+## Version
+
+**v6.0**
+
 ## Adresse
 
 **https://philippe-ong.github.io/Gestion/**
@@ -40,6 +44,15 @@ Application de gestion pour votre entreprise de thé froid.
 - Planificateur de production
 - Calcul automatique des litres par arôme
 - Ingrédients nécessaires selon les recettes
+- Bouton **"Produite"** sur chaque cuve
+- Confirmation des quantités réellement produites par format
+- Ajout automatique des bouteilles produites au stock (création/mise à jour des lots)
+- Déduction automatique de l'inventaire à la validation de production:
+  - Ingrédients de recette: **+1.5%** (perte de production)
+  - Eau: **ignorée** (pas de déduction)
+  - Bouteilles vides: **1 pour 1** selon le format
+  - Capsules/Bouchons: **+7.5%** (arrondi supérieur)
+- Si stock inventaire insuffisant: warning affiché, la production continue
 
 ### Paramètres
 - **Employés**: Ajout, modification, activation/désactivation

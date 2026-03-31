@@ -2791,6 +2791,8 @@ const exportBLExcel = (livraisonId) => {
     xhr.send();
 };
 
+let productionPlannerState = null;
+
 // Production Planner
 const renderProduction = () => {
     const commandes = DB.get('commandes');
@@ -2901,6 +2903,12 @@ const renderProduction = () => {
         }
     });
     
+    productionPlannerState = {
+        productionNecesaire,
+        litresParArome,
+        cuvesParArome
+    };
+
     // Render results
     const resultHtml = `
         <div class="production-summary">
@@ -2953,9 +2961,12 @@ const renderProduction = () => {
                             <strong>${aromeNom}</strong>
                             <span> - ${totalLitres.toFixed(1)}L (${cuves.length} cuve${cuves.length > 1 ? 's' : ''})</span>
                           </div>
-                          ${cuves.map(cuve => `
+                          ${cuves.map((cuve, cuveIndex) => `
                             <div class="cuve-detail">
-                              <div class="cuve-title">Cuve ${cuve.numero} (${cuve.litres.toFixed(1)}L)</div>
+                              <div class="flex-between" style="margin-bottom: 8px;">
+                                <div class="cuve-title" style="margin-bottom: 0;">Cuve ${cuve.numero} (${cuve.litres.toFixed(1)}L)</div>
+                                <button class="btn btn-sm btn-success" onclick="confirmerProduction('${encodeURIComponent(aromeNom)}', ${cuveIndex})">Produite</button>
+                              </div>
                               <ul class="ingredient-list">
                                 ${cuve.ingredients.map(ing => `
                                   <li>
@@ -2987,6 +2998,268 @@ const renderProduction = () => {
     `;
     
     safeRender(html);
+};
+
+const normalizeName = (value) => {
+    return String(value || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]/g, '');
+};
+
+const findInventaireItemByName = (items, nom) => {
+    const target = normalizeName(nom);
+    return items.find(i => normalizeName(i.nom) === target) || null;
+};
+
+const isWaterIngredient = (nom) => {
+    const normalized = normalizeName(nom);
+    return normalized.includes('eau');
+};
+
+const getBottleInventoryItem = (items, format) => {
+    if (!format) return null;
+
+    const candidates = [];
+    if (format.nom) {
+        candidates.push(`Bouteilles vides ${format.nom}`);
+    }
+    if (format.contenanceCl) {
+        candidates.push(`Bouteilles vides ${format.contenanceCl}cl`);
+        if (format.contenanceCl % 100 === 0) {
+            candidates.push(`Bouteilles vides ${format.contenanceCl / 100}L`);
+        }
+    }
+
+    for (const candidate of candidates) {
+        const found = findInventaireItemByName(items, candidate);
+        if (found) return found;
+    }
+
+    const normalizedCandidates = candidates.map(c => normalizeName(c));
+    return items.find(item => normalizedCandidates.some(c => normalizeName(item.nom).includes(c.replace('bouteillesvides', '')))) || null;
+};
+
+const confirmerProduction = (encodedAromeNom, cuveIndex) => {
+    try {
+        const aromeNom = decodeURIComponent(encodedAromeNom || '');
+        const formats = DB.get('formats') || [];
+        const state = productionPlannerState;
+
+        if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) {
+            showToast('Plan de production introuvable, rechargez la page', 'error');
+            return;
+        }
+
+        const cuve = state.cuvesParArome[aromeNom][cuveIndex];
+        if (!cuve) {
+            showToast('Cuve introuvable', 'error');
+            return;
+        }
+
+        const litresTotalArome = state.litresParArome[aromeNom] || 0;
+        const ratioCuve = litresTotalArome > 0 ? (cuve.litres / litresTotalArome) : 0;
+
+        const besoinsArome = Object.values(state.productionNecesaire || {}).filter(b => b.aromeNom === aromeNom && b.aProduire > 0);
+        const prefillByFormat = {};
+        besoinsArome.forEach(b => {
+            prefillByFormat[b.formatNom] = Math.max(0, Math.round((b.aProduire || 0) * ratioCuve));
+        });
+
+        const formRows = formats.map(format => {
+            const prefill = prefillByFormat[format.nom] || 0;
+            return `
+                <div class="form-group" style="margin-bottom: 10px;">
+                    <label>${format.nom}</label>
+                    <input type="number" min="0" step="1" name="format_${format.id}" value="${prefill}">
+                </div>
+            `;
+        }).join('');
+
+        modal.show(`Production - ${aromeNom} - Cuve ${cuve.numero}`, `
+            <form id="productionCuveForm">
+                <div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
+                    <strong>Ingrédients prévus pour cette cuve (${cuve.litres.toFixed(1)}L)</strong>
+                    <ul class="ingredient-list" style="margin-top: 8px;">
+                        ${cuve.ingredients.map(ing => `
+                            <li>
+                                <span>${ing.nom}</span>
+                                <strong>${ing.quantite} ${ing.unite}</strong>
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>
+                <div>
+                    <strong>Bouteilles produites (modifiable)</strong>
+                    <div style="margin-top: 8px;">
+                        ${formRows || '<p class="text-muted">Aucun format actif</p>'}
+                    </div>
+                </div>
+            </form>
+        `, `
+            <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
+            <button class="btn btn-success" onclick="validerProduction(event, '${encodeURIComponent(aromeNom)}', ${cuveIndex})">Confirmer la production</button>
+        `);
+    } catch (e) {
+        console.error('Error opening production modal:', e);
+        showToast('Erreur ouverture confirmation production', 'error');
+    }
+};
+
+const validerProduction = (event, encodedAromeNom, cuveIndex) => {
+    const reenable = disableSaveBtn(event);
+    try {
+        const aromeNom = decodeURIComponent(encodedAromeNom || '');
+        const state = productionPlannerState;
+        const form = document.getElementById('productionCuveForm');
+        if (!form || !state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) {
+            showToast('Données de production introuvables', 'error');
+            return;
+        }
+
+        const cuve = state.cuvesParArome[aromeNom][cuveIndex];
+        if (!cuve) {
+            showToast('Cuve introuvable', 'error');
+            return;
+        }
+
+        const formats = DB.get('formats') || [];
+        const aromes = DB.get('aromes') || [];
+        const recettes = DB.get('recettes') || [];
+        const inventaire = DB.get('inventaire') || [];
+        const lots = DB.get('lots') || [];
+        const history = DB.get('history') || [];
+
+        const producedByFormat = [];
+        let totalBouteilles = 0;
+        let litresProduit = 0;
+
+        formats.forEach(format => {
+            const input = form.querySelector(`input[name="format_${format.id}"]`);
+            const quantite = Math.max(0, parseInt(input?.value, 10) || 0);
+            if (quantite > 0) {
+                producedByFormat.push({ format, quantite });
+                totalBouteilles += quantite;
+                litresProduit += ((format.contenanceCl || 0) * quantite) / 100;
+            }
+        });
+
+        if (producedByFormat.length === 0) {
+            showToast('Veuillez saisir au moins une quantité produite', 'warning');
+            return;
+        }
+
+        const arome = aromes.find(a => a.nom === aromeNom);
+        const recette = recettes.find(r => r.aromeId === arome?.id);
+        const warnings = [];
+
+        if (recette && Array.isArray(recette.ingredients)) {
+            recette.ingredients.forEach(ing => {
+                if (isWaterIngredient(ing.nom)) return;
+
+                const baseBesoin = (parseFloat(ing.quantite) || 0) * litresProduit;
+                const besoinMajore = baseBesoin * 1.015;
+                const item = findInventaireItemByName(inventaire, ing.nom);
+
+                if (!item) {
+                    warnings.push(`Ingrédient absent: ${ing.nom}`);
+                    return;
+                }
+
+                if ((item.quantite || 0) < besoinMajore) {
+                    warnings.push(`Stock insuffisant: ${item.nom}`);
+                }
+
+                item.quantite = parseFloat(((item.quantite || 0) - besoinMajore).toFixed(3));
+            });
+        } else {
+            warnings.push(`Recette introuvable pour ${aromeNom}`);
+        }
+
+        producedByFormat.forEach(({ format, quantite }) => {
+            const bottleItem = getBottleInventoryItem(inventaire, format);
+            if (!bottleItem) {
+                warnings.push(`Bouteilles vides absentes pour ${format.nom}`);
+            } else {
+                if ((bottleItem.quantite || 0) < quantite) {
+                    warnings.push(`Stock insuffisant: ${bottleItem.nom}`);
+                }
+                bottleItem.quantite = (bottleItem.quantite || 0) - quantite;
+            }
+        });
+
+        const capsulesItem = inventaire.find(item => {
+            const n = normalizeName(item.nom);
+            return n.includes('capsule') || n.includes('bouchon');
+        });
+        const capsulesNecessaires = Math.ceil(totalBouteilles * 1.075);
+        if (capsulesItem) {
+            if ((capsulesItem.quantite || 0) < capsulesNecessaires) {
+                warnings.push(`Stock insuffisant: ${capsulesItem.nom}`);
+            }
+            capsulesItem.quantite = (capsulesItem.quantite || 0) - capsulesNecessaires;
+        } else {
+            warnings.push('Capsules/bouchons absents de l\'inventaire');
+        }
+
+        const dateProduction = getLocalDateISOString();
+        const dates = calculateDates(dateProduction);
+
+        producedByFormat.forEach(({ format, quantite }) => {
+            const existingLot = lots.find(l =>
+                l.arome === aromeNom &&
+                l.format === format.nom &&
+                l.dateProduction === dateProduction
+            );
+
+            let lotId;
+            if (existingLot) {
+                existingLot.quantite = (existingLot.quantite || 0) + quantite;
+                lotId = existingLot.id;
+            } else {
+                const counter = parseInt(localStorage.getItem('thecol_lot_counter') || '0', 10);
+                lotId = String(counter + 1).padStart(6, '0');
+                localStorage.setItem('thecol_lot_counter', String(counter + 1));
+
+                lots.push({
+                    id: lotId,
+                    arome: aromeNom,
+                    format: format.nom,
+                    quantite,
+                    dateProduction,
+                    dlv: dates.dlv,
+                    dlc: dates.dlc
+                });
+            }
+
+            history.unshift({
+                id: `PROD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                lotId,
+                arome: aromeNom,
+                format: format.nom,
+                quantity: quantite,
+                productionDate: dateProduction,
+                dateAdded: new Date().toISOString()
+            });
+        });
+
+        DB.set('inventaire', inventaire);
+        DB.set('lots', lots);
+        DB.set('history', history);
+
+        modal.hide();
+        showToast(`Production confirmée: ${totalBouteilles} bouteille(s) ajoutée(s) au stock`);
+        if (warnings.length > 0) {
+            showToast(`Attention: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}`, 'warning');
+        }
+        renderProduction();
+    } catch (e) {
+        console.error('Error validating production:', e);
+        showToast('Erreur lors de la validation de la production', 'error');
+    } finally {
+        if (reenable) reenable();
+    }
 };
 
 // Inventaire
