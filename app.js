@@ -34,6 +34,73 @@ const getBLNumero = (livraison) => {
     return livraison.numeroBL || livraison.id.slice(-5);
 };
 
+// Unit Normalization & Conversion
+const CANONICAL_UNITS = ['g', 'kg', 'mL', 'L', 'pcs', 'm', 'caisse(s)'];
+const UNIT_ALIASES = {
+    'gr': 'g', 'gramme': 'g', 'grammes': 'g',
+    'ml': 'mL', 'millilitre': 'mL', 'millilitres': 'mL',
+    'l': 'L', 'litre': 'L', 'litres': 'L',
+    'kilogramme': 'kg', 'kilogrammes': 'kg'
+};
+const UNIT_FAMILY = {
+    'g': 'mass', 'kg': 'mass',
+    'mL': 'volume', 'L': 'volume',
+    'pcs': 'count', 'caisse(s)': 'count',
+    'm': 'length'
+};
+const CONVERSION_FACTORS = {
+    mass: { gToKg: 0.001, kgToG: 1000 },
+    volume: { mLToL: 0.001, LToML: 1000 }
+};
+
+const normalizeUnit = (unit) => {
+    if (!unit) return null;
+    const lower = String(unit).toLowerCase().trim();
+    return UNIT_ALIASES[lower] || lower;
+};
+
+const isValidUnit = (unit) => {
+    return CANONICAL_UNITS.includes(normalizeUnit(unit));
+};
+
+const getUnitFamily = (unit) => {
+    return UNIT_FAMILY[normalizeUnit(unit)] || null;
+};
+
+const areUnitsCompatible = (unit1, unit2) => {
+    const u1 = normalizeUnit(unit1);
+    const u2 = normalizeUnit(unit2);
+    if (!u1 || !u2) return false;
+    return getUnitFamily(u1) === getUnitFamily(u2) && getUnitFamily(u1) !== null;
+};
+
+const convertQuantity = (quantity, fromUnit, toUnit) => {
+    const from = normalizeUnit(fromUnit);
+    const to = normalizeUnit(toUnit);
+    if (!from || !to) return null;
+    if (!areUnitsCompatible(from, to)) return null;
+
+    const qty = parseFloat(quantity);
+    if (isNaN(qty)) return null;
+
+    if (from === to) return qty;
+
+    const family = getUnitFamily(from);
+    if (family === 'mass') {
+        if (from === 'g' && to === 'kg') return qty * CONVERSION_FACTORS.mass.gToKg;
+        if (from === 'kg' && to === 'g') return qty * CONVERSION_FACTORS.mass.kgToG;
+    }
+    if (family === 'volume') {
+        if (from === 'mL' && to === 'L') return qty * CONVERSION_FACTORS.volume.mLToL;
+        if (from === 'L' && to === 'mL') return qty * CONVERSION_FACTORS.volume.LToML;
+    }
+    return null;
+};
+
+const displayUnit = (unit) => {
+    return normalizeUnit(unit) || unit;
+};
+
 // Data Storage with Firebase sync
 const DB = {
     firebaseSynced: false,
@@ -2854,15 +2921,25 @@ const renderProduction = () => {
     });
     
     // Calculate ingredients needed (for total display)
+    // Aggregate by name+family to avoid mixing incompatible units (e.g. g vs kg)
     const ingredientsTotal = {};
     Object.entries(litresParArome).forEach(([aromeNom, litres]) => {
         const arome = aromes.find(a => a.nom === aromeNom);
         const recette = recettes.find(r => r.aromeId === arome?.id);
         if (recette) {
             recette.ingredients.forEach(ing => {
-                const besoin = ing.quantite * litres;
-                if (!ingredientsTotal[ing.nom]) ingredientsTotal[ing.nom] = { quantite: 0, unite: ing.unite };
-                ingredientsTotal[ing.nom].quantite += besoin;
+                const ingUnit = displayUnit(ing.unite);
+                const family = getUnitFamily(ingUnit);
+                const key = `${ing.nom}|${family || ingUnit}`;
+                let besoin = ing.quantite * litres;
+                if (!ingredientsTotal[key]) {
+                    ingredientsTotal[key] = { nom: ing.nom, quantite: 0, unite: ingUnit, family };
+                }
+                if (areUnitsCompatible(ingredientsTotal[key].unite, ingUnit)) {
+                    const converted = convertQuantity(besoin, ingUnit, ingredientsTotal[key].unite);
+                    besoins = converted !== null ? converted : besoins;
+                }
+                ingredientsTotal[key].quantite += besoins;
             });
         }
     });
@@ -2971,7 +3048,7 @@ const renderProduction = () => {
                                 ${cuve.ingredients.map(ing => `
                                   <li>
                                     <span>${ing.nom}</span>
-                                    <strong>${ing.quantite} ${ing.unite}</strong>
+                                    <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
                                   </li>
                                 `).join('')}
                               </ul>
@@ -3085,7 +3162,7 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
                         ${cuve.ingredients.map(ing => `
                             <li>
                                 <span>${ing.nom}</span>
-                                <strong>${ing.quantite} ${ing.unite}</strong>
+                                <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
                             </li>
                         `).join('')}
                     </ul>
@@ -3167,11 +3244,29 @@ const validerProduction = (event, encodedAromeNom, cuveIndex) => {
                     return;
                 }
 
-                if ((item.quantite || 0) < besoinMajore) {
+                const ingUnit = displayUnit(ing.unite);
+                const invUnit = displayUnit(item.unite);
+
+                if (!areUnitsCompatible(ingUnit, invUnit)) {
+                    warnings.push(`Unité incompatible pour ${ing.nom} (recette: ${ingUnit}, inventaire: ${invUnit})`);
+                    return;
+                }
+
+                let besoinInInvUnit = besoinMajore;
+                if (ingUnit !== invUnit) {
+                    const converted = convertQuantity(besoinMajore, ingUnit, invUnit);
+                    if (converted === null) {
+                        warnings.push(`Conversion impossible pour ${ing.nom}`);
+                        return;
+                    }
+                    besoinInInvUnit = converted;
+                }
+
+                if ((item.quantite || 0) < besoinInInvUnit) {
                     warnings.push(`Stock insuffisant: ${item.nom}`);
                 }
 
-                item.quantite = parseFloat(((item.quantite || 0) - besoinMajore).toFixed(3));
+                item.quantite = parseFloat(((item.quantite || 0) - besoinInInvUnit).toFixed(4));
             });
         } else {
             warnings.push(`Recette introuvable pour ${aromeNom}`);
@@ -3424,9 +3519,9 @@ const saveInventaireItem = (event, id) => {
         id: id || generateId(),
         categorie: formData.get('categorie'),
         nom: formData.get('nom'),
-        quantite: parseInt(formData.get('quantite')) || 0,
-        unite: formData.get('unite'),
-        seuilAlerte: parseInt(formData.get('seuilAlerte')) || 0
+        quantite: parseFloat(formData.get('quantite')) || 0,
+        unite: displayUnit(formData.get('unite')),
+        seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0
     };
     
     const items = DB.get('inventaire');
@@ -3877,7 +3972,7 @@ const showRecetteModal = (id = null) => {
         <div class="ingredient-row">
             <input type="text" name="ingredients[${idx}][nom]" value="${ing.nom}" placeholder="Ingrédient" required>
             <input type="number" name="ingredients[${idx}][quantite]" value="${ing.quantite}" placeholder="Qté" step="0.01" required>
-            <input type="text" name="ingredients[${idx}][unite]" value="${ing.unite}" placeholder="Unité" required>
+            <input type="text" name="ingredients[${idx}][unite]" value="${displayUnit(ing.unite)}" placeholder="Unité" required>
             <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
         </div>
     `).join('') : '<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>';
@@ -3942,16 +4037,27 @@ const saveRecette = (event, id) => {
     const formData = new FormData(form);
     
     const ingredients = [];
+    const invalidUnits = [];
     const rows = document.querySelectorAll('.ingredient-row');
     rows.forEach((row, idx) => {
         const nom = row.querySelector(`input[name="ingredients[${idx}][nom]"]`)?.value || row.querySelector('[name*="nom"]')?.value;
         const quantite = row.querySelector(`input[name="ingredients[${idx}][quantite]"]`)?.value || row.querySelector('[name*="quantite"]')?.value;
-        const unite = row.querySelector(`input[name="ingredients[${idx}][unite]"]`)?.value || row.querySelector('[name*="unite"]')?.value;
+        const rawUnite = row.querySelector(`input[name="ingredients[${idx}][unite]"]`)?.value || row.querySelector('[name*="unite"]')?.value;
         
-        if (nom && quantite && unite) {
+        if (nom && quantite && rawUnite) {
+            const unite = displayUnit(rawUnite);
+            if (!isValidUnit(unite)) {
+                invalidUnits.push(`${nom} (${rawUnite})`);
+                return;
+            }
             ingredients.push({ nom, quantite: parseFloat(quantite), unite });
         }
     });
+    
+    if (invalidUnits.length > 0) {
+        showToast(`Unité invalide: ${invalidUnits.join(', ')}`, 'error');
+        return;
+    }
     
     // Get aromeId from select or hidden input
     let aromeId = formData.get('aromeId');
