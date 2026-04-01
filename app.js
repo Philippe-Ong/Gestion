@@ -2937,9 +2937,9 @@ const renderProduction = () => {
                 }
                 if (areUnitsCompatible(ingredientsTotal[key].unite, ingUnit)) {
                     const converted = convertQuantity(besoin, ingUnit, ingredientsTotal[key].unite);
-                    besoins = converted !== null ? converted : besoins;
+                    besoin = converted !== null ? converted : besoin;
                 }
-                ingredientsTotal[key].quantite += besoins;
+                ingredientsTotal[key].quantite += besoin;
             });
         }
     });
