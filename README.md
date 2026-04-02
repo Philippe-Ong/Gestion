@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v6.0**
+**v6.3**
 
 ## Adresse
 
@@ -53,6 +53,44 @@ Application de gestion pour votre entreprise de thé froid.
   - Bouteilles vides: **1 pour 1** selon le format
   - Capsules/Bouchons: **+7.5%** (arrondi supérieur)
 - Si stock inventaire insuffisant: warning affiché, la production continue
+- Matching intelligent des bouteilles vides (alias 25cl ↔ 0.25l ↔ 250ml)
+
+### Inventaire
+- Suivi des consommables et équipements
+- Ajustement rapide des quantités (+/−)
+- Alertes de stock bas (seuil configurable)
+- **Synchronisation automatique** avec les recettes:
+  - Suggestions d'ingrédients à la saisie (datalist)
+  - Bouton "Synchroniser inventaire" dans Paramètres > Recettes
+  - Ajout automatique des ingrédients manquants depuis les recettes
+
+### Paramètres
+- **Employés**: Ajout, modification, activation/désactivation
+- **Arômes**: Gestion des aromes avec couleurs
+- **Formats**: Gestion des formats (0.25l, 0.5l, 1l)
+- **Recettes**: Ingrédients par litre pour chaque arôme
+  - Suggestions d'ingrédients depuis l'inventaire (datalist)
+  - Vérification à la sauvegarde: alerte si ingrédient absent de l'inventaire
+  - Bouton **"Synchroniser inventaire"**: ajoute automatiquement les ingrédients manquants
+- Matching intelligent des bouteilles vides (alias 25cl ↔ 0.25l ↔ 250ml)
+
+### Inventaire
+- Suivi des consommables et équipements
+- Ajustement rapide des quantités (+/−)
+- Alertes de stock bas (seuil configurable)
+- **Synchronisation automatique** avec les recettes:
+  - Suggestions d'ingrédients à la saisie (datalist)
+  - Bouton "Synchroniser inventaire" dans Paramètres > Recettes
+  - Ajout automatique des ingrédients manquants depuis les recettes
+
+### Paramètres
+- **Employés**: Ajout, modification, activation/désactivation
+- **Arômes**: Gestion des aromes avec couleurs
+- **Formats**: Gestion des formats (0.25l, 0.5l, 1l)
+- **Recettes**: Ingrédients par litre pour chaque arôme
+  - Suggestions d'ingrédients depuis l'inventaire (datalist)
+  - Vérification à la sauvegarde: alerte si ingrédient absent de l'inventaire
+  - Bouton **"Synchroniser inventaire"**: ajoute automatiquement les ingrédients manquants
 
 ### Paramètres
 - **Employés**: Ajout, modification, activation/désactivation
