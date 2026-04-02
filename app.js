@@ -1745,27 +1745,6 @@ const showCommandeModal = (id = null) => {
         return;
     }
     
-    const itemsHtml = commande ? commande.items.map((item, idx) => `
-        <div class="item-row" data-index="${idx}">
-            <select name="aromeId" required>
-                ${aromes.map(a => `<option value="${a.id}" ${item.aromeId === a.id ? 'selected' : ''}>${a.nom}</option>`).join('')}
-            </select>
-            <select name="formatId" required>
-                ${formats.map(f => `<option value="${f.id}" ${item.formatId === f.id ? 'selected' : ''}>${f.nom}</option>`).join('')}
-            </select>
-            <input type="number" name="quantite" value="${item.quantite}" min="1" required>
-            <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
-        </div>
-    `).join('') : '<div class="item-row"><select name="aromeId" required></select><select name="formatId" required></select><input type="number" name="quantite" value="1" min="1" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>';
-    
-    // Populate arome options
-    const aromeOptions = aromes.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
-    const formatOptions = formats.map(f => `<option value="${f.id}">${f.nom}</option>`).join('');
-    
-    // Store options as JSON to avoid HTML escaping issues
-    const aromeOptionsJson = JSON.stringify(aromes.map(a => ({ id: a.id, nom: a.nom })));
-    const formatOptionsJson = JSON.stringify(formats.map(f => ({ id: f.id, nom: f.nom })));
-    
     modal.show(id ? 'Modifier commande' : 'Nouvelle commande', `
         <form id="commandeForm">
             <div class="form-row">
@@ -1819,39 +1798,6 @@ const showCommandeModal = (id = null) => {
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
         <button class="btn btn-primary" onclick="saveCommande(event, '${id || ''}')">Enregistrer</button>
     `);
-    
-    // Set initial options in selects (for existing items that need options)
-    const container = document.getElementById('itemsContainer');
-    const aromesData = JSON.parse(container.dataset.aromes || '[]');
-    const formatsData = JSON.parse(container.dataset.formats || '[]');
-    const aromeOpts = aromesData.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
-    const formatOpts = formatsData.map(f => `<option value="${f.id}">${f.nom}</option>`).join('');
-    
-    container.querySelectorAll('select[name="aromeId"]:not([value])').forEach(sel => {
-        sel.innerHTML = aromeOpts;
-    });
-    container.querySelectorAll('select[name="formatId"]:not([value])').forEach(sel => {
-        sel.innerHTML = formatOpts;
-    });
-};
-
-const addItem = () => {
-    const container = document.getElementById('itemsContainer');
-    const aromes = JSON.parse(container.dataset.aromes || '[]');
-    const formats = JSON.parse(container.dataset.formats || '[]');
-    
-    const aromeOptions = aromes.map(a => `<option value="${a.id}">${a.nom}</option>`).join('');
-    const formatOptions = formats.map(f => `<option value="${f.id}">${f.nom}</option>`).join('');
-    
-    const div = document.createElement('div');
-    div.className = 'item-row';
-    div.innerHTML = `
-        <select name="aromeId" required>${aromeOptions}</select>
-        <select name="formatId" required>${formatOptions}</select>
-        <input type="number" name="quantite" value="1" min="1" required>
-        <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
-    `;
-    container.appendChild(div);
 };
 
 const saveCommande = (event, id) => {
