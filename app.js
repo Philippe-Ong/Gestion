@@ -3044,24 +3044,33 @@ const isWaterIngredient = (nom) => {
 const getBottleInventoryItem = (items, format) => {
     if (!format) return null;
 
-    const candidates = [];
-    if (format.nom) {
-        candidates.push(`Bouteilles vides ${format.nom}`);
-    }
-    if (format.contenanceCl) {
-        candidates.push(`Bouteilles vides ${format.contenanceCl}cl`);
-        if (format.contenanceCl % 100 === 0) {
-            candidates.push(`Bouteilles vides ${format.contenanceCl / 100}L`);
+    const cl = format.contenanceCl || 0;
+
+    const normalizedInvItems = items.map(item => ({
+        item,
+        normalized: normalizeName(item.nom)
+    }));
+
+    const exactMatch = normalizedInvItems.find(({ normalized }) => {
+        const hasNom = format.nom && normalizeName(`Bouteilles vides ${format.nom}`) === normalized;
+        const hasCl = cl > 0 && normalizeName(`Bouteilles vides ${cl}cl`) === normalized;
+        const hasL = cl > 0 && cl % 100 === 0 && normalizeName(`Bouteilles vides ${cl / 100}L`) === normalized;
+        return hasNom || hasCl || hasL;
+    });
+    if (exactMatch) return exactMatch.item;
+
+    const looseMatch = normalizedInvItems.find(({ normalized }) => {
+        if (!normalized.includes('bouteillesvides') && !normalized.includes('bouteille')) return false;
+        const numericPart = parseFloat(normalized.replace(/[^0-9.]/g, ''));
+        if (!isNaN(numericPart) && numericPart > 0) {
+            const inMl = numericPart < 10 ? numericPart * 1000 : numericPart < 100 ? numericPart * 10 : numericPart;
+            return Math.abs(inMl - cl * 10) < 1;
         }
-    }
+        return false;
+    });
+    if (looseMatch) return looseMatch.item;
 
-    for (const candidate of candidates) {
-        const found = findInventaireItemByName(items, candidate);
-        if (found) return found;
-    }
-
-    const normalizedCandidates = candidates.map(c => normalizeName(c));
-    return items.find(item => normalizedCandidates.some(c => normalizeName(item.nom).includes(c.replace('bouteillesvides', '')))) || null;
+    return null;
 };
 
 const confirmerProduction = (encodedAromeNom, cuveIndex) => {
@@ -3587,7 +3596,10 @@ const renderParametres = () => {
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Recettes</h3>
-                    <button class="btn btn-sm btn-primary" onclick="showRecetteModal()">+ Ajouter</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-sm btn-secondary" onclick="syncRecettesInventaire()">Synchroniser inventaire</button>
+                        <button class="btn btn-sm btn-primary" onclick="showRecetteModal()">+ Ajouter</button>
+                    </div>
                 </div>
                 <ul class="settings-list">
                     ${recettes.length === 0 ? '<li class="settings-item text-muted">Aucune recette</li>' : 
@@ -3914,14 +3926,21 @@ const showRecetteModal = (id = null) => {
         return;
     }
     
+    const inventaire = DB.get('inventaire') || [];
+    const consumableNames = inventaire.filter(i => i.categorie === 'consommable').map(i => i.nom);
+    const suggestionsId = 'ingredientSuggestions';
+    const suggestionsList = consumableNames.length > 0
+        ? `<datalist id="${suggestionsId}">${consumableNames.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join('')}</datalist>`
+        : '';
+
     const ingredientsHtml = recette ? recette.ingredients.map((ing, idx) => `
         <div class="ingredient-row">
-            <input type="text" name="ingredients[${idx}][nom]" value="${ing.nom}" placeholder="Ingrédient" required>
+            <input type="text" name="ingredients[${idx}][nom]" value="${ing.nom}" placeholder="Ingrédient" list="${suggestionsId}" required>
             <input type="number" name="ingredients[${idx}][quantite]" value="${ing.quantite}" placeholder="Qté" step="0.01" required>
             <input type="text" name="ingredients[${idx}][unite]" value="${displayUnit(ing.unite)}" placeholder="Unité" required>
             <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
         </div>
-    `).join('') : '<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>';
+    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>`;
     
     // Filter out aromes that already have a recipe (except the one being edited)
     const availableAromes = aromes.filter(a => {
@@ -3948,6 +3967,7 @@ const showRecetteModal = (id = null) => {
             </div>
             <div class="form-group">
                 <label>Ingrédients (pour 1 litre de cet arôme)</label>
+                ${suggestionsList}
                 <div id="ingredientsContainer" style="display: flex; flex-direction: column; gap: 8px;">
                     ${ingredientsHtml}
                 </div>
@@ -3963,13 +3983,13 @@ const showRecetteModal = (id = null) => {
 const addIngredient = () => {
     const container = document.getElementById('ingredientsContainer');
     const index = container.querySelectorAll('.ingredient-row').length;
-    
+
     const div = document.createElement('div');
     div.className = 'ingredient-row';
     div.style.display = 'flex';
     div.style.gap = '8px';
     div.innerHTML = `
-        <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" required style="flex: 2;">
+        <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" list="ingredientSuggestions" required style="flex: 2;">
         <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" required style="flex: 1;">
         <input type="text" name="ingredients[${index}][unite]" placeholder="Unité" required style="flex: 1;">
         <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
@@ -4003,6 +4023,15 @@ const saveRecette = (event, id) => {
     if (invalidUnits.length > 0) {
         showToast(`Unité invalide: ${invalidUnits.join(', ')}`, 'error');
         return;
+    }
+
+    const inventaire = DB.get('inventaire') || [];
+    const missingIngredients = ingredients.filter(ing => {
+        if (isWaterIngredient(ing.nom)) return false;
+        return !findInventaireItemByName(inventaire, ing.nom);
+    });
+    if (missingIngredients.length > 0) {
+        showToast(`Ingrédient(s) absents de l'inventaire: ${missingIngredients.map(i => i.nom).join(', ')}`, 'warning');
     }
     
     // Get aromeId from select or hidden input
@@ -4041,6 +4070,49 @@ const deleteRecette = (id) => {
         DB.set('recettes', recettes);
         showToast('Recette supprimée');
         renderParametres();
+    }
+};
+
+const syncRecettesInventaire = () => {
+    const recettes = DB.get('recettes') || [];
+    const inventaire = DB.get('inventaire') || [];
+
+    const uniqueIngredients = new Map();
+
+    recettes.forEach(recette => {
+        (recette.ingredients || []).forEach(ing => {
+            if (isWaterIngredient(ing.nom)) return;
+            const normalized = normalizeName(ing.nom);
+            if (!uniqueIngredients.has(normalized)) {
+                uniqueIngredients.set(normalized, { nom: ing.nom, unite: ing.unite || 'pcs' });
+            }
+        });
+    });
+
+    let ajouteCount = 0;
+
+    uniqueIngredients.forEach(({ nom, unite }, normalized) => {
+        const existing = findInventaireItemByName(inventaire, nom);
+        if (!existing) {
+            inventaire.push({
+                id: generateId(),
+                categorie: 'consommable',
+                nom,
+                quantite: 0,
+                unite,
+                seuilAlerte: 0
+            });
+            ajouteCount++;
+        }
+    });
+
+    DB.set('inventaire', inventaire);
+
+    if (ajouteCount === 0) {
+        showToast('Inventaire déjà synchronisé — aucun ingrédient manquant');
+    } else {
+        showToast(`${ajouteCount} ingrédient(s) ajouté(s) à l'inventaire`);
+        renderInventaire();
     }
 };
 
