@@ -13,10 +13,13 @@ const getLocalDateISOString = () => {
 };
 
 const getNextCommandeNumero = () => {
-    let counter = parseInt(localStorage.getItem('thecol_compteur_commandes') || '0');
-    counter++;
-    localStorage.setItem('thecol_compteur_commandes', counter.toString());
-    return counter.toString().padStart(5, '0');
+    const commandes = DB.get('commandes');
+    let maxNum = 0;
+    commandes.forEach(cmd => {
+        const num = parseInt(cmd.numero || '0', 10);
+        if (num > maxNum) maxNum = num;
+    });
+    return String(maxNum + 1).padStart(5, '0');
 };
 
 const getCommandeNumero = (commande) => {
@@ -24,10 +27,13 @@ const getCommandeNumero = (commande) => {
 };
 
 const getNextBLNumero = () => {
-    let counter = parseInt(localStorage.getItem('thecol_compteur_bl') || '0');
-    counter++;
-    localStorage.setItem('thecol_compteur_bl', counter.toString());
-    return counter.toString().padStart(5, '0');
+    const livraisons = DB.get('livraisons');
+    let maxNum = 0;
+    livraisons.forEach(liv => {
+        const num = parseInt(liv.numeroBL || '0', 10);
+        if (num > maxNum) maxNum = num;
+    });
+    return String(maxNum + 1).padStart(5, '0');
 };
 
 const getBLNumero = (livraison) => {
@@ -767,9 +773,12 @@ const saveLot = (event) => {
             existingLot.quantite = (existingLot.quantite || 0) + quantite;
             newId = existingLot.id;
         } else {
-            const counter = parseInt(localStorage.getItem('thecol_lot_counter') || '0', 10);
-            newId = String(counter + 1).padStart(6, '0');
-            localStorage.setItem('thecol_lot_counter', String(counter + 1));
+            let maxNum = 0;
+            lots.forEach(l => {
+                const num = parseInt(l.id, 10);
+                if (!isNaN(num) && num > maxNum) maxNum = num;
+            });
+            newId = String(maxNum + 1).padStart(6, '0');
             
             const lot = {
                 id: newId,
@@ -3268,9 +3277,12 @@ const validerProduction = (event, encodedAromeNom, cuveIndex) => {
                 existingLot.quantite = (existingLot.quantite || 0) + quantite;
                 lotId = existingLot.id;
             } else {
-                const counter = parseInt(localStorage.getItem('thecol_lot_counter') || '0', 10);
-                lotId = String(counter + 1).padStart(6, '0');
-                localStorage.setItem('thecol_lot_counter', String(counter + 1));
+                let maxNum = 0;
+                lots.forEach(l => {
+                    const num = parseInt(l.id, 10);
+                    if (!isNaN(num) && num > maxNum) maxNum = num;
+                });
+                lotId = String(maxNum + 1).padStart(6, '0');
 
                 lots.push({
                     id: lotId,
@@ -3685,11 +3697,7 @@ const renderParametres = () => {
 
 // Settings - Counters
 const resetCounters = () => {
-    if (confirm('Réinitialiser les compteurs de lots et de commandes? Cette action est irréversible.')) {
-        localStorage.removeItem('thecol_lot_counter');
-        localStorage.removeItem('thecol_compteur_commandes');
-        showToast('Compteurs réinitialisés - les prochain lot sera #000001 et la prochaine commande sera 00001');
-    }
+    showToast('Les compteurs sont maintenant calculés dynamiquement depuis les données existantes');
 };
 
 // Settings - Employes
