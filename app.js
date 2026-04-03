@@ -3249,7 +3249,7 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
         const besoinsArome = Object.values(state.productionNecesaire || {}).filter(b => b.aromeNom === aromeNom && b.aProduire > 0);
         const prefillByFormat = {};
         besoinsArome.forEach(b => {
-            prefillByFormat[b.formatNom] = Math.max(0, Math.round((b.aProduire || 0) * ratioCuve));
+            prefillByFormat[b.formatNom] = Math.max(0, Math.floor((b.aProduire || 0) * ratioCuve));
         });
 
         const formRows = formats.map(format => {

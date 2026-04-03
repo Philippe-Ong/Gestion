@@ -109,4 +109,4 @@ Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync
 - **Never commit secrets:** Firebase config in `index.html` is public (client-side SDK); do not add server keys.
 - **Preserve the data schema:** Defined in `SPEC.md` — any new fields should be added as optional properties.
 - **Stock Status Logic:** Auto-computed from DLC dates: `ok`, `warning` (< 1 month), `expired` (past).
-- **Version Bump & Push:** After every functional change that affects the application, always increment the version badge in `index.html` (e.g. `v6.2` → `v6.3`) and push to the remote branch immediately. Never leave a completed feature or bugfix uncommitted or unpushed.
+- **Version Bump & Push:** After every functional change that affects the application, always increment the version badge in `index.html` (e.g. `v6.2` → `v6.3`), update the `app.js` cache-buster query string (`app.js?v=X.Y`), and push to the remote branch immediately. Never leave a completed feature or bugfix uncommitted or unpushed.
