@@ -2994,10 +2994,14 @@ const renderProduction = () => {
                             <span> - ${totalLitres.toFixed(1)}L (${cuves.length} cuve${cuves.length > 1 ? 's' : ''})</span>
                           </div>
                           ${cuves.map((cuve, cuveIndex) => `
-                            <div class="cuve-detail">
+                            <div class="cuve-detail" data-arome="${aromeNom}" data-cuve-index="${cuveIndex}">
                               <div class="flex-between" style="margin-bottom: 8px;">
-                                <div class="cuve-title" style="margin-bottom: 0;">Cuve ${cuve.numero} (${cuve.litres.toFixed(1)}L)</div>
+                                <div class="cuve-title" style="margin-bottom: 0;">Cuve ${cuve.numero}</div>
                                 <button class="btn btn-sm btn-success" onclick="confirmerProduction('${encodeURIComponent(aromeNom)}', ${cuveIndex})">Produite</button>
+                              </div>
+                              <div class="cuve-slider-row">
+                                <input type="range" class="cuve-slider" min="1" max="25" step="0.5" value="${cuve.litres}" data-arome="${aromeNom}" data-cuve-index="${cuveIndex}">
+                                <span class="cuve-litres-display">${cuve.litres.toFixed(1)}L</span>
                               </div>
                               <ul class="ingredient-list">
                                 ${cuve.ingredients.map(ing => `
@@ -3030,6 +3034,124 @@ const renderProduction = () => {
     `;
     
     safeRender(html);
+    attacherSliderEvents();
+};
+
+const attacherSliderEvents = () => {
+    document.querySelectorAll('.cuve-slider').forEach(slider => {
+        slider.addEventListener('input', (e) => {
+            const aromeNom = e.target.dataset.arome;
+            const cuveIndex = parseInt(e.target.dataset.cuveIndex, 10);
+            const nouvelleValeur = parseFloat(e.target.value);
+            ajusterCuves(aromeNom, cuveIndex, nouvelleValeur);
+        });
+    });
+};
+
+const ajusterCuves = (aromeNom, cuveIndex, nouvelleValeur) => {
+    const state = productionPlannerState;
+    if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) return;
+
+    const cuves = state.cuvesParArome[aromeNom];
+    if (!cuves || cuves.length === 0) return;
+
+    const ancienneValeur = cuves[cuveIndex].litres;
+    const delta = nouvelleValeur - ancienneValeur;
+
+    if (delta === 0) return;
+
+    const totalRequis = cuves.reduce((sum, c) => sum + c.litres, 0);
+
+    const autresIndices = cuves.map((_, i) => i).filter(i => i !== cuveIndex);
+    if (autresIndices.length === 0) return;
+
+    cuves[cuveIndex].litres = nouvelleValeur;
+
+    let deltaRestant = -delta;
+
+    for (let iter = 0; iter < 20 && Math.abs(deltaRestant) > 0.001; iter++) {
+        const ajustables = autresIndices.filter(i => {
+            const val = cuves[i].litres;
+            if (deltaRestant > 0) return val < 25;
+            return val > 1;
+        });
+
+        if (ajustables.length === 0) break;
+
+        const totalAjustable = ajustables.reduce((sum, i) => sum + cuves[i].litres, 0);
+
+        if (totalAjustable === 0) {
+            const parCuve = deltaRestant / ajustables.length;
+            ajustables.forEach(i => {
+                cuves[i].litres = Math.round((cuves[i].litres + parCuve) * 2) / 2;
+                cuves[i].litres = Math.max(1, Math.min(25, cuves[i].litres));
+            });
+        } else {
+            ajustables.forEach(i => {
+                const proportion = cuves[i].litres / totalAjustable;
+                const ajustement = deltaRestant * proportion;
+                cuves[i].litres = Math.round((cuves[i].litres + ajustement) * 2) / 2;
+                cuves[i].litres = Math.max(1, Math.min(25, cuves[i].litres));
+            });
+        }
+
+        const nouveauTotal = cuves.reduce((sum, c) => sum + c.litres, 0);
+        deltaRestant = totalRequis - nouveauTotal;
+    }
+
+    const aromes = DB.get('aromes') || [];
+    const recettes = DB.get('recettes') || [];
+    const arome = aromes.find(a => a.nom === aromeNom);
+    const recette = recettes.find(r => r.aromeId === arome?.id);
+
+    cuves.forEach(cuve => {
+        cuve.ingredients = calculerIngredientsCuve(recette, cuve.litres);
+    });
+
+    mettreAJourSlidersUI(aromeNom);
+};
+
+const calculerIngredientsCuve = (recette, litres) => {
+    if (!recette || !Array.isArray(recette.ingredients) || litres <= 0) return [];
+    return recette.ingredients.map(ing => ({
+        nom: ing.nom,
+        quantite: parseFloat(((parseFloat(ing.quantite) || 0) * litres).toFixed(2)),
+        unite: ing.unite
+    }));
+};
+
+const mettreAJourSlidersUI = (aromeNom) => {
+    const state = productionPlannerState;
+    if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) return;
+
+    const cuves = state.cuvesParArome[aromeNom];
+
+    document.querySelectorAll(`.cuve-slider[data-arome="${aromeNom}"]`).forEach(slider => {
+        const idx = parseInt(slider.dataset.cuveIndex, 10);
+        const cuve = cuves[idx];
+        if (!cuve) return;
+
+        slider.value = cuve.litres;
+
+        const detail = slider.closest('.cuve-detail');
+        if (detail) {
+            const display = detail.querySelector('.cuve-litres-display');
+            if (display) display.textContent = `${cuve.litres.toFixed(1)}L`;
+
+            const titre = detail.querySelector('.cuve-title');
+            if (titre) titre.textContent = `Cuve ${cuve.numero} (${cuve.litres.toFixed(1)}L)`;
+
+            const ingList = detail.querySelector('.ingredient-list');
+            if (ingList && cuve.ingredients) {
+                ingList.innerHTML = cuve.ingredients.map(ing => `
+                    <li>
+                        <span>${ing.nom}</span>
+                        <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
+                    </li>
+                `).join('');
+            }
+        }
+    });
 };
 
 const normalizeName = (value) => {

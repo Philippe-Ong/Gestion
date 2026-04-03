@@ -1749,3 +1749,105 @@ input[type="checkbox"] {
         width: 100%;
     }
 }
+
+/* Production cuve sliders */
+.cuve-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 8px 0;
+}
+
+.cuve-slider {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.cuve-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    border: 2px solid var(--primary-dark);
+    transition: transform 0.15s ease;
+}
+
+.cuve-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+}
+
+.cuve-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    border: 2px solid var(--primary-dark);
+}
+
+.cuve-litres-display {
+    min-width: 52px;
+    text-align: right;
+    font-weight: 600;
+    color: var(--primary);
+    font-size: 14px;
+}
+
+/* Production cuve sliders */
+.cuve-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 8px 0;
+}
+
+.cuve-slider {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.cuve-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    border: 2px solid var(--primary-dark);
+    transition: transform 0.15s ease;
+}
+
+.cuve-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+}
+
+.cuve-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    border: 2px solid var(--primary-dark);
+}
+
+.cuve-litres-display {
+    min-width: 52px;
+    text-align: right;
+    font-weight: 600;
+    color: var(--primary);
+    font-size: 14px;
+}
