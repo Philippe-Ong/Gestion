@@ -2465,23 +2465,27 @@ const addSharedString = (text, ssStrings, ssModified) => {
 
 const setCellText = (xml, ref, text, ssStrings, ssModified) => {
     const idx = addSharedString(text, ssStrings, ssModified);
-    const cellRegex = new RegExp(`(<c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/c>`);
+    const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
     const match = xml.match(cellRegex);
     if (!match) return xml;
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
-    return xml.replace(cellRegex, `${openTag} t="s"><v>${idx}</v></c>`);
+    const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
+    const closeName = closeTag ? closeTag[1] : 'c';
+    return xml.replace(cellRegex, `${openTag} t="s"><v>${idx}</v></${closeName}>`);
 };
 
 const setCellValue = (xml, ref, value) => {
-    const cellRegex = new RegExp(`(<c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/c>`);
+    const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
     const match = xml.match(cellRegex);
     if (!match) return xml;
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
-    return xml.replace(cellRegex, `${openTag}><v>${value}</v></c>`);
+    const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
+    const closeName = closeTag ? closeTag[1] : 'c';
+    return xml.replace(cellRegex, `${openTag}><v>${value}</v></${closeName}>`);
 };
 
 const hideRow = (xml, rowNum) => {
-    const rowRegex = new RegExp(`(<row\\s+r="${rowNum}"[^>]*)>`);
+    const rowRegex = new RegExp(`(<[a-z0-9]*:?row\\s+r="${rowNum}"[^>]*)>`);
     const match = xml.match(rowRegex);
     if (!match) return xml;
     if (match[1].includes('hidden=')) return xml;
@@ -2489,18 +2493,20 @@ const hideRow = (xml, rowNum) => {
 };
 
 const unhideRow = (xml, rowNum) => {
-    const rowRegex = new RegExp(`(<row\\s+r="${rowNum}"[^>]*)hidden="1"([^>]*)>`);
+    const rowRegex = new RegExp(`(<[a-z0-9]*:?row\\s+r="${rowNum}"[^>]*)hidden="1"([^>]*)>`);
     const match = xml.match(rowRegex);
     if (!match) return xml;
     return xml.replace(rowRegex, `${match[1]}${match[2]}>`);
 };
 
 const clearCell = (xml, ref) => {
-    const cellRegex = new RegExp(`(<c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/c>`);
+    const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
     const match = xml.match(cellRegex);
     if (!match) return xml;
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
-    return xml.replace(cellRegex, `${openTag}><v></v></c>`);
+    const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
+    const closeName = closeTag ? closeTag[1] : 'c';
+    return xml.replace(cellRegex, `${openTag}><v></v></${closeName}>`);
 };
 
 const rebuildSharedStrings = (ssStrings) => {
