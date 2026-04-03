@@ -2467,6 +2467,7 @@ const setCellText = (xml, ref, text, ssStrings, ssModified) => {
     const idx = addSharedString(text, ssStrings, ssModified);
     const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
     const match = xml.match(cellRegex);
+    console.log(`setCellText ${ref}:`, match ? 'MATCH' : 'NO MATCH');
     if (!match) return xml;
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
     const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
