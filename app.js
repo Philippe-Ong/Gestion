@@ -2453,14 +2453,9 @@ const generateBL = (commandeId) => {
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
-const addSharedString = (text, ssStrings, ssModified) => {
-    let idx = ssStrings.indexOf(text);
-    if (idx === -1) {
-        idx = ssStrings.length;
-        ssStrings.push(text);
-        if (ssModified) ssModified.value = true;
-    }
-    return idx;
+const getPrefix = (tag) => {
+    const m = tag.match(/<([a-z0-9]*):/);
+    return m ? m[1] : '';
 };
 
 const setCellText = (xml, ref, text) => {
@@ -2470,8 +2465,10 @@ const setCellText = (xml, ref, text) => {
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
     const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
     const closeName = closeTag ? closeTag[1] : 'c';
+    const pfx = getPrefix(match[1]);
+    const p = pfx ? pfx + ':' : '';
     const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    return xml.replace(cellRegex, `${openTag} t="inlineStr"><is><t>${esc}</t></is></${closeName}>`);
+    return xml.replace(cellRegex, `${openTag} t="inlineStr"><${p}is><${p}t>${esc}</${p}t></${p}is></${closeName}>`);
 };
 
 const setCellValue = (xml, ref, value) => {
@@ -2481,7 +2478,9 @@ const setCellValue = (xml, ref, value) => {
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
     const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
     const closeName = closeTag ? closeTag[1] : 'c';
-    return xml.replace(cellRegex, `${openTag}><v>${value}</v></${closeName}>`);
+    const pfx = getPrefix(match[1]);
+    const p = pfx ? pfx + ':' : '';
+    return xml.replace(cellRegex, `${openTag}><${p}v>${value}</${p}v></${closeName}>`);
 };
 
 const hideRow = (xml, rowNum) => {
@@ -2506,18 +2505,9 @@ const clearCell = (xml, ref) => {
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
     const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
     const closeName = closeTag ? closeTag[1] : 'c';
-    return xml.replace(cellRegex, `${openTag}><v></v></${closeName}>`);
-};
-
-const rebuildSharedStrings = (ssStrings) => {
-    let content = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
-    content += `<sst xmlns="${NS}" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
-    ssStrings.forEach(s => {
-        const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        content += `<si><t xml:space="preserve">${esc}</t></si>`;
-    });
-    content += '</sst>';
-    return content;
+    const pfx = getPrefix(match[1]);
+    const p = pfx ? pfx + ':' : '';
+    return xml.replace(cellRegex, `${openTag}><${p}v></${p}v></${closeName}>`);
 };
 
 const ROW_MAP = {
