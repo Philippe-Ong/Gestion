@@ -3055,48 +3055,70 @@ const ajusterCuves = (aromeNom, cuveIndex, nouvelleValeur) => {
     const cuves = state.cuvesParArome[aromeNom];
     if (!cuves || cuves.length === 0) return;
 
-    const ancienneValeur = cuves[cuveIndex].litres;
-    const delta = nouvelleValeur - ancienneValeur;
-
-    if (delta === 0) return;
-
-    const totalRequis = cuves.reduce((sum, c) => sum + c.litres, 0);
-
     const autresIndices = cuves.map((_, i) => i).filter(i => i !== cuveIndex);
     if (autresIndices.length === 0) return;
 
+    const totalAvant = cuves.reduce((sum, c) => sum + c.litres, 0);
+
     cuves[cuveIndex].litres = nouvelleValeur;
 
-    let deltaRestant = -delta;
+    const delta = totalAvant - nouvelleValeur;
 
-    for (let iter = 0; iter < 20 && Math.abs(deltaRestant) > 0.001; iter++) {
-        const ajustables = autresIndices.filter(i => {
-            const val = cuves[i].litres;
-            if (deltaRestant > 0) return val < 25;
-            return val > 1;
+    if (Math.abs(delta) < 0.001) {
+        mettreAJourSlidersUI(aromeNom);
+        return;
+    }
+
+    const ajustables = autresIndices.filter(i => {
+        if (delta > 0) return cuves[i].litres < 25;
+        return cuves[i].litres > 1;
+    });
+
+    if (ajustables.length === 0) {
+        cuves[cuveIndex].litres = totalAvant - autresIndices.reduce((s, i) => s + cuves[i].litres, 0);
+        cuves[cuveIndex].litres = Math.max(1, Math.min(25, Math.round(cuves[cuveIndex].litres * 2) / 2));
+        mettreAJourSlidersUI(aromeNom);
+        return;
+    }
+
+    const totalAjustable = ajustables.reduce((sum, i) => sum + cuves[i].litres, 0);
+
+    if (totalAjustable === 0) {
+        const parCuve = delta / ajustables.length;
+        ajustables.forEach(i => {
+            cuves[i].litres = Math.round((cuves[i].litres + parCuve) * 2) / 2;
+            cuves[i].litres = Math.max(1, Math.min(25, cuves[i].litres));
+        });
+    } else {
+        ajustables.forEach((i, idx) => {
+            const proportion = cuves[i].litres / totalAjustable;
+            let ajustement = delta * proportion;
+            ajustement = Math.round(ajustement * 2) / 2;
+
+            let newVal = cuves[i].litres + ajustement;
+            newVal = Math.max(1, Math.min(25, newVal));
+            newVal = Math.round(newVal * 2) / 2;
+
+            cuves[i].litres = newVal;
+        });
+    }
+
+    const nouveauTotal = cuves.reduce((sum, c) => sum + c.litres, 0);
+    const erreur = Math.round((totalAvant - nouveauTotal) * 2) / 2;
+
+    if (Math.abs(erreur) > 0.001) {
+        const correctionIndices = autresIndices.filter(i => {
+            if (erreur > 0) return cuves[i].litres < 25;
+            return cuves[i].litres > 1;
         });
 
-        if (ajustables.length === 0) break;
-
-        const totalAjustable = ajustables.reduce((sum, i) => sum + cuves[i].litres, 0);
-
-        if (totalAjustable === 0) {
-            const parCuve = deltaRestant / ajustables.length;
-            ajustables.forEach(i => {
-                cuves[i].litres = Math.round((cuves[i].litres + parCuve) * 2) / 2;
-                cuves[i].litres = Math.max(1, Math.min(25, cuves[i].litres));
-            });
+        if (correctionIndices.length > 0) {
+            cuves[correctionIndices[0]].litres = Math.round((cuves[correctionIndices[0]].litres + erreur) * 2) / 2;
+            cuves[correctionIndices[0]].litres = Math.max(1, Math.min(25, cuves[correctionIndices[0]].litres));
         } else {
-            ajustables.forEach(i => {
-                const proportion = cuves[i].litres / totalAjustable;
-                const ajustement = deltaRestant * proportion;
-                cuves[i].litres = Math.round((cuves[i].litres + ajustement) * 2) / 2;
-                cuves[i].litres = Math.max(1, Math.min(25, cuves[i].litres));
-            });
+            cuves[cuveIndex].litres = Math.round((cuves[cuveIndex].litres + erreur) * 2) / 2;
+            cuves[cuveIndex].litres = Math.max(1, Math.min(25, cuves[cuveIndex].litres));
         }
-
-        const nouveauTotal = cuves.reduce((sum, c) => sum + c.litres, 0);
-        deltaRestant = totalRequis - nouveauTotal;
     }
 
     const aromes = DB.get('aromes') || [];
