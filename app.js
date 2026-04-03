@@ -2453,63 +2453,6 @@ const generateBL = (commandeId) => {
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
-const getPrefix = (tag) => {
-    const m = tag.match(/<([a-z0-9]*):/);
-    return m ? m[1] : '';
-};
-
-const setCellText = (xml, ref, text) => {
-    const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
-    const match = xml.match(cellRegex);
-    if (!match) return xml;
-    let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
-    const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
-    const closeName = closeTag ? closeTag[1] : 'c';
-    const pfx = getPrefix(match[1]);
-    const p = pfx ? pfx + ':' : '';
-    const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    return xml.replace(cellRegex, `${openTag} t="inlineStr"><${p}is><${p}t>${esc}</${p}t></${p}is></${closeName}>`);
-};
-
-const setCellValue = (xml, ref, value) => {
-    const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
-    const match = xml.match(cellRegex);
-    if (!match) return xml;
-    let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
-    const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
-    const closeName = closeTag ? closeTag[1] : 'c';
-    const pfx = getPrefix(match[1]);
-    const p = pfx ? pfx + ':' : '';
-    return xml.replace(cellRegex, `${openTag}><${p}v>${value}</${p}v></${closeName}>`);
-};
-
-const hideRow = (xml, rowNum) => {
-    const rowRegex = new RegExp(`(<[a-z0-9]*:?row\\s+r="${rowNum}"[^>]*)>`);
-    const match = xml.match(rowRegex);
-    if (!match) return xml;
-    if (match[1].includes('hidden=')) return xml;
-    return xml.replace(rowRegex, `${match[1]} hidden="1">`);
-};
-
-const unhideRow = (xml, rowNum) => {
-    const rowRegex = new RegExp(`(<[a-z0-9]*:?row\\s+r="${rowNum}"[^>]*)hidden="1"([^>]*)>`);
-    const match = xml.match(rowRegex);
-    if (!match) return xml;
-    return xml.replace(rowRegex, `${match[1]}${match[2]}>`);
-};
-
-const clearCell = (xml, ref) => {
-    const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
-    const match = xml.match(cellRegex);
-    if (!match) return xml;
-    let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
-    const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
-    const closeName = closeTag ? closeTag[1] : 'c';
-    const pfx = getPrefix(match[1]);
-    const p = pfx ? pfx + ':' : '';
-    return xml.replace(cellRegex, `${openTag}><${p}v></${p}v></${closeName}>`);
-};
-
 const ROW_MAP = {
     'Poire à Botzi|25 cl': 15,
     'Poire à Botzi|50 cl': 16,
@@ -2601,6 +2544,42 @@ const exportBLExcel = (livraisonId) => {
                 sheetFile.async('string'),
                 ssFile ? ssFile.async('string') : Promise.resolve(null)
             ]).then(([sheetXml, ssXml]) => {
+                let ssStrings = [];
+                let ssModified = false;
+
+                if (ssXml) {
+                    const ssParser = new DOMParser();
+                    const ssDoc = ssParser.parseFromString(ssXml, 'text/xml');
+                    if (ssDoc.getElementsByTagName('parsererror').length > 0) {
+                        showToast('Erreur lecture des chaînes partagées', 'error');
+                        return;
+                    }
+                    const siEls = ssDoc.getElementsByTagName('si');
+                    for (let i = 0; i < siEls.length; i++) {
+                        const t = siEls[i].getElementsByTagName('t')[0];
+                        ssStrings.push(t ? t.textContent : '');
+                    }
+                }
+
+                const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+                const parser = new DOMParser();
+                const sheetDoc = parser.parseFromString(sheetXml, 'text/xml');
+
+                if (sheetDoc.getElementsByTagName('parsererror').length > 0) {
+                    showToast('Erreur parsing du template XML', 'error');
+                    return;
+                }
+
+                const getOrAddSS = (text) => {
+                    let idx = ssStrings.indexOf(text);
+                    if (idx === -1) {
+                        idx = ssStrings.length;
+                        ssStrings.push(text);
+                        ssModified = true;
+                    }
+                    return idx;
+                };
+
                 const blNum = `BL-${getBLNumero(livraison)}`;
                 const blDate = livraison.dateBL;
                 const clientSociete = client ? (client.societe || '') : '';
@@ -2624,66 +2603,172 @@ const exportBLExcel = (livraisonId) => {
                 const cNoireRetour = CaisseRow('Caisses noires retour (IFCO)');
                 if (cNoireRetour === null) { showToast('Export annulé', 'warning'); return; }
 
+                const setCellTextDom = (cell, text) => {
+                    cell.setAttribute('t', 's');
+                    const fEls = cell.getElementsByTagName('f');
+                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
+                    const idx = getOrAddSS(text);
+                    let vEl = cell.getElementsByTagName('v')[0];
+                    if (!vEl) {
+                        vEl = sheetDoc.createElementNS(NS, 'v');
+                        cell.appendChild(vEl);
+                    }
+                    vEl.textContent = idx;
+                };
+
+                const setCellValueDom = (cell, value) => {
+                    cell.removeAttribute('t');
+                    const fEls = cell.getElementsByTagName('f');
+                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
+                    let vEl = cell.getElementsByTagName('v')[0];
+                    if (!vEl) {
+                        vEl = sheetDoc.createElementNS(NS, 'v');
+                        cell.appendChild(vEl);
+                    }
+                    vEl.textContent = value;
+                };
+
+                const clearCellDom = (cell) => {
+                    cell.removeAttribute('t');
+                    const fEls = cell.getElementsByTagName('f');
+                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
+                    let vEl = cell.getElementsByTagName('v')[0];
+                    if (vEl) vEl.textContent = '';
+                };
+
+                const findCellByRef = (row, ref) => {
+                    const cells = row.getElementsByTagName('c');
+                    for (let c = 0; c < cells.length; c++) {
+                        if (cells[c].getAttribute('r') === ref) return cells[c];
+                    }
+                    return null;
+                };
+
                 const normalize = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
                 const itemKeyOf = (m) => `${normalize(m.aromeNom)}|${m.formatNom}`;
+
+                const allRows = sheetDoc.getElementsByTagName('row');
+                const matchedKeys = new Set();
                 const mergedNormToKey = {};
                 Object.values(merged).forEach(m => { mergedNormToKey[itemKeyOf(m)] = m; });
 
-                let modifiedSheet = sheetXml;
+                for (let i = 0; i < allRows.length; i++) {
+                    const row = allRows[i];
+                    const rowNum = parseInt(row.getAttribute('r'));
 
-                modifiedSheet = setCellText(modifiedSheet, 'C2', blNum);
-                modifiedSheet = setCellText(modifiedSheet, 'F5', blDate);
-                modifiedSheet = setCellText(modifiedSheet, 'F7', clientSociete || ' ');
-                modifiedSheet = setCellText(modifiedSheet, 'F8', clientContact || ' ');
-                modifiedSheet = setCellText(modifiedSheet, 'F9', clientAdresse || ' ');
-                modifiedSheet = setCellText(modifiedSheet, 'F10', clientLocalite || ' ');
-                modifiedSheet = setCellText(modifiedSheet, 'A54', clientSociete || ' ');
+                    if (rowNum >= 15 && rowNum <= 38) {
+                        const cellA = findCellByRef(row, `A${rowNum}`);
+                        if (!cellA) continue;
 
-                const modeMap = { email: 47, poste: 48, autre: 49 };
-                Object.entries(modeMap).forEach(([mode, rowNum]) => {
-                    if (livraison.facturationMode === mode) {
-                        modifiedSheet = setCellText(modifiedSheet, `D${rowNum}`, 'x');
-                    } else {
-                        modifiedSheet = setCellText(modifiedSheet, `D${rowNum}`, ' ');
+                        const mapEntry = Object.entries(ROW_MAP).find(([, r]) => r === rowNum);
+                        if (!mapEntry) {
+                            row.setAttribute('hidden', '1');
+                            const vA = cellA.getElementsByTagName('v')[0];
+                            if (vA) vA.textContent = '0';
+                            const cellB = findCellByRef(row, `B${rowNum}`);
+                            if (cellB) setCellTextDom(cellB, ' ');
+                            continue;
+                        }
+                        const [mapKeyForRow, ] = mapEntry;
+                        const [mapArome, mapFormat] = mapKeyForRow.split('|');
+                        const normArome = normalize(mapArome);
+                        const item = mergedNormToKey[`${normArome}|${mapFormat}`];
+
+                        if (item) {
+                            setCellValueDom(cellA, item.quantite);
+                            row.removeAttribute('hidden');
+                            matchedKeys.add(itemKeyOf(item));
+                            const cellB = findCellByRef(row, `B${rowNum}`);
+                            if (cellB) setCellTextDom(cellB, 'ThéCol - Thé Froid Artisanal');
+                        } else {
+                            row.setAttribute('hidden', '1');
+                            const vA = cellA.getElementsByTagName('v')[0];
+                            if (vA) vA.textContent = '0';
+                            const cellB = findCellByRef(row, `B${rowNum}`);
+                            if (cellB) setCellTextDom(cellB, ' ');
+                        }
                     }
-                });
 
-                const matchedKeys = new Set();
-                for (let rowNum = 15; rowNum <= 38; rowNum++) {
-                    const mapEntry = Object.entries(ROW_MAP).find(([, r]) => r === rowNum);
-                    if (!mapEntry) {
-                        modifiedSheet = hideRow(modifiedSheet, rowNum);
-                        modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, 0);
-                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, ' ');
-                        continue;
+                    if (rowNum === 2) {
+                        let cellC2 = findCellByRef(row, 'C2');
+                        if (!cellC2) {
+                            cellC2 = sheetDoc.createElementNS(NS, 'c');
+                            cellC2.setAttribute('r', 'C2');
+                            row.appendChild(cellC2);
+                        }
+                        setCellTextDom(cellC2, blNum);
                     }
-                    const [mapKey, ] = mapEntry;
-                    const [mapArome, mapFormat] = mapKey.split('|');
-                    const normArome = normalize(mapArome);
-                    const item = mergedNormToKey[`${normArome}|${mapFormat}`];
 
-                    if (item) {
-                        modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, item.quantite);
-                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, 'ThéCol - Thé Froid Artisanal');
-                        modifiedSheet = unhideRow(modifiedSheet, rowNum);
-                        matchedKeys.add(itemKeyOf(item));
-                    } else {
-                        modifiedSheet = hideRow(modifiedSheet, rowNum);
-                        modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, 0);
-                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, ' ');
+                    if (rowNum === 5) {
+                        const cellF = findCellByRef(row, 'F5');
+                        if (cellF) setCellTextDom(cellF, blDate);
+                    }
+
+                    if (rowNum === 7) {
+                        const cellF = findCellByRef(row, 'F7');
+                        if (cellF) setCellTextDom(cellF, clientSociete || ' ');
+                    }
+
+                    if (rowNum === 8) {
+                        const cellF = findCellByRef(row, 'F8');
+                        if (cellF) setCellTextDom(cellF, clientContact || ' ');
+                    }
+
+                    if (rowNum === 9) {
+                        const cellF = findCellByRef(row, 'F9');
+                        if (cellF) setCellTextDom(cellF, clientAdresse || ' ');
+                    }
+
+                    if (rowNum === 10) {
+                        const cellF = findCellByRef(row, 'F10');
+                        if (cellF) setCellTextDom(cellF, clientLocalite || ' ');
+                    }
+
+                    if (rowNum === 54) {
+                        const cellA = findCellByRef(row, 'A54');
+                        if (cellA) setCellTextDom(cellA, clientSociete || ' ');
+                    }
+
+                    if (rowNum >= 47 && rowNum <= 49) {
+                        const expectedMode = rowNum === 47 ? 'email' : rowNum === 48 ? 'poste' : 'autre';
+                        const cellD = findCellByRef(row, `D${rowNum}`);
+                        if (cellD) {
+                            if (livraison.facturationMode === expectedMode) {
+                                setCellTextDom(cellD, 'x');
+                            } else {
+                                setCellTextDom(cellD, ' ');
+                            }
+                        }
+                    }
+
+                    if (rowNum >= 48 && rowNum <= 51) {
+                        const caisseVals = { 48: cVerteLivree, 49: cNoireLivree, 50: cVerteRetour, 51: cNoireRetour };
+                        const qty = caisseVals[rowNum] !== undefined ? caisseVals[rowNum] : 0;
+                        const cellA = findCellByRef(row, `A${rowNum}`);
+                        if (cellA) {
+                            setCellValueDom(cellA, qty);
+                        }
+                    }
+
+                    if (rowNum >= 57 && rowNum <= 59) {
+                        const clearCols = ['D', 'E', 'F'];
+                        clearCols.forEach(col => {
+                            const cell = findCellByRef(row, `${col}${rowNum}`);
+                            if (cell) {
+                                clearCellDom(cell);
+                            }
+                        });
                     }
                 }
 
-                const caisseVals = { 48: cVerteLivree, 49: cNoireLivree, 50: cVerteRetour, 51: cNoireRetour };
-                Object.entries(caisseVals).forEach(([rowNum, qty]) => {
-                    modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, qty !== undefined ? qty : 0);
-                });
-
-                for (let rowNum = 57; rowNum <= 59; rowNum++) {
-                    ['D', 'E', 'F'].forEach(col => {
-                        modifiedSheet = clearCell(modifiedSheet, `${col}${rowNum}`);
-                    });
-                }
+                const serialized = new XMLSerializer().serializeToString(sheetDoc);
+                const cleaned = serialized
+                    .replace(/<ns\d+:/g, '<')
+                    .replace(/<\/ns\d+:/g, '</')
+                    .replace(/ xmlns:ns\d+="[^"]*"/g, '');
+                const newSheetXml = cleaned.startsWith('<?xml')
+                    ? cleaned
+                    : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + cleaned;
 
                 const unmatched = Object.values(merged).filter(m => !matchedKeys.has(itemKeyOf(m)));
                 if (unmatched.length > 0) {
@@ -2692,7 +2777,18 @@ const exportBLExcel = (livraisonId) => {
                     showToast(`Lignes non reconnues: ${labels}${suffix}`, 'warning');
                 }
 
-                zip.file('xl/worksheets/sheet1.xml', modifiedSheet);
+                if (ssModified) {
+                    let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+                    ssContent += `<sst xmlns="${NS}" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
+                    ssStrings.forEach(s => {
+                        const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                        ssContent += `<si><t xml:space="preserve">${esc}</t></si>`;
+                    });
+                    ssContent += '</sst>';
+                    zip.file('xl/sharedStrings.xml', ssContent);
+                }
+
+                zip.file('xl/worksheets/sheet1.xml', newSheetXml);
 
                 zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }).then(blob => {
                     const url = URL.createObjectURL(blob);
