@@ -2463,16 +2463,15 @@ const addSharedString = (text, ssStrings, ssModified) => {
     return idx;
 };
 
-const setCellText = (xml, ref, text, ssStrings, ssModified) => {
-    const idx = addSharedString(text, ssStrings, ssModified);
+const setCellText = (xml, ref, text) => {
     const cellRegex = new RegExp(`(<[a-z0-9]*:?c\\s+r="${ref}"[^>]*)>[\\s\\S]*?<\\/[a-z0-9]*:?c>`);
     const match = xml.match(cellRegex);
-    console.log(`setCellText ${ref}:`, match ? 'MATCH' : 'NO MATCH');
     if (!match) return xml;
     let openTag = match[1].replace(/\s+t="[^"]*"/g, '');
     const closeTag = match[0].match(/<\/([a-z0-9]*:?c)>/);
     const closeName = closeTag ? closeTag[1] : 'c';
-    return xml.replace(cellRegex, `${openTag} t="s"><v>${idx}</v></${closeName}>`);
+    const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return xml.replace(cellRegex, `${openTag} t="inlineStr"><is><t>${esc}</t></is></${closeName}>`);
 };
 
 const setCellValue = (xml, ref, value) => {
@@ -2612,17 +2611,6 @@ const exportBLExcel = (livraisonId) => {
                 sheetFile.async('string'),
                 ssFile ? ssFile.async('string') : Promise.resolve(null)
             ]).then(([sheetXml, ssXml]) => {
-                let ssStrings = [];
-                const ssModified = { value: false };
-
-                if (ssXml) {
-                    const siRegex = /<si>[\s\S]*?<t[^>]*>(.*?)<\/t>[\s\S]*?<\/si>/g;
-                    let m;
-                    while ((m = siRegex.exec(ssXml)) !== null) {
-                        ssStrings.push(m[1]);
-                    }
-                }
-
                 const blNum = `BL-${getBLNumero(livraison)}`;
                 const blDate = livraison.dateBL;
                 const clientSociete = client ? (client.societe || '') : '';
@@ -2653,20 +2641,20 @@ const exportBLExcel = (livraisonId) => {
 
                 let modifiedSheet = sheetXml;
 
-                modifiedSheet = setCellText(modifiedSheet, 'C2', blNum, ssStrings, ssModified);
-                modifiedSheet = setCellText(modifiedSheet, 'F5', blDate, ssStrings, ssModified);
-                modifiedSheet = setCellText(modifiedSheet, 'F7', clientSociete || ' ', ssStrings, ssModified);
-                modifiedSheet = setCellText(modifiedSheet, 'F8', clientContact || ' ', ssStrings, ssModified);
-                modifiedSheet = setCellText(modifiedSheet, 'F9', clientAdresse || ' ', ssStrings, ssModified);
-                modifiedSheet = setCellText(modifiedSheet, 'F10', clientLocalite || ' ', ssStrings, ssModified);
-                modifiedSheet = setCellText(modifiedSheet, 'A54', clientSociete || ' ', ssStrings, ssModified);
+                modifiedSheet = setCellText(modifiedSheet, 'C2', blNum);
+                modifiedSheet = setCellText(modifiedSheet, 'F5', blDate);
+                modifiedSheet = setCellText(modifiedSheet, 'F7', clientSociete || ' ');
+                modifiedSheet = setCellText(modifiedSheet, 'F8', clientContact || ' ');
+                modifiedSheet = setCellText(modifiedSheet, 'F9', clientAdresse || ' ');
+                modifiedSheet = setCellText(modifiedSheet, 'F10', clientLocalite || ' ');
+                modifiedSheet = setCellText(modifiedSheet, 'A54', clientSociete || ' ');
 
                 const modeMap = { email: 47, poste: 48, autre: 49 };
                 Object.entries(modeMap).forEach(([mode, rowNum]) => {
                     if (livraison.facturationMode === mode) {
-                        modifiedSheet = setCellText(modifiedSheet, `D${rowNum}`, 'x', ssStrings, ssModified);
+                        modifiedSheet = setCellText(modifiedSheet, `D${rowNum}`, 'x');
                     } else {
-                        modifiedSheet = setCellText(modifiedSheet, `D${rowNum}`, ' ', ssStrings, ssModified);
+                        modifiedSheet = setCellText(modifiedSheet, `D${rowNum}`, ' ');
                     }
                 });
 
@@ -2676,7 +2664,7 @@ const exportBLExcel = (livraisonId) => {
                     if (!mapEntry) {
                         modifiedSheet = hideRow(modifiedSheet, rowNum);
                         modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, 0);
-                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, ' ', ssStrings, ssModified);
+                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, ' ');
                         continue;
                     }
                     const [mapKey, ] = mapEntry;
@@ -2686,13 +2674,13 @@ const exportBLExcel = (livraisonId) => {
 
                     if (item) {
                         modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, item.quantite);
-                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, 'ThéCol - Thé Froid Artisanal', ssStrings, ssModified);
+                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, 'ThéCol - Thé Froid Artisanal');
                         modifiedSheet = unhideRow(modifiedSheet, rowNum);
                         matchedKeys.add(itemKeyOf(item));
                     } else {
                         modifiedSheet = hideRow(modifiedSheet, rowNum);
                         modifiedSheet = setCellValue(modifiedSheet, `A${rowNum}`, 0);
-                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, ' ', ssStrings, ssModified);
+                        modifiedSheet = setCellText(modifiedSheet, `B${rowNum}`, ' ');
                     }
                 }
 
@@ -2712,11 +2700,6 @@ const exportBLExcel = (livraisonId) => {
                     const labels = unmatched.slice(0, 3).map(m => `${m.aromeNom} ${m.formatNom} (${m.quantite}x)`).join(', ');
                     const suffix = unmatched.length > 3 ? ` +${unmatched.length - 3}` : '';
                     showToast(`Lignes non reconnues: ${labels}${suffix}`, 'warning');
-                }
-
-                if (ssModified.value) {
-                    const newSsXml = rebuildSharedStrings(ssStrings);
-                    zip.file('xl/sharedStrings.xml', newSsXml);
                 }
 
                 zip.file('xl/worksheets/sheet1.xml', modifiedSheet);
