@@ -2405,7 +2405,7 @@ const deleteLivraison = (id) => {
 
 const exportBLPDF = (livraisonId) => {
     const { jsPDF } = window.jspdf;
-    const doc = new jsPDF();
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
 
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
@@ -2418,6 +2418,51 @@ const exportBLPDF = (livraisonId) => {
     }
 
     const client = clients.find(c => c.id === livraison.clientId);
+    const lignesFiltered = livraison.lignes.filter(l => l.quantite > 0);
+    if (lignesFiltered.length === 0) {
+        showToast('Aucun article à livrer', 'warning');
+        return;
+    }
+
+    const promptNum = (label) => {
+        const raw = prompt(label);
+        if (raw === null) return null;
+        const n = parseInt(raw, 10);
+        return isNaN(n) || n < 0 ? 0 : n;
+    };
+
+    const cVerteLivree = promptNum('Caisses vertes livrées (IFCO)');
+    if (cVerteLivree === null) { showToast('Export annulé', 'warning'); return; }
+    const cNoireLivree = promptNum('Caisses noires livrées (IFCO)');
+    if (cNoireLivree === null) { showToast('Export annulé', 'warning'); return; }
+    const cVerteRetour = promptNum('Caisses vertes retour (IFCO)');
+    if (cVerteRetour === null) { showToast('Export annulé', 'warning'); return; }
+    const cNoireRetour = promptNum('Caisses noires retour (IFCO)');
+    if (cNoireRetour === null) { showToast('Export annulé', 'warning'); return; }
+
+    const PAGE_W = 210;
+    const PAGE_H = 297;
+    const MARGIN = 15;
+    const CONTENT_W = PAGE_W - 2 * MARGIN;
+
+    const normalize = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+    const merged = {};
+    lignesFiltered.forEach(l => {
+        const fmt = formats.find(f => f.id === l.formatId);
+        if (!fmt) return;
+        const fmtLabel = fmt.contenanceCl + ' cl';
+        const key = `${normalize(l.aromeNom || '')}|${fmtLabel}`;
+        if (merged[key]) {
+            merged[key].quantite += l.quantite;
+        } else {
+            merged[key] = {
+                aromeNom: l.aromeNom || '',
+                formatNom: fmtLabel,
+                quantite: l.quantite
+            };
+        }
+    });
 
     const blNum = `BL-${getBLNumero(livraison)}`;
     const blDate = livraison.dateBL || '';
@@ -2426,74 +2471,170 @@ const exportBLPDF = (livraisonId) => {
     const clientAdresse = client ? (client.adresse || '') : '';
     const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
 
-    const colWidths = [70, 40, 30, 50];
-    const headers = [['Arôme', 'Format', 'Quantité', 'Observations']];
-
-    const tableData = livraison.lignes
-        .filter(l => l.quantite > 0)
-        .map(l => {
-            const fmt = formats.find(f => f.id === l.formatId);
-            const aromeNom = getAromeBLName(l.aromeNom) || l.aromeNom || '?';
-            const formatNom = fmt ? fmt.nom : '?';
-            return [aromeNom, formatNom, String(l.quantite), ''];
-        });
-
-    const totalItems = livraison.lignes.reduce((sum, l) => sum + l.quantite, 0);
-
-    doc.setFontSize(18);
+    // Header bar
+    doc.setFillColor(45, 85, 65);
+    doc.rect(0, 0, PAGE_W, 18, 'F');
     doc.setFont('helvetica', 'bold');
-    doc.text('Bulletin de Livraison', 105, 20, { align: 'center' });
+    doc.setFontSize(14);
+    doc.setTextColor(255, 255, 255);
+    doc.text('BULLETIN DE LIVRAISON', PAGE_W / 2, 12, { align: 'center' });
+    doc.setTextColor(0, 0, 0);
 
-    doc.setFontSize(11);
-    doc.setFont('helvetica', 'normal');
-
-    doc.text(`N° ${blNum}`, 105, 30, { align: 'center' });
-    doc.text(`Date: ${blDate}`, 105, 36, { align: 'center' });
-
-    let yPos = 50;
+    // BL number and date (top right)
+    doc.setFontSize(20);
     doc.setFont('helvetica', 'bold');
-    doc.text('Client:', 15, yPos);
+    doc.text(blNum, PAGE_W - MARGIN, 28, { align: 'right' });
+    doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
+    doc.text(`Date: ${blDate}`, PAGE_W - MARGIN, 35, { align: 'right' });
+
+    // Left side: Article table
+    let yPos = 28;
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(45, 85, 65);
+    doc.text('Articles', MARGIN, yPos);
+    doc.setTextColor(0, 0, 0);
+    yPos += 5;
+
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.setFillColor(45, 85, 65);
+    doc.rect(MARGIN, yPos, CONTENT_W, 6, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.text('ARÔME', MARGIN + 2, yPos + 4);
+    doc.text('FORMAT', MARGIN + 60, yPos + 4);
+    doc.text('Qté', MARGIN + 95, yPos + 4);
+    doc.text('OBSERVATIONS', MARGIN + 110, yPos + 4);
+    doc.setTextColor(0, 0, 0);
     yPos += 6;
-    doc.text(clientSociete, 15, yPos);
-    if (clientContact) {
-        yPos += 5;
-        doc.text(clientContact, 15, yPos);
-    }
-    if (clientAdresse) {
-        yPos += 5;
-        doc.text(clientAdresse, 15, yPos);
-    }
-    if (clientLocalite) {
-        yPos += 5;
-        doc.text(clientLocalite, 15, yPos);
-    }
 
-    yPos += 10;
-    doc.setFont('helvetica', 'bold');
-    doc.text(`Total articles: ${totalItems}`, 15, yPos);
+    doc.setFont('helvetica', 'normal');
+    let rowH = 6;
+    let filledRows = 0;
 
-    yPos += 8;
-    doc.autoTable({
-        startY: yPos,
-        head: headers,
-        body: tableData,
-        theme: 'striped',
-        headStyles: { fillColor: [45, 85, 65] },
-        styles: { fontSize: 10 },
-        columnStyles: {
-            0: { cellWidth: 70 },
-            1: { cellWidth: 40 },
-            2: { cellWidth: 30, halign: 'center' },
-            3: { cellWidth: 50 }
-        },
-        margin: { left: 15, right: 15 }
+    Object.entries(ROW_MAP).forEach(([key, rowNum]) => {
+        const [mapArome, mapFormat] = key.split('|');
+        const normArome = normalize(mapArome);
+        const item = merged[`${normArome}|${mapFormat}`];
+
+        if (item) {
+            filledRows++;
+            doc.setFillColor(filledRows % 2 === 0 ? [245, 245, 245] : [255, 255, 255]);
+            doc.rect(MARGIN, yPos, CONTENT_W, rowH, 'FD');
+
+            const displayArome = getAromeBLName(item.aromeNom) || item.aromeNom;
+            doc.text(displayArome, MARGIN + 2, yPos + 4);
+            doc.text(mapFormat, MARGIN + 60, yPos + 4);
+            doc.text(String(item.quantite), MARGIN + 95, yPos + 4, { align: 'center' });
+            doc.text('ThéCol - Thé Froid Artisanal', MARGIN + 110, yPos + 4);
+            yPos += rowH;
+        }
     });
 
-    const pageHeight = doc.internal.pageSize.height;
+    if (filledRows === 0) {
+        doc.setFillColor(255, 255, 255);
+        doc.rect(MARGIN, yPos, CONTENT_W, rowH, 'F');
+        doc.setFont('helvetica', 'italic');
+        doc.text('Aucun article', MARGIN + 2, yPos + 4);
+        yPos += rowH;
+    }
+
+    // Client info block (right side, below header)
+    const clientBlockX = 135;
+    const clientBlockY = 24;
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(45, 85, 65);
+    doc.text('CLIENT', clientBlockX, clientBlockY);
+    doc.setTextColor(0, 0, 0);
+    doc.setFont('helvetica', 'normal');
+
+    let cy = clientBlockY + 4;
+    const clientLines = [
+        clientSociete,
+        clientContact,
+        clientAdresse,
+        clientLocalite
+    ].filter(Boolean);
+
+    clientLines.forEach(line => {
+        doc.text(line || '', clientBlockX, cy);
+        cy += 4;
+    });
+
+    // IFCO Section
+    yPos += 4;
     doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(45, 85, 65);
+    doc.text('IFCO - CAISSES', MARGIN, yPos);
+    doc.setTextColor(0, 0, 0);
+    yPos += 5;
+
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    const ifcoData = [
+        ['Caisses vertes livrées:', String(cVerteLivree)],
+        ['Caisses noires livrées:', String(cNoireLivree)],
+        ['Caisses vertes retour:', String(cVerteRetour)],
+        ['Caisses noires retour:', String(cNoireRetour)]
+    ];
+
+    const col1X = MARGIN;
+    const col2X = MARGIN + 60;
+    const col3X = MARGIN + 110;
+    const col4X = MARGIN + 155;
+
+    ifcoData.forEach(([label, val], idx) => {
+        const colX = idx < 2 ? col1X : col3X;
+        const rowIdx = idx % 2;
+        const ly = yPos + rowIdx * 5;
+        doc.text(label, colX, ly);
+        doc.setFont('helvetica', 'bold');
+        doc.text(val, colX + 45, ly);
+        doc.setFont('helvetica', 'normal');
+    });
+    yPos += 14;
+
+    // Facturation mode
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(45, 85, 65);
+    doc.text('FACTURATION', MARGIN, yPos);
+    doc.setTextColor(0, 0, 0);
+    yPos += 5;
+
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    const modes = [
+        { label: 'Email', value: 'email' },
+        { label: 'Poste', value: 'poste' },
+        { label: 'Autre', value: 'autre' }
+    ];
+    const modeX = [MARGIN, MARGIN + 25, MARGIN + 55];
+    modes.forEach((m, i) => {
+        const checked = livraison.facturationMode === m.value;
+        if (checked) {
+            doc.setFont('helvetica', 'bold');
+        }
+        doc.text(`[${checked ? 'x' : ' '}] ${m.label}`, modeX[i], yPos);
+        doc.setFont('helvetica', 'normal');
+    });
+    yPos += 8;
+
+    // Signature
+    doc.setFontSize(9);
+    doc.setDrawColor(150, 150, 150);
+    doc.line(MARGIN, yPos + 15, MARGIN + 80, yPos + 15);
+    doc.setFont('helvetica', 'normal');
+    doc.text('Nom:', MARGIN, yPos + 20);
+    doc.text(`Date: ${blDate}`, MARGIN + 50, yPos + 20);
+
+    // Footer
+    doc.setFontSize(8);
     doc.setFont('helvetica', 'italic');
-    doc.text('ThéCol - Thé Froid Artisanal', 105, pageHeight - 15, { align: 'center' });
+    doc.text('ThéCol - Thé Froid Artisanal', PAGE_W / 2, PAGE_H - 10, { align: 'center' });
 
     doc.save(`BL-${getBLNumero(livraison)}_${blDate}.pdf`);
     showToast('Bulletin de livraison PDF exporté');
@@ -2501,6 +2642,7 @@ const exportBLPDF = (livraisonId) => {
 
 const AROME_BL_NAMES = {
     'mure sauvage': 'Mûres Sauvages',
+    'mûre sauvage': 'Mûres Sauvages',
     'poire a botzi': 'Poire à Botzi',
     'poire à botzi': 'Poire à Botzi',
     'herbes des alpes': 'Herbes des Alpes',
