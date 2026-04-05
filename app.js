@@ -2327,6 +2327,7 @@ const renderLivraisons = () => {
                                         <td>
                                             <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
                                             <button class="btn btn-sm btn-primary" onclick="exportBLExcel('${liv.id}')">Export Excel</button>
+                                            <button class="btn btn-sm btn-primary" onclick="exportBLPDF('${liv.id}')">Export PDF</button>
                                             <button class="btn btn-sm btn-danger" onclick="deleteLivraison('${liv.id}')">Supprimer</button>
                                         </td>
                                     </tr>
@@ -2389,6 +2390,7 @@ const showLivraisonDetails = (id) => {
         <button class="btn btn-danger" onclick="deleteLivraison('${id}')">Supprimer</button>
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
         <button class="btn btn-primary" onclick="exportBLExcel('${id}')">Export Excel</button>
+        <button class="btn btn-primary" onclick="exportBLPDF('${id}')">Export PDF</button>
     `);
 };
 
@@ -2399,6 +2401,102 @@ const deleteLivraison = (id) => {
         showToast('Bulletin de livraison supprimé');
         renderLivraisons();
     }
+};
+
+const exportBLPDF = (livraisonId) => {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+
+    const livraisons = DB.get('livraisons') || [];
+    const clients = DB.get('clients') || [];
+    const formats = DB.get('formats') || [];
+
+    const livraison = livraisons.find(l => l.id === livraisonId);
+    if (!livraison) {
+        showToast('Livraison non trouvée', 'error');
+        return;
+    }
+
+    const client = clients.find(c => c.id === livraison.clientId);
+
+    const blNum = `BL-${getBLNumero(livraison)}`;
+    const blDate = livraison.dateBL || '';
+    const clientSociete = client ? (client.societe || '') : 'N/A';
+    const clientContact = client ? (client.nom || '') : '';
+    const clientAdresse = client ? (client.adresse || '') : '';
+    const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
+
+    const colWidths = [70, 40, 30, 50];
+    const headers = [['Arôme', 'Format', 'Quantité', 'Observations']];
+
+    const tableData = livraison.lignes
+        .filter(l => l.quantite > 0)
+        .map(l => {
+            const fmt = formats.find(f => f.id === l.formatId);
+            const aromeNom = getAromeBLName(l.aromeNom) || l.aromeNom || '?';
+            const formatNom = fmt ? fmt.nom : '?';
+            return [aromeNom, formatNom, String(l.quantite), ''];
+        });
+
+    const totalItems = livraison.lignes.reduce((sum, l) => sum + l.quantite, 0);
+
+    doc.setFontSize(18);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Bulletin de Livraison', 105, 20, { align: 'center' });
+
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'normal');
+
+    doc.text(`N° ${blNum}`, 105, 30, { align: 'center' });
+    doc.text(`Date: ${blDate}`, 105, 36, { align: 'center' });
+
+    let yPos = 50;
+    doc.setFont('helvetica', 'bold');
+    doc.text('Client:', 15, yPos);
+    doc.setFont('helvetica', 'normal');
+    yPos += 6;
+    doc.text(clientSociete, 15, yPos);
+    if (clientContact) {
+        yPos += 5;
+        doc.text(clientContact, 15, yPos);
+    }
+    if (clientAdresse) {
+        yPos += 5;
+        doc.text(clientAdresse, 15, yPos);
+    }
+    if (clientLocalite) {
+        yPos += 5;
+        doc.text(clientLocalite, 15, yPos);
+    }
+
+    yPos += 10;
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Total articles: ${totalItems}`, 15, yPos);
+
+    yPos += 8;
+    doc.autoTable({
+        startY: yPos,
+        head: headers,
+        body: tableData,
+        theme: 'striped',
+        headStyles: { fillColor: [45, 85, 65] },
+        styles: { fontSize: 10 },
+        columnStyles: {
+            0: { cellWidth: 70 },
+            1: { cellWidth: 40 },
+            2: { cellWidth: 30, halign: 'center' },
+            3: { cellWidth: 50 }
+        },
+        margin: { left: 15, right: 15 }
+    });
+
+    const pageHeight = doc.internal.pageSize.height;
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'italic');
+    doc.text('ThéCol - Thé Froid Artisanal', 105, pageHeight - 15, { align: 'center' });
+
+    doc.save(`BL-${getBLNumero(livraison)}_${blDate}.pdf`);
+    showToast('Bulletin de livraison PDF exporté');
 };
 
 const AROME_BL_NAMES = {
