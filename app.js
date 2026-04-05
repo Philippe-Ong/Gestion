@@ -2327,6 +2327,7 @@ const renderLivraisons = () => {
                                         <td>
                                             <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
                                             <button class="btn btn-sm btn-primary" onclick="exportBLExcel('${liv.id}')">Export Excel</button>
+                                            <button class="btn btn-sm btn-danger" onclick="deleteLivraison('${liv.id}')">Supprimer</button>
                                         </td>
                                     </tr>
                                 `;
@@ -2385,9 +2386,19 @@ const showLivraisonDetails = (id) => {
             </table>
         </div>
     `, `
+        <button class="btn btn-danger" onclick="deleteLivraison('${id}')">Supprimer</button>
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
         <button class="btn btn-primary" onclick="exportBLExcel('${id}')">Export Excel</button>
     `);
+};
+
+const deleteLivraison = (id) => {
+    if (confirm('Êtes-vous sûr de vouloir supprimer ce bulletin de livraison ?')) {
+        const livraisons = DB.get('livraisons').filter(l => l.id !== id);
+        DB.set('livraisons', livraisons);
+        showToast('Bulletin de livraison supprimé');
+        renderLivraisons();
+    }
 };
 
 const AROME_BL_NAMES = {
