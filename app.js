@@ -1789,7 +1789,7 @@ const renderCommandes = () => {
                                         </td>
                                         <td class="actions-cell">
                                             <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
-                                            <button class="btn btn-sm btn-success" onclick="showLivraisonBouteillesModal('${cmd.id}')">Livrer</button>
+                                            ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="showLivraisonBouteillesModal('${cmd.id}')">Livrer</button>` : ''}
                                             ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="restaurerCommande('${cmd.id}')">Restaurer</button>` : ''}
                                             ${cmd.statut !== 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
                                             <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
@@ -2211,12 +2211,14 @@ const showLivraisonBouteillesModal = (commandeId) => {
         </div>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-success" id="confirm-livraison-btn" onclick="validateAndDeliver()">Confirmer la livraison</button>
+        <button class="btn btn-success" id="confirm-livraison-btn">Confirmer la livraison</button>
     `, 'large');
 
     document.querySelectorAll('.lot-qty-input').forEach(input => {
         input.addEventListener('input', computeTotals);
     });
+
+    document.getElementById('confirm-livraison-btn')?.addEventListener('click', validateAndDeliver);
 };
 
 document.addEventListener('click', () => {
