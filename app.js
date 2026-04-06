@@ -3811,7 +3811,6 @@ const renderParametres = () => {
                 <div class="settings-card-header">
                     <h3>Clients</h3>
                     <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        <button class="btn btn-sm btn-secondary" onclick="exportClientsCSV()">Exporter CSV</button>
                         <button class="btn btn-sm btn-secondary" onclick="exportClientsExcel()">Exporter Excel</button>
                         <button class="btn btn-sm btn-secondary" onclick="document.getElementById('importClientsFile').click()">Importer Excel</button>
                         <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" onchange="importClientsExcel(event)">
@@ -4414,25 +4413,6 @@ const deleteClient = (id) => {
         showToast('Client supprimé');
         renderParametres();
     }
-};
-
-const exportClientsCSV = () => {
-    const clients = DB.get('clients') || [];
-    
-    let csv = 'Société,Prénom & Nom,Adresse,NPA & Localité,Tarifs,25cl,50cl,100cl,Mode facturation,Coordonnées,Actif\n';
-    
-    clients.forEach(c => {
-        const escape = (s) => String(s || '').replace(/"/g, '""');
-        csv += `"${escape(c.societe)}","${escape(c.nom)}","${escape(c.adresse)}","${escape(c.npa)}","${escape(c.tarifs)}","${escape(c.prix25cl)}","${escape(c.prix50cl)}","${escape(c.prix100cl)}","${escape(c.modeFact)}","${escape(c.coord)}","${c.actif ? 'Oui' : 'Non'}"\n`;
-    });
-    
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `clients_${getLocalDateISOString()}.csv`;
-    link.click();
-    
-    showToast('Clients exportés');
 };
 
 // Excel: Export/Import Clients
