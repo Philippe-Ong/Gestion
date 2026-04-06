@@ -2452,7 +2452,8 @@ const exportBLPDF = (livraisonId) => {
         const fmt = formats.find(f => f.id === l.formatId);
         if (!fmt) return;
         const fmtLabel = fmt.contenanceCl + ' cl';
-        const key = `${normalize(l.aromeNom || '')}|${fmtLabel}`;
+        const canonicalArome = getAromeBLName(l.aromeNom || '') || l.aromeNom || '';
+        const key = `${normalize(canonicalArome)}|${fmtLabel}`;
         if (merged[key]) {
             merged[key].quantite += l.quantite;
         } else {
@@ -2520,7 +2521,7 @@ const exportBLPDF = (livraisonId) => {
 
         if (item) {
             filledRows++;
-            doc.setFillColor(filledRows % 2 === 0 ? [245, 245, 245] : [255, 255, 255]);
+            doc.setFillColor(filledRows % 2 === 0 ? 245 : 255, filledRows % 2 === 0 ? 245 : 255, filledRows % 2 === 0 ? 245 : 255);
             doc.rect(MARGIN, yPos, CONTENT_W, rowH, 'FD');
 
             const displayArome = getAromeBLName(item.aromeNom) || item.aromeNom;
@@ -2641,7 +2642,10 @@ const exportBLPDF = (livraisonId) => {
 };
 
 const AROME_BL_NAMES = {
+    // Canonical name -> ROW_MAP key
+    'mures sauvages': 'Mûres Sauvages',
     'mure sauvage': 'Mûres Sauvages',
+    'mûres sauvages': 'Mûres Sauvages',
     'mûre sauvage': 'Mûres Sauvages',
     'poire a botzi': 'Poire à Botzi',
     'poire à botzi': 'Poire à Botzi',
@@ -2650,13 +2654,17 @@ const AROME_BL_NAMES = {
     'hibiscus': 'Hibiscus',
     'coing': 'Coing',
     'edition noel': 'Edition Noël',
+    'edition noel': 'Edition Noël',
     'menthe': 'Menthe'
 };
 
 const getAromeBLName = (nom) => {
     if (!nom) return nom;
     const lower = nom.toLowerCase().trim();
-    return AROME_BL_NAMES[lower] || nom;
+    const mapped = AROME_BL_NAMES[lower];
+    if (mapped) return mapped;
+    const base = lower.replace(/s$/, '');
+    return AROME_BL_NAMES[base] || nom;
 };
 
 const generateBL = (commandeId) => {
@@ -2759,7 +2767,8 @@ const exportBLExcel = (livraisonId) => {
             return;
         }
         const fmtLabel = fmt.contenanceCl + ' cl';
-        const key = `${l.aromeNom || ''}|${fmtLabel}`;
+        const canonicalArome = getAromeBLName(l.aromeNom || '') || l.aromeNom || '';
+        const key = `${canonicalArome}|${fmtLabel}`;
         if (merged[key]) {
             merged[key].quantite += l.quantite;
         } else {
@@ -2896,7 +2905,10 @@ const exportBLExcel = (livraisonId) => {
                 };
 
                 const normalize = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
-                const itemKeyOf = (m) => `${normalize(m.aromeNom)}|${m.formatNom}`;
+                const itemKeyOf = (m) => {
+                    const canon = getAromeBLName(m.aromeNom || '') || m.aromeNom || '';
+                    return `${normalize(canon)}|${m.formatNom}`;
+                };
 
                 const allRows = sheetDoc.getElementsByTagName('row');
                 const matchedKeys = new Set();
