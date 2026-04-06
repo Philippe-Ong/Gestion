@@ -391,6 +391,8 @@ const renderDashboard = () => {
     const commandes = DB.get('commandes') || [];
     const pointages = DB.get('pointages') || [];
     const employes = DB.get('employees') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
     
     const today = new Date();
     const todayStr = getLocalDateISOString();
@@ -407,6 +409,45 @@ const renderDashboard = () => {
     const sellableBottles = lots.filter(lot => lot.dlc && new Date(lot.dlc) >= today).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
     
     const commandesEnAttente = commandes.filter(c => c.statut === 'en_attente').length;
+
+    const commandesPeriode = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
+
+    const stockDisponible = {};
+    lots.filter(lot => {
+        if (!lot.dlc) return true;
+        return new Date(lot.dlc) >= today;
+    }).forEach(lot => {
+        const key = `${lot.arome}-${lot.format}`;
+        if (!stockDisponible[key]) stockDisponible[key] = 0;
+        stockDisponible[key] += lot.quantite || 0;
+    });
+
+    const besoins = {};
+    commandesPeriode.forEach(cmd => {
+        cmd.items.forEach(item => {
+            const arome = aromes.find(a => a.id === item.aromeId);
+            const format = formats.find(f => f.id === item.formatId);
+            const key = `${arome?.nom || ''}-${format?.nom || ''}`;
+            if (!besoins[key]) {
+                besoins[key] = {
+                    aromeId: item.aromeId,
+                    formatId: item.formatId,
+                    aromeNom: arome?.nom || '',
+                    formatNom: format?.nom || '',
+                    quantite: 0
+                };
+            }
+            besoins[key].quantite += item.quantite;
+        });
+    });
+
+    const bouteillesAProduire = Object.entries(besoins).map(([key, b]) => {
+        const disponible = stockDisponible[key] || 0;
+        const aProduire = Math.max(0, b.quantite - disponible);
+        return { ...b, disponible, aProduire };
+    }).filter(b => b.aProduire > 0).sort((a, b) => b.aProduire - a.aProduire);
+
+    const totalBouteillesAProduire = bouteillesAProduire.reduce((sum, b) => sum + b.aProduire, 0);
     
     const heuresAujourdhui = pointages
         .filter(p => p.date === todayStr)
@@ -460,6 +501,30 @@ const renderDashboard = () => {
                     <p>Commandes en attente</p>
                 </div>
             </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Bouteilles à produire</h3>
+            </div>
+            ${bouteillesAProduire.length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : `
+                ${bouteillesAProduire.map((b, index) => {
+                    const arome = aromes.find(a => a.id === b.aromeId);
+                    const format = formats.find(f => f.id === b.formatId);
+                    const formatLitres = format?.contenanceCl ? `${(format.contenanceCl / 100).toFixed(2).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')}l` : b.formatNom;
+                    return `<div class="flex-between" style="padding: 12px 0; ${index < bouteillesAProduire.length - 1 ? 'border-bottom: 1px solid var(--border-light);' : ''}">
+                        <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${b.aromeNom} ${formatLitres}</span>
+                        <div style="text-align: right;">
+                            <div style="font-size: 12px; color: var(--text-muted);">Stock: ${b.disponible} bt</div>
+                            <strong>À produire: ${b.aProduire} bt</strong>
+                        </div>
+                    </div>`;
+                }).join('')}
+                <div class="flex-between" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-light);">
+                    <strong>Total: ${totalBouteillesAProduire} bt</strong>
+                    <a href="#production" class="btn btn-sm btn-secondary">Voir la production</a>
+                </div>
+            `}
         </div>
         
         <div class="card">
