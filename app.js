@@ -291,7 +291,7 @@ const disableSaveBtn = (event) => {
 
 // Modal
 const modal = {
-    show: (title, body, footer) => {
+    show: (title, body, footer, size = '') => {
         const titleEl = document.getElementById('modalTitle');
         const bodyEl = document.getElementById('modalBody');
         const footerEl = document.getElementById('modalFooter');
@@ -300,6 +300,10 @@ const modal = {
         if (bodyEl) bodyEl.innerHTML = body || '';
         if (footerEl) footerEl.innerHTML = footer || '';
         if (overlayEl) overlayEl.classList.add('active');
+        const container = document.getElementById('modalContainer');
+        if (container) {
+            container.className = 'modal-container' + (size === 'large' ? ' modal-large' : '');
+        }
     },
     hide: () => {
         const overlayEl = document.getElementById('modalOverlay');
@@ -1785,7 +1789,7 @@ const renderCommandes = () => {
                                         </td>
                                         <td class="actions-cell">
                                             <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
-                                            ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="livrerCommande('${cmd.id}')">Livrer</button>` : ''}
+                                            <button class="btn btn-sm btn-success" onclick="showLivraisonBouteillesModal('${cmd.id}')">Livrer</button>
                                             ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="restaurerCommande('${cmd.id}')">Restaurer</button>` : ''}
                                             ${cmd.statut !== 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
                                             <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
@@ -2042,6 +2046,177 @@ const restaurerCommande = (id) => {
         updateCommandeStatut(id, 'produite');
         showToast('Commande restaurée');
     }
+};
+
+const showLivraisonBouteillesModal = (commandeId) => {
+    const commandes = DB.get('commandes') || [];
+    const lots = DB.get('lots') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const clients = DB.get('clients') || [];
+
+    const cmd = commandes.find(c => c.id === commandeId);
+    if (!cmd) {
+        showToast('Commande non trouvée', 'error');
+        return;
+    }
+
+    const client = clients.find(cl => cl.id === cmd.clientId);
+    const clientName = client ? (client.societe || client.nom) : 'N/A';
+    const totalItems = cmd.items.reduce((sum, i) => sum + i.quantite, 0);
+
+    const normalize = (s) => (s || '').toString().toLowerCase().trim();
+
+    const sortedLots = [...lots]
+        .filter(lot => new Date(lot.dlc || '9999-12-31') >= new Date())
+        .sort((a, b) => new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01'));
+
+    const lignesHtml = cmd.items.map(item => {
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = formats.find(f => f.id === item.formatId);
+        const aromeNom = arome?.nom || '?';
+        const formatNom = format?.nom || '?';
+        const aromeNorm = normalize(aromeNom);
+        const formatNorm = normalize(formatNom);
+
+        const lotsDisponibles = sortedLots.filter(lot =>
+            normalize(lot.arome) === aromeNorm &&
+            normalize(lot.format) === formatNorm &&
+            lot.quantite > 0
+        );
+
+        let autoFilled = [];
+        let remaining = item.quantite;
+        for (const lot of lotsDisponibles) {
+            if (remaining <= 0) break;
+            const take = Math.min(lot.quantite, remaining);
+            autoFilled.push({ lotId: lot.id, quantite: take });
+            remaining -= take;
+        }
+
+        const lotsRow = lotsDisponibles.length === 0
+            ? `<em class="text-muted">Aucun lot disponible</em>`
+            : lotsDisponibles.map(lot => {
+                const prefill = autoFilled.find(a => a.lotId === lot.id)?.quantite || 0;
+                return `<div class="flex-between" style="padding: 4px 0;">
+                    <span style="font-size: 12px;">#${String(lot.id).slice(-6)} — ${lot.arome} ${lot.format} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" value="${prefill}" min="0" max="${lot.quantite}" style="width: 60px;">
+                        <span style="font-size: 12px; color: var(--text-muted);">/ ${lot.quantite}</span>
+                    </div>
+                </div>`;
+            }).join('');
+
+        const filledTotal = autoFilled.reduce((s, a) => s + a.quantite, 0);
+        const totalId = `item-total-${item.aromeId}-${item.formatId}`.replace(/[^a-zA-Z0-9]/g, '_');
+
+        return `<div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
+            <div class="flex-between" style="margin-bottom: 8px;">
+                <strong>${aromeNom} ${formatNom}</strong>
+                <span style="color: var(--text-muted); font-size: 12px;">${item.quantite} commandées</span>
+            </div>
+            <div id="${totalId}" class="item-total-display" data-required="${item.quantite}">
+                <span style="font-size: 12px;">Alloué: <strong id="${totalId}-count">${filledTotal}</strong> / ${item.quantite}</span>
+            </div>
+            <div style="margin-top: 8px;">${lotsRow}</div>
+        </div>`;
+    }).join('');
+
+    const validateAndDeliver = () => {
+        const inputs = document.querySelectorAll('.lot-qty-input');
+        const allocations = {};
+        let hasError = false;
+
+        inputs.forEach(input => {
+            const qty = parseInt(input.value, 10) || 0;
+            if (qty <= 0) return;
+            const lotId = input.dataset.lot;
+            const itemKey = input.dataset.item;
+            if (!allocations[itemKey]) allocations[itemKey] = [];
+            allocations[itemKey].push({ lotId, quantite: qty });
+        });
+
+        for (const item of cmd.items) {
+            const key = `${item.aromeId}|${item.formatId}`;
+            const alloue = allocations[key]?.reduce((s, a) => s + a.quantite, 0) || 0;
+            if (alloue !== item.quantite) {
+                hasError = true;
+                const arome = aromes.find(a => a.id === item.aromeId);
+                const format = formats.find(f => f.id === item.formatId);
+                showToast(`Quantité incorrecte pour ${arome?.nom || '?'} ${format?.nom || '?'}: alloué ${alloue} / ${item.quantite}`, 'error');
+                break;
+            }
+        }
+
+        if (hasError) return;
+
+        let allLots = DB.get('lots') || [];
+        const lotsUtilises = [];
+
+        Object.values(allocations).forEach(group => {
+            group.forEach(({ lotId, quantite }) => {
+                if (quantite <= 0) return;
+                const lotIndex = allLots.findIndex(l => l.id === lotId);
+                if (lotIndex === -1) return;
+                const lot = allLots[lotIndex];
+                const taken = Math.min(lot.quantite, quantite);
+                allLots[lotIndex].quantite -= taken;
+                lotsUtilises.push({
+                    lotId: lot.id,
+                    arome: lot.arome,
+                    format: lot.format,
+                    quantite: taken
+                });
+            });
+        });
+
+        allLots = allLots.filter(l => l.quantite > 0);
+        DB.set('lots', allLots);
+
+        const cmdIndex = commandes.findIndex(c => c.id === commandeId);
+        if (cmdIndex !== -1) {
+            commandes[cmdIndex].lotsUtilises = lotsUtilises;
+            DB.set('commandes', commandes);
+        }
+
+        updateCommandeStatut(commandeId, 'livrée');
+        modal.hide();
+
+        if (confirm('Générer un bulletin de livraison maintenant?')) {
+            const livraison = generateBL(commandeId);
+            if (livraison) {
+                showToast(`BL-${getBLNumero(livraison)} créé`);
+                exportBLExcel(livraison.id);
+            }
+        }
+
+        renderCommandes();
+    };
+
+    const computeTotals = () => {
+        document.querySelectorAll('.lot-qty-input').forEach(input => {
+            const itemKey = input.dataset.item;
+            const required = parseInt(document.querySelector(`[data-item="${itemKey}"]`)?.closest('.item-total-display')?.dataset?.required || 0, 10);
+            const itemInputs = document.querySelectorAll(`.lot-qty-input[data-item="${itemKey}"]`);
+            const total = Array.from(itemInputs).reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
+            const totalEl = document.getElementById(`item-total-${itemKey}`.replace(/\|/g, '_') + '-count');
+            if (totalEl) totalEl.textContent = total;
+        });
+    };
+
+    modal.show(`Livrer commande #${getCommandeNumero(cmd)} — ${clientName}`, `
+        <div style="max-height: 65vh; overflow-y: auto;">
+            <p style="margin-bottom: 16px; font-size: 13px; color: var(--text-muted);">${totalItems} articles au total. Répartissez les bouteilles par lot (FIFO auto-rempli, modifiable).</p>
+            ${lignesHtml}
+        </div>
+    `, `
+        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
+        <button class="btn btn-success" id="confirm-livraison-btn" onclick="validateAndDeliver()">Confirmer la livraison</button>
+    `, 'large');
+
+    document.querySelectorAll('.lot-qty-input').forEach(input => {
+        input.addEventListener('input', computeTotals);
+    });
 };
 
 document.addEventListener('click', () => {

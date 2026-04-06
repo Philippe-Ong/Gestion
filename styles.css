@@ -464,6 +464,12 @@ input[type="checkbox"] {
     transform: translateY(0);
 }
 
+.modal-large,
+.modal-container.modal-large .modal {
+    max-width: 900px;
+    width: 95%;
+}
+
 .modal-header {
     padding: 20px 24px;
     border-bottom: 1px solid var(--border-light);
