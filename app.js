@@ -2860,10 +2860,6 @@ const exportBLExcel = (livraisonId) => {
                 if (cVerteLivree === null) { showToast('Export annulé', 'warning'); return; }
                 const cNoireLivree = CaisseRow('Caisses noires livrées (IFCO)');
                 if (cNoireLivree === null) { showToast('Export annulé', 'warning'); return; }
-                const cVerteRetour = CaisseRow('Caisses vertes retour (IFCO)');
-                if (cVerteRetour === null) { showToast('Export annulé', 'warning'); return; }
-                const cNoireRetour = CaisseRow('Caisses noires retour (IFCO)');
-                if (cNoireRetour === null) { showToast('Export annulé', 'warning'); return; }
 
                 const setCellTextDom = (cell, text) => {
                     cell.setAttribute('t', 's');
@@ -3007,11 +3003,15 @@ const exportBLExcel = (livraisonId) => {
                     }
 
                     if (rowNum >= 48 && rowNum <= 51) {
-                        const caisseVals = { 48: cVerteLivree, 49: cNoireLivree, 50: cVerteRetour, 51: cNoireRetour };
-                        const qty = caisseVals[rowNum] !== undefined ? caisseVals[rowNum] : 0;
                         const cellA = findCellByRef(row, `A${rowNum}`);
                         if (cellA) {
-                            setCellValueDom(cellA, qty);
+                            if (rowNum === 48) {
+                                setCellValueDom(cellA, cVerteLivree);
+                            } else if (rowNum === 49) {
+                                setCellValueDom(cellA, cNoireLivree);
+                            } else {
+                                clearCellDom(cellA);
+                            }
                         }
                     }
 
