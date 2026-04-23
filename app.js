@@ -119,23 +119,28 @@ const DB = {
             return Array.isArray(parsed) ? parsed : [];
         } catch (e) {
             console.error('Error parsing data for key ' + key, e);
+            showToast('Données corrompues pour « ' + key + ' ». Restaurez depuis Firebase.', 'error');
             return [];
         }
     },
     
     set: (key, data) => {
+        let localOk = true;
         try {
             localStorage.setItem('thecol_' + key, JSON.stringify(data));
         } catch (e) {
+            localOk = false;
             if (e.name === 'QuotaExceededError' || e.code === 22) {
-                showToast('Stockage local plein. Supprimez d\'anciennes données.', 'error');
+                console.warn('localStorage full for key ' + key + ', attempting Firebase sync');
             } else {
                 console.error('Error saving data for key ' + key, e);
             }
-            return;
         }
         if (window.firebaseReady && window.firebaseDb) {
             DB.syncToFirebase(key, data);
+        }
+        if (!localOk) {
+            showToast('Stockage local plein. Synchronisation cloud effectuée.', 'warning');
         }
     },
     
@@ -200,6 +205,17 @@ const DB = {
     }
 };
 
+const calculateAvailableStock = (lots, referenceDate = new Date()) => {
+    const ref = dateOnly(referenceDate);
+    const stock = {};
+    lots.filter(lot => !lot.dlc || dateOnly(lot.dlc) >= ref).forEach(lot => {
+        const key = `${lot.arome}-${lot.format}`;
+        if (!stock[key]) stock[key] = 0;
+        stock[key] += lot.quantite || 0;
+    });
+    return stock;
+};
+
 // Manual sync function
 window.forceFirebaseSync = async () => {
     modal.show('Synchronisation', '<div style="text-align:center; padding: 20px;"><p>Synchronisation en cours avec le Cloud...</p><p>Veuillez patienter.</p></div>', '');
@@ -240,11 +256,21 @@ const calculateDates = (productionDate) => {
     };
 };
 
-// Get status
+const escapeHtml = (str) => {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
+
+const dateOnly = (d) => {
+    const dt = d instanceof Date ? new Date(d.getTime()) : new Date(d);
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+};
+
 const getStatus = (dlc) => {
-    const now = new Date();
-    const dlcDate = new Date(dlc);
-    const oneMonthFromNow = new Date();
+    const now = dateOnly(new Date());
+    const dlcDate = dateOnly(dlc);
+    const oneMonthFromNow = dateOnly(new Date());
     oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
     
     if (now > dlcDate) return 'expired';
@@ -416,15 +442,7 @@ const renderDashboard = () => {
 
     const commandesPeriode = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
 
-    const stockDisponible = {};
-    lots.filter(lot => {
-        if (!lot.dlc) return true;
-        return new Date(lot.dlc) >= today;
-    }).forEach(lot => {
-        const key = `${lot.arome}-${lot.format}`;
-        if (!stockDisponible[key]) stockDisponible[key] = 0;
-        stockDisponible[key] += lot.quantite || 0;
-    });
+    const stockDisponible = calculateAvailableStock(lots, today);
 
     const besoins = {};
     commandesPeriode.forEach(cmd => {
@@ -843,11 +861,17 @@ const saveLot = (event) => {
             newId = existingLot.id;
         } else {
             let maxNum = 0;
+            let hasNumericId = false;
             lots.forEach(l => {
                 const num = parseInt(l.id, 10);
-                if (!isNaN(num) && num > maxNum) maxNum = num;
+                if (!isNaN(num)) {
+                    hasNumericId = true;
+                    if (num > maxNum) maxNum = num;
+                }
             });
-            newId = String(maxNum + 1).padStart(6, '0');
+            newId = hasNumericId
+                ? String(maxNum + 1).padStart(6, '0')
+                : generateId();
             
             const lot = {
                 id: newId,
@@ -1245,8 +1269,8 @@ const renderPointage = (tab = 'pointage') => {
                             ${employes.length === 0 ? '<tr><td colspan="4" class="text-center">Aucun employé</td></tr>' : 
                               employes.map(e => `
                                 <tr>
-                                    <td>${e.nom}</td>
-                                    <td>${e.prenom}</td>
+                                    <td>${escapeHtml(e.nom)}</td>
+                                    <td>${escapeHtml(e.prenom)}</td>
                                     <td><span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span></td>
                                     <td>
                                         <button class="btn btn-sm btn-danger" onclick="deleteEmployee('${e.id}')">Supprimer</button>
@@ -1318,6 +1342,13 @@ const renderHistoriqueTable = (pointages, employes) => {
     }).join('');
 };
 
+const getMonday = (d) => {
+    const dt = new Date(d);
+    const day = dt.getDay();
+    const diff = dt.getDate() - day + (day === 0 ? -6 : 1);
+    return new Date(dt.getFullYear(), dt.getMonth(), diff);
+};
+
 const getPointageStats = (pointages, employes) => {
     const statsEmploye = document.getElementById('statsEmploye')?.value || '';
     const statsPeriod = document.getElementById('statsPeriod')?.value || 'week';
@@ -1326,11 +1357,8 @@ const getPointageStats = (pointages, employes) => {
     let startDate, endDate;
     
     if (statsPeriod === 'week') {
-        const day = now.getDay();
-        const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-        startDate = new Date(now.getFullYear(), now.getMonth(), diff);
-        endDate = new Date(startDate);
-        endDate.setDate(startDate.getDate() + 6);
+        startDate = getMonday(now);
+        endDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 6);
     } else if (statsPeriod === 'month') {
         startDate = new Date(now.getFullYear(), now.getMonth(), 1);
         endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -1340,9 +1368,10 @@ const getPointageStats = (pointages, employes) => {
     }
     
     const formatDateISO = (d) => {
-        const offset = d.getTimezoneOffset();
-        d.setMinutes(d.getMinutes() - offset);
-        return d.toISOString().split('T')[0];
+        const cloned = new Date(d.getTime());
+        const offset = cloned.getTimezoneOffset();
+        cloned.setMinutes(cloned.getMinutes() - offset);
+        return cloned.toISOString().split('T')[0];
     };
     
     const startStr = formatDateISO(startDate);
@@ -2112,7 +2141,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
 
         return `<div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
             <div class="flex-between" style="margin-bottom: 8px;">
-                <strong>${aromeNom} ${formatNom}</strong>
+                <strong>${escapeHtml(aromeNom)} ${escapeHtml(formatNom)}</strong>
                 <span style="color: var(--text-muted); font-size: 12px;">${item.quantite} commandées</span>
             </div>
             <div id="${totalId}" class="item-total-display" data-required="${item.quantite}">
@@ -2232,17 +2261,7 @@ const checkStockAndUpdateCommandes = () => {
     const aromes = DB.get('aromes');
     const now = new Date();
     
-    const stockDisponible = {};
-    lots.filter(lot => {
-        if (!lot.dlc) return true;
-        return new Date(lot.dlc) >= now;
-    }).forEach(lot => {
-        const key = `${lot.arome}-${lot.format}`;
-        if (!stockDisponible[key]) {
-            stockDisponible[key] = 0;
-        }
-        stockDisponible[key] += lot.quantite || 0;
-    });
+    const stockDisponible = calculateAvailableStock(lots, now);
     
     let updatedCount = 0;
     const updatedCommandes = commandes.map(cmd => {
@@ -3100,19 +3119,8 @@ const renderProduction = () => {
         c.statut !== 'livrée'
     );
     
-    // Calculate available stock (non-expired) - using arome/format names
     const now = new Date();
-    const stockDisponible = {};
-    lots.filter(lot => {
-        if (!lot.dlc) return true;
-        return new Date(lot.dlc) >= now;
-    }).forEach(lot => {
-        const key = `${lot.arome}-${lot.format}`;
-        if (!stockDisponible[key]) {
-            stockDisponible[key] = 0;
-        }
-        stockDisponible[key] += lot.quantite || 0;
-    });
+    const stockDisponible = calculateAvailableStock(lots, now);
     
     // Calculate totals by arome and format (using names from commands)
     const besoins = {};
@@ -3242,7 +3250,7 @@ const renderProduction = () => {
                   Object.entries(litresParArome).map(([aromeNom, litres]) => {
                       const arome = aromes.find(a => a.nom === aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
-                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${aromeNom}</span>
+                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${escapeHtml(aromeNom)}</span>
                           <strong>${litres.toFixed(1)} L</strong>
                       </div>`;
                   }).join('')}
@@ -3261,23 +3269,23 @@ const renderProduction = () => {
                         <div class="cuve-arome">
                           <div class="cuve-header">
                             <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
-                            <strong>${aromeNom}</strong>
+                            <strong>${escapeHtml(aromeNom)}</strong>
                             <span> - ${totalLitres.toFixed(1)}L (${cuves.length} cuve${cuves.length > 1 ? 's' : ''})</span>
                           </div>
                           ${cuves.map((cuve, cuveIndex) => `
-                            <div class="cuve-detail" data-arome="${aromeNom}" data-cuve-index="${cuveIndex}">
+                            <div class="cuve-detail" data-arome="${escapeHtml(aromeNom)}" data-cuve-index="${cuveIndex}">
                               <div class="flex-between" style="margin-bottom: 8px;">
                                 <div class="cuve-title" style="margin-bottom: 0;">Cuve ${cuve.numero}</div>
                                 <button class="btn btn-sm btn-success" onclick="confirmerProduction('${encodeURIComponent(aromeNom)}', ${cuveIndex})">Produite</button>
                               </div>
                               <div class="cuve-slider-row">
-                                <input type="range" class="cuve-slider" min="1" max="25" step="0.5" value="${cuve.litres}" data-arome="${aromeNom}" data-cuve-index="${cuveIndex}">
+                                <input type="range" class="cuve-slider" min="1" max="25" step="0.5" value="${cuve.litres}" data-arome="${escapeHtml(aromeNom)}" data-cuve-index="${cuveIndex}">
                                 <span class="cuve-litres-display">${cuve.litres.toFixed(1)}L</span>
                               </div>
                               <ul class="ingredient-list">
                                 ${cuve.ingredients.map(ing => `
                                   <li>
-                                    <span>${ing.nom}</span>
+                                    <span>${escapeHtml(ing.nom)}</span>
                                     <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
                                   </li>
                                 `).join('')}
@@ -3438,7 +3446,7 @@ const mettreAJourSlidersUI = (aromeNom) => {
             if (ingList && cuve.ingredients) {
                 ingList.innerHTML = cuve.ingredients.map(ing => `
                     <li>
-                        <span>${ing.nom}</span>
+                        <span>${escapeHtml(ing.nom)}</span>
                         <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
                     </li>
                 `).join('');
@@ -3527,7 +3535,7 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
             const prefill = prefillByFormat[format.nom] || 0;
             return `
                 <div class="form-group" style="margin-bottom: 10px;">
-                    <label>${format.nom}</label>
+                    <label>${escapeHtml(format.nom)}</label>
                     <input type="number" min="0" step="1" name="format_${format.id}" value="${prefill}">
                 </div>
             `;
@@ -3540,7 +3548,7 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
                     <ul class="ingredient-list" style="margin-top: 8px;">
                         ${cuve.ingredients.map(ing => `
                             <li>
-                                <span>${ing.nom}</span>
+                                <span>${escapeHtml(ing.nom)}</span>
                                 <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
                             </li>
                         `).join('')}
@@ -3790,11 +3798,11 @@ const renderInventaire = () => {
                 <h4>Consommables</h4>
                 <div class="inventaire-grid">
                     ${consommables.length === 0 ? '<p class="text-muted">Aucun consommable</p>' : 
-                      consommables.map(item => {
-                          const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-                          return `
+                        consommables.map(item => {
+                            const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
+                            return `
                             <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
-                                <span class="inventaire-item-name">${item.nom}</span>
+                                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
                                 <div class="inventaire-qty-controls">
                                     <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
                                     <span class="inventaire-qty">${item.quantite} ${item.unite}</span>
@@ -3820,10 +3828,10 @@ const renderInventaire = () => {
                 <div class="inventaire-grid collapse-content" id="equipementContent">
                     ${equipement.length === 0 ? '<p class="text-muted">Aucun équipement</p>' : 
                       equipement.map(item => {
-                          const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-                          return `
+                            const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
+                            return `
                             <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
-                                <span class="inventaire-item-name">${item.nom}</span>
+                                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
                                 <div class="inventaire-qty-controls">
                                     <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
                                     <span class="inventaire-qty">${item.quantite} ${item.unite}</span>
@@ -3962,7 +3970,7 @@ const renderParametres = () => {
                         <li class="settings-item">
                             <div class="settings-item-info">
                                 <span class="color-dot" style="background: var(--primary)"></span>
-                                <span>${e.prenom} ${e.nom}</span>
+                                <span>${escapeHtml(e.prenom)} ${escapeHtml(e.nom)}</span>
                                 <span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
@@ -3985,7 +3993,7 @@ const renderParametres = () => {
                         <li class="settings-item">
                             <div class="settings-item-info">
                                 <span class="color-dot" style="background: ${a.couleur}"></span>
-                                <span>${a.nom}</span>
+                                <span>${escapeHtml(a.nom)}</span>
                                 <span class="badge ${a.actif ? 'badge-success' : 'badge-default'}">${a.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
@@ -4007,7 +4015,7 @@ const renderParametres = () => {
                       formats.map(f => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <span>${f.nom}</span>
+                                <span>${escapeHtml(f.nom)}</span>
                                 <span class="text-muted">(${f.contenanceCl} cl)</span>
                                 <span class="badge ${f.actif ? 'badge-success' : 'badge-default'}">${f.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
@@ -4036,7 +4044,7 @@ const renderParametres = () => {
                             <li class="settings-item">
                                 <div class="settings-item-info">
                                     <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
-                                    <span>${r.nom}</span>
+                                    <span>${escapeHtml(r.nom)}</span>
                                     <span class="text-muted">(${r.ingredients.length} ingrédient${r.ingredients.length > 1 ? 's' : ''})</span>
                                 </div>
                                 <div class="settings-item-actions">

@@ -332,9 +332,9 @@ body {
 }
 
 #commandesTableContainer {
-    max-height: none !important;
-    overflow-y: visible !important;
-    height: auto !important;
+    max-height: none;
+    overflow-y: visible;
+    height: auto;
 }
 
 #archivesTableContainer {

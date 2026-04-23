@@ -65,7 +65,7 @@
             </button>
             <h2 id="pageTitle">Dashboard</h2>
             <div class="header-actions" id="headerActions">
-                <span style="font-size: 11px; color: var(--text-lighter);">v6.16</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v7.0</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -94,7 +94,9 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <!-- Firebase SDK -->
+    <!-- Firebase SDK
+         SECURITY: Firebase client keys are public by design. Firestore security rules
+         MUST restrict read/write to authenticated users only. Do NOT add server keys here. -->
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
         import { getFirestore, doc, setDoc, getDoc, getDocs, collection } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
@@ -126,7 +128,7 @@
             window.firebaseReady = false;
         }
     </script>
-    <script src="app.js?v=6.16"></script>
+    <script src="app.js?v=7.0"></script>
     <script>
         // Backup: show sync button after load
         setTimeout(() => {
