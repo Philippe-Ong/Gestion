@@ -1789,8 +1789,9 @@ const renderCommandes = () => {
                             .sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande))
                             .map(cmd => {
                                 const client = clients.find(cl => cl.id === cmd.clientId);
-                                const totalItems = cmd.items.reduce((sum, i) => sum + i.quantite, 0);
-                                const articlesPreview = cmd.items.slice(0, 2).map(i => {
+                                const safeItems = cmd.items || [];
+                                const totalItems = safeItems.reduce((sum, i) => sum + i.quantite, 0);
+                                const articlesPreview = safeItems.slice(0, 2).map(i => {
                                     const a = aromes.find(a => a.id === i.aromeId);
                                     const f = formats.find(f => f.id === i.formatId);
                                     return `${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
@@ -1806,7 +1807,7 @@ const renderCommandes = () => {
                                         <td>${client?.societe || client?.nom || 'N/A'}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
-                                        <td>${articlesPreview}${cmd.items.length > 2 ? '...' : ''} (${totalItems})</td>
+                                        <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
                                         <td class="status-cell">
                                             <span class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')">${cmd.statut}</span>
                                             <div class="status-dropdown" id="statusDropdown-${cmd.id}">
@@ -2092,7 +2093,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
 
     const client = clients.find(cl => cl.id === cmd.clientId);
     const clientName = client ? (client.societe || client.nom) : 'N/A';
-    const totalItems = cmd.items.reduce((sum, i) => sum + i.quantite, 0);
+    const totalItems = (cmd.items || []).reduce((sum, i) => sum + i.quantite, 0);
 
     const normalize = (s) => (s || '').toString().toLowerCase().trim();
 
@@ -2337,7 +2338,7 @@ const showCommandeDetails = (id) => {
     const livraisons = DB.get('livraisons') || [];
     const livraison = livraisons.find(l => l.commandeId === id);
     
-    const totalItems = commande.items.reduce((sum, i) => sum + i.quantite, 0);
+    const totalItems = (commande.items || []).reduce((sum, i) => sum + i.quantite, 0);
     
     modal.show(`Commande #${getCommandeNumero(commande)}`, `
         <div class="commande-details">
@@ -2452,8 +2453,9 @@ const renderArchives = () => {
                           filteredCommandes.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande))
                             .map(cmd => {
                                 const client = clients.find(cl => cl.id === cmd.clientId);
-                                const totalItems = cmd.items.reduce((sum, i) => sum + i.quantite, 0);
-                                const articlesPreview = cmd.items.slice(0, 2).map(i => {
+                                const safeItems = cmd.items || [];
+                                const totalItems = safeItems.reduce((sum, i) => sum + i.quantite, 0);
+                                const articlesPreview = safeItems.slice(0, 2).map(i => {
                                     const a = aromes.find(a => a.id === i.aromeId);
                                     const f = formats.find(f => f.id === i.formatId);
                                     return `${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
@@ -2465,7 +2467,7 @@ const renderArchives = () => {
                                         <td>${client?.societe || client?.nom || 'N/A'}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
-                                        <td>${articlesPreview}${cmd.items.length > 2 ? '...' : ''} (${totalItems})</td>
+                                        <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
                                         <td>
                                             <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
                                         </td>
@@ -2501,7 +2503,7 @@ const exportArchivesExcel = () => {
             'Date commande': cmd.dateCommande,
             'Date livraison': cmd.dateLivraison,
             'Articles': items,
-            'Total': cmd.items.reduce((sum, i) => sum + i.quantite, 0)
+            'Total': (cmd.items || []).reduce((sum, i) => sum + i.quantite, 0)
         };
     });
     
@@ -3126,7 +3128,7 @@ const renderProduction = () => {
     const besoins = {};
     
     commandesPeriode.forEach(cmd => {
-        cmd.items.forEach(item => {
+        (cmd.items || []).forEach(item => {
             const arome = aromes.find(a => a.id === item.aromeId);
             const format = formats.find(f => f.id === item.formatId);
             const key = `${arome?.nom || ''}-${format?.nom || ''}`;
@@ -4099,6 +4101,18 @@ const renderParametres = () => {
                     La sauvegarde inclut: employés, aromes, formats, recettes, clients, lots, commandes et pointages.
                 </p>
             </div>
+            
+            ${window.StressTest ? `
+            <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--warning);">
+                <div class="settings-card-header">
+                    <h3>🔧 Outils de développement</h3>
+                </div>
+                <div style="padding: 12px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+                    <button class="btn btn-warning" onclick="window.StressTest.attachUI(); window.StressTest.run()">Lancer le stress test</button>
+                    <span style="font-size: 12px; color: var(--text-light);">Teste la performance, les workflows et la résilience de l'application. Sauvegarde automatique des données.</span>
+                </div>
+            </div>
+            ` : ''}
             
             <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--danger);">
                 <div class="settings-card-header">
