@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v6.3**
+**v6.16**
 
 ## Adresse
 
@@ -15,7 +15,7 @@ Application de gestion pour votre entreprise de thé froid.
 ### Dashboard
 - Vue d'ensemble du stock (total bouteilles, expirations)
 - Commandes en attente
-- Heures travaillé aujourd'hui
+- Heures travaillées aujourd'hui
 
 ### Stock
 - Gestion des lots de production (arôme, format, quantité)
@@ -40,13 +40,19 @@ Application de gestion pour votre entreprise de thé froid.
 - Suivi du statut (en attente, produite, livrée, annulée)
 - Filtres par client et statut
 
+### Livraisons
+- Génération de Bulletins de Livraison (BL) depuis les commandes livrées
+- Export Excel des BL avec template pré-formaté
+- Remplissage automatique des lignes par arôme/format
+- Saisie des caisses IFCO vertes/noires livrées
+
 ### Production
 - Planificateur de production
 - Calcul automatique des litres par arôme
 - Ingrédients nécessaires selon les recettes
-- Bouton **"Produite"** sur chaque cuve
+- Gestion des cuves (25L max) avec sliders interactifs
 - Confirmation des quantités réellement produites par format
-- Ajout automatique des bouteilles produites au stock (création/mise à jour des lots)
+- Ajout automatique des bouteilles produites au stock
 - Déduction automatique de l'inventaire à la validation de production:
   - Ingrédients de recette: **+1.5%** (perte de production)
   - Eau: **ignorée** (pas de déduction)
@@ -64,39 +70,20 @@ Application de gestion pour votre entreprise de thé froid.
   - Bouton "Synchroniser inventaire" dans Paramètres > Recettes
   - Ajout automatique des ingrédients manquants depuis les recettes
 
+### Archives
+- Historique des commandes livrées
+- Filtres par année et client
+- Consultation en lecture seule
+- Export Excel des résultats filtrés
+
 ### Paramètres
 - **Employés**: Ajout, modification, activation/désactivation
 - **Arômes**: Gestion des aromes avec couleurs
-- **Formats**: Gestion des formats (0.25l, 0.5l, 1l)
+- **Formats**: Gestion des formats (25cl, 50cl, 100cl)
 - **Recettes**: Ingrédients par litre pour chaque arôme
   - Suggestions d'ingrédients depuis l'inventaire (datalist)
   - Vérification à la sauvegarde: alerte si ingrédient absent de l'inventaire
   - Bouton **"Synchroniser inventaire"**: ajoute automatiquement les ingrédients manquants
-- Matching intelligent des bouteilles vides (alias 25cl ↔ 0.25l ↔ 250ml)
-
-### Inventaire
-- Suivi des consommables et équipements
-- Ajustement rapide des quantités (+/−)
-- Alertes de stock bas (seuil configurable)
-- **Synchronisation automatique** avec les recettes:
-  - Suggestions d'ingrédients à la saisie (datalist)
-  - Bouton "Synchroniser inventaire" dans Paramètres > Recettes
-  - Ajout automatique des ingrédients manquants depuis les recettes
-
-### Paramètres
-- **Employés**: Ajout, modification, activation/désactivation
-- **Arômes**: Gestion des aromes avec couleurs
-- **Formats**: Gestion des formats (0.25l, 0.5l, 1l)
-- **Recettes**: Ingrédients par litre pour chaque arôme
-  - Suggestions d'ingrédients depuis l'inventaire (datalist)
-  - Vérification à la sauvegarde: alerte si ingrédient absent de l'inventaire
-  - Bouton **"Synchroniser inventaire"**: ajoute automatiquement les ingrédients manquants
-
-### Paramètres
-- **Employés**: Ajout, modification, activation/désactivation
-- **Arômes**: Gestion des aromes avec couleurs
-- **Formats**: Gestion des formats (0.25l, 0.5l, 1l)
-- **Recettes**: Ingrédients par litre pour chaque arôme
 - **Clients**: 
   - Société, Prénom & Nom, Adresse, NPA & Localité
   - Tarifs (25cl/50cl/100cl), Mode facturation, Coordonnées
@@ -108,8 +95,18 @@ Application de gestion pour votre entreprise de thé froid.
 
 ### Synchronisation Cloud
 - Synchronisation avec Firebase Firestore
-- Bouton "🔄 Sync" pour synchroniser manuellement
+- Bouton "Sync" pour synchroniser manuellement
 - Sauvegarde automatique des données non-vides
+
+## Structure du projet
+
+| Fichier | Rôle |
+|---------|------|
+| `index.html` | Structure HTML, conteneurs modals/toasts, init Firebase SDK |
+| `app.js` | Toute la logique applicative: routing, vues, data layer, CRUD |
+| `styles.css` | Styles CSS, variables de thème, responsive |
+| `SPEC.md` | Schémas de données et spécifications |
+| `templates/bl_template.xlsx` | Template Excel pour export Bulletin de Livraison (BL) |
 
 ## Technologies
 
