@@ -12,17 +12,45 @@
     --border: #E0E0E0;
     --border-light: #EEEEEE;
     --danger: #C0392B;
+    --danger-dark: #A93226;
     --danger-light: #E74C3C;
     --warning: #F39C12;
+    --warning-dark: #D68910;
     --warning-light: #F1C40F;
     --success: #27AE60;
+    --success-dark: #229954;
     --success-light: #2ECC71;
     --shadow: 0 2px 8px rgba(0,0,0,0.08);
     --shadow-lg: 0 4px 20px rgba(0,0,0,0.12);
+    --shadow-color-soft: rgba(0,0,0,0.2);
+    --shadow-color-strong: rgba(0,0,0,0.35);
+    --overlay: rgba(0,0,0,0.5);
     --radius: 8px;
     --radius-sm: 4px;
     --radius-lg: 12px;
     --transition: all 0.2s ease;
+}
+
+/* Loading spinner used by setBusy() */
+.spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: -2px;
+    margin-right: 6px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+[aria-busy="true"] {
+    opacity: 0.7;
+    cursor: wait;
 }
 
 * {
@@ -209,7 +237,7 @@ body {
 }
 
 .btn-danger:hover {
-    background: #A93226;
+    background: var(--danger-dark);
 }
 
 .btn-success {
@@ -218,7 +246,7 @@ body {
 }
 
 .btn-success:hover {
-    background: #229954;
+    background: var(--success-dark);
 }
 
 .btn-warning {
@@ -227,12 +255,22 @@ body {
 }
 
 .btn-warning:hover {
-    background: #D68910;
+    background: var(--warning-dark);
 }
 
 .btn-sm {
     padding: 6px 12px;
     font-size: 13px;
+}
+
+.btn:focus-visible,
+.nav-item:focus-visible,
+.tab:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .btn-icon {
@@ -441,7 +479,7 @@ input[type="checkbox"] {
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -623,10 +661,21 @@ input[type="checkbox"] {
 .status-badge {
     cursor: pointer;
     user-select: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    -webkit-appearance: none;
+    appearance: none;
 }
 
 .status-badge:hover {
     opacity: 0.8;
+}
+
+.status-badge:focus-visible,
+.status-option:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .status-dropdown {
@@ -648,14 +697,40 @@ input[type="checkbox"] {
     display: block;
 }
 
+.btn-bare {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    color: var(--text);
+    padding: 10px 0;
+    font-weight: 500;
+    font-size: 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-bare:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
 .status-option {
     padding: 8px 12px;
     cursor: pointer;
     font-size: 13px;
     white-space: nowrap;
+    background: none;
+    border: none;
+    width: 100%;
+    text-align: left;
+    font-family: inherit;
+    color: inherit;
 }
 
-.status-option:hover {
+.status-option:hover,
+.status-option:focus {
     background: var(--bg-secondary);
 }
 
@@ -743,12 +818,27 @@ input[type="checkbox"] {
     border-bottom: 1px solid var(--border-light);
 }
 
+.inventaire-section-heading {
+    margin: 0;
+}
+
 .inventaire-section-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     cursor: pointer;
     padding: 8px 0;
+    background: none;
+    border: none;
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+}
+
+.inventaire-section-header:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .inventaire-section-header h4 {
@@ -1178,7 +1268,7 @@ input[type="checkbox"] {
 
     .sidebar.open {
         transform: translateX(0);
-        box-shadow: 4px 0 16px rgba(0,0,0,0.2);
+        box-shadow: 4px 0 16px var(--shadow-color-soft);
     }
 
     .sidebar-close {
@@ -1212,7 +1302,7 @@ input[type="checkbox"] {
         display: none;
         position: fixed;
         inset: 0;
-        background: rgba(0,0,0,0.35);
+        background: var(--shadow-color-strong);
         z-index: 99;
     }
 

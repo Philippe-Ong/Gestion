@@ -1,10 +1,86 @@
 // ThéCol Gestion - Application JavaScript
 
+// Application-wide constants
+const CONSTANTS = {
+    PRODUCTION_LOSS: 1.015,    // +1.5% loss buffer applied to ingredient consumption
+    CAPSULE_LOSS: 1.075,       // +7.5% loss buffer for capsules
+    CUVE_MAX_L: 25,            // max litres per cuve
+    STOCK_WARN_DAYS: 30        // DLC warning threshold in days
+};
+
 // Utility Functions
-const generateId = () => '_' + Math.random().toString(36).substr(2, 9);
+const generateId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return '_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    }
+    return '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+};
 const formatDate = (date) => new Date(date).toLocaleDateString('fr-CH');
 const formatDateTime = (date) => new Date(date).toLocaleString('fr-CH');
 const formatTime = (time) => time.substring(0, 5);
+
+// Parse "HH:MM" → total minutes since midnight, or null if invalid.
+const parseHHMM = (str) => {
+    if (typeof str !== 'string') return null;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(str.trim());
+    if (!m) return null;
+    const h = parseInt(m[1], 10);
+    const min = parseInt(m[2], 10);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return h * 60 + min;
+};
+
+// Null-safe accessor for command/order line items.
+const getItems = (cmd) => (cmd && Array.isArray(cmd.items)) ? cmd.items : [];
+
+// Returns active rows from a DB table (rows where actif !== false).
+const getActive = (tableName) => DB.get(tableName).filter(r => r.actif);
+
+// Custom confirmation dialog returning a Promise<boolean>.
+// Uses the same modal infrastructure as the rest of the app.
+// Resolves false on Escape, overlay click, or close-X (any external dismissal).
+const confirmDialog = (message, { danger = false, confirmLabel = 'Confirmer', cancelLabel = 'Annuler', title = 'Confirmation' } = {}) => {
+    return new Promise((resolve) => {
+        const safeMsg = escapeHtml(message);
+        const confirmBtnClass = danger ? 'btn-danger' : 'btn-primary';
+        modal.show(title,
+            `<p style="margin: 8px 0;">${safeMsg}</p>`,
+            `<button class="btn btn-secondary" id="__confirmCancelBtn" type="button">${escapeHtml(cancelLabel)}</button>
+             <button class="btn ${confirmBtnClass}" id="__confirmOkBtn" type="button">${escapeHtml(confirmLabel)}</button>`
+        );
+        const overlayEl = document.getElementById('modalOverlay');
+        let settled = false;
+        const settle = (result) => {
+            if (settled) return;
+            settled = true;
+            observer?.disconnect();
+            modal.hide();
+            resolve(result);
+        };
+        // Watch for the modal overlay losing the 'active' class (Escape, overlay click, X button).
+        const observer = overlayEl ? new MutationObserver(() => {
+            if (!overlayEl.classList.contains('active')) settle(false);
+        }) : null;
+        observer?.observe(overlayEl, { attributes: true, attributeFilter: ['class'] });
+        document.getElementById('__confirmOkBtn')?.addEventListener('click', () => settle(true));
+        document.getElementById('__confirmCancelBtn')?.addEventListener('click', () => settle(false));
+    });
+};
+
+// Toggle a button's busy/loading state. Disables, swaps content, returns a restore() function.
+const setBusy = (btnEl, label = '…') => {
+    if (!btnEl) return () => {};
+    const originalHTML = btnEl.innerHTML;
+    const originalDisabled = btnEl.disabled;
+    btnEl.disabled = true;
+    btnEl.setAttribute('aria-busy', 'true');
+    btnEl.innerHTML = `<span class="spinner" aria-hidden="true"></span> ${escapeHtml(label)}`;
+    return () => {
+        btnEl.innerHTML = originalHTML;
+        btnEl.disabled = originalDisabled;
+        btnEl.removeAttribute('aria-busy');
+    };
+};
 const getLocalDateISOString = () => {
     const date = new Date();
     const offset = date.getTimezoneOffset();
@@ -151,6 +227,7 @@ const DB = {
             await setDoc(doc(window.firebaseDb, 'data', key), { data: data, updatedAt: new Date().toISOString() });
         } catch(e) {
             console.error('Firebase sync error:', e);
+            showToast('Synchronisation cloud échouée pour « ' + key + ' » — données enregistrées localement uniquement.', 'error');
         }
     },
     
@@ -197,6 +274,10 @@ const DB = {
             }
         });
     },
+
+    // UI filter persistence — keeps storage keys uniform under "thecol_filter_<name>".
+    getFilter: (name) => localStorage.getItem('thecol_filter_' + name) || '',
+    setFilter: (name, value) => localStorage.setItem('thecol_filter_' + name, value || ''),
     
     // Sync from Firebase on page load
     initFromFirebase: async () => {
@@ -218,8 +299,12 @@ const calculateAvailableStock = (lots, referenceDate = new Date()) => {
 
 // Manual sync function
 window.forceFirebaseSync = async () => {
-    modal.show('Synchronisation', '<div style="text-align:center; padding: 20px;"><p>Synchronisation en cours avec le Cloud...</p><p>Veuillez patienter.</p></div>', '');
-    document.getElementById('modalClose').style.display = 'none'; // Lock modal
+    const syncBtn = document.getElementById('syncBtn');
+    const restoreBtn = setBusy(syncBtn, 'Sync…');
+    modal.show('Synchronisation',
+        '<div style="text-align:center; padding: 20px;" aria-busy="true"><p><span class="spinner" aria-hidden="true"></span> Synchronisation en cours avec le Cloud...</p><p>Veuillez patienter.</p></div>',
+        '');
+    document.getElementById('modalClose').style.display = 'none'; // Lock modal during sync
     try {
         await DB.loadFromFirebase(true);
         renderCurrentView();
@@ -228,6 +313,7 @@ window.forceFirebaseSync = async () => {
     } finally {
         document.getElementById('modalClose').style.display = 'block';
         modal.hide();
+        restoreBtn();
     }
 };
 
@@ -286,11 +372,11 @@ const showToast = (message, type = 'success') => {
     toast.className = `toast ${type}`;
     toast.innerHTML = `
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
-            ${type === 'success' ? '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>' : 
+            ${type === 'success' ? '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>' :
               type === 'error' ? '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>' :
               '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'}
         </svg>
-        <span>${message}</span>
+        <span>${escapeHtml(message)}</span>
     `;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 3000);
@@ -317,6 +403,7 @@ const disableSaveBtn = (event) => {
 
 // Modal
 const modal = {
+    _previouslyFocused: null,
     show: (title, body, footer, size = '') => {
         const titleEl = document.getElementById('modalTitle');
         const bodyEl = document.getElementById('modalBody');
@@ -325,21 +412,65 @@ const modal = {
         if (titleEl) titleEl.textContent = title || '';
         if (bodyEl) bodyEl.innerHTML = body || '';
         if (footerEl) footerEl.innerHTML = footer || '';
-        if (overlayEl) overlayEl.classList.add('active');
+        if (overlayEl) {
+            overlayEl.classList.add('active');
+            overlayEl.setAttribute('aria-hidden', 'false');
+        }
         const container = document.getElementById('modalContainer');
         if (container) {
             container.className = 'modal-container' + (size === 'large' ? ' modal-large' : '');
         }
+        modal._previouslyFocused = document.activeElement;
+        const focusableSelector = 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled])';
+        // Prefer focusing inside the body (form fields). Fall back to footer (action buttons),
+        // which is what we want for confirmDialog whose body has no inputs.
+        const bodyFocusables = bodyEl ? bodyEl.querySelectorAll(focusableSelector) : [];
+        const footerFocusables = footerEl ? footerEl.querySelectorAll(focusableSelector) : [];
+        const target = bodyFocusables[0] || footerFocusables[0];
+        if (target) setTimeout(() => target.focus(), 0);
     },
     hide: () => {
         const overlayEl = document.getElementById('modalOverlay');
-        if (overlayEl) overlayEl.classList.remove('active');
+        if (overlayEl) {
+            overlayEl.classList.remove('active');
+            overlayEl.setAttribute('aria-hidden', 'true');
+        }
+        if (modal._previouslyFocused && typeof modal._previouslyFocused.focus === 'function') {
+            modal._previouslyFocused.focus();
+            modal._previouslyFocused = null;
+        }
     }
 };
 
 document.getElementById('modalClose').addEventListener('click', modal.hide);
 document.getElementById('modalOverlay').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) modal.hide();
+});
+
+// Close modal on Escape; trap Tab inside modal while open
+document.addEventListener('keydown', (e) => {
+    const overlayEl = document.getElementById('modalOverlay');
+    if (!overlayEl || !overlayEl.classList.contains('active')) return;
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        modal.hide();
+        return;
+    }
+    if (e.key === 'Tab') {
+        const focusables = overlayEl.querySelectorAll(
+            'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href]'
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }
 });
 
 // Navigation
@@ -446,7 +577,7 @@ const renderDashboard = () => {
 
     const besoins = {};
     commandesPeriode.forEach(cmd => {
-        cmd.items.forEach(item => {
+        getItems(cmd).forEach(item => {
             const arome = aromes.find(a => a.id === item.aromeId);
             const format = formats.find(f => f.id === item.formatId);
             const key = `${arome?.nom || ''}-${format?.nom || ''}`;
@@ -474,15 +605,12 @@ const renderDashboard = () => {
     const heuresAujourdhui = pointages
         .filter(p => p.date === todayStr)
         .reduce((sum, p) => {
-            if (!p.heureDebut || !p.heureFin) return sum;
-            const debut = parseInt(p.heureDebut.replace(':', ''), 10);
-            const fin = parseInt(p.heureFin.replace(':', ''), 10);
-            if (debut && fin && !isNaN(debut) && !isNaN(fin)) {
-                const pause = parseInt(p.pause, 10) || 0;
-                const minutes = (fin - debut) - pause;
-                return sum + (isNaN(minutes) ? 0 : minutes / 60);
-            }
-            return sum;
+            const debutMin = parseHHMM(p.heureDebut);
+            const finMin = parseHHMM(p.heureFin);
+            if (debutMin === null || finMin === null) return sum;
+            const pause = parseInt(p.pause, 10) || 0;
+            const minutes = (finMin - debutMin) - pause;
+            return sum + (minutes > 0 ? minutes / 60 : 0);
         }, 0);
 
     safeRender(`
@@ -622,7 +750,7 @@ const renderStock = () => {
         ${renderSellableSummary(lots, aromes, formats, today)}
         
         <div class="card" style="margin-bottom: 24px;">
-            <button class="flex items-center gap-2" style="background:none;border:none;cursor:pointer;font-size:16px;font-weight:500;color:var(--text);padding:10px 0;" onclick="toggleHistory()">
+            <button type="button" class="btn-bare" onclick="toggleHistory()" aria-expanded="false" aria-controls="historyContent">
                 <span id="historyArrow" style="font-size:12px;">▶</span> Historique de production
             </button>
             <div id="historyContent" style="display:none;margin-top:16px;">
@@ -659,11 +787,11 @@ const renderStock = () => {
             <div class="filters">
                 <select id="filterArome" onchange="renderStock()">
                     <option value="">Tous les arômes</option>
-                    ${aromes.filter(a => a.actif).map(a => `<option value="${a.nom}">${a.nom}</option>`).join('')}
+                    ${aromes.filter(a => a.actif).map(a => `<option value="${escapeHtml(a.nom)}">${escapeHtml(a.nom)}</option>`).join('')}
                 </select>
                 <select id="filterFormat" onchange="renderStock()">
                     <option value="">Tous les formats</option>
-                    ${formats.filter(f => f.actif).map(f => `<option value="${f.nom}">${f.nom}</option>`).join('')}
+                    ${formats.filter(f => f.actif).map(f => `<option value="${escapeHtml(f.nom)}">${escapeHtml(f.nom)}</option>`).join('')}
                 </select>
             </div>
             
@@ -698,8 +826,8 @@ const renderStock = () => {
                               return `
                                 <tr>
                                     <td>#${String(lot.id).padStart(6, '0')}</td>
-                                    <td><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${lot.arome}</td>
-                                    <td>${lot.format}</td>
+                                    <td><span class="color-dot" style="background: ${escapeHtml(arome?.couleur || '#ccc')}"></span>${escapeHtml(lot.arome)}</td>
+                                    <td>${escapeHtml(lot.format)}</td>
                                     <td><span id="qty-${lot.id}">${lot.quantite}</span></td>
                                     <td>${formatDate(lot.dateProduction)}</td>
                                     <td>${formatDate(lot.dlv)}</td>
@@ -723,8 +851,8 @@ const renderStock = () => {
 };
 
 const showNouveauLotModal = () => {
-    const aromes = DB.get('aromes').filter(a => a.actif);
-    const formats = DB.get('formats').filter(f => f.actif);
+    const aromes = getActive('aromes');
+    const formats = getActive('formats');
     const prodDate = getLocalDateISOString();
     const dates = calculateDates(prodDate);
     
@@ -734,15 +862,15 @@ const showNouveauLotModal = () => {
                 <div class="form-group">
                     <label>Arôme</label>
                     <select name="arome" required>
-                        ${aromes.length === 0 ? '<option value="">Aucun arôme disponible</option>' : 
-                          aromes.map(a => `<option value="${a.nom}">${a.nom}</option>`).join('')}
+                        ${aromes.length === 0 ? '<option value="">Aucun arôme disponible</option>' :
+                          aromes.map(a => `<option value="${escapeHtml(a.nom)}">${escapeHtml(a.nom)}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Format</label>
                     <select name="format" required>
-                        ${formats.length === 0 ? '<option value="">Aucun format disponible</option>' : 
-                          formats.map(f => `<option value="${f.nom}">${f.nom}</option>`).join('')}
+                        ${formats.length === 0 ? '<option value="">Aucun format disponible</option>' :
+                          formats.map(f => `<option value="${escapeHtml(f.nom)}">${escapeHtml(f.nom)}</option>`).join('')}
                     </select>
                 </div>
             </div>
@@ -785,13 +913,16 @@ const updateLotDates = () => {
 const toggleHistory = () => {
     const content = document.getElementById('historyContent');
     const arrow = document.getElementById('historyArrow');
-    if (content.style.display === 'none') {
+    const btn = arrow?.parentElement;
+    const willOpen = content.style.display === 'none';
+    if (willOpen) {
         content.style.display = 'block';
         arrow.textContent = '▼';
     } else {
         content.style.display = 'none';
         arrow.textContent = '▶';
     }
+    if (btn) btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
 };
 
 const renderHistoryTable = () => {
@@ -805,8 +936,8 @@ const renderHistoryTable = () => {
         <tr>
             <td>${lotNum}</td>
             <td>${formatDate(record.productionDate)}</td>
-            <td>${record.arome}</td>
-            <td>${record.format}</td>
+            <td>${escapeHtml(record.arome)}</td>
+            <td>${escapeHtml(record.format)}</td>
             <td style="color:var(--primary);font-weight:bold;">${record.quantity}</td>
             <td>${new Date(record.dateAdded).toLocaleDateString('fr-CH')}</td>
             <td><button class="btn btn-sm btn-danger" onclick="deleteHistoryRecord('${record.id}')">✕</button></td>
@@ -815,7 +946,8 @@ const renderHistoryTable = () => {
 };
 
 const deleteHistoryRecord = (recordId) => {
-    if (confirm('Supprimer cet enregistrement ?')) {
+    confirmDialog('Supprimer cet enregistrement ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const history = DB.get('history') || [];
         const index = history.findIndex(r => r.id === recordId);
         if (index !== -1) {
@@ -824,7 +956,7 @@ const deleteHistoryRecord = (recordId) => {
             showToast('Enregistrement supprimé');
             renderStock();
         }
-    }
+    });
 };
 
 const saveLot = (event) => {
@@ -886,7 +1018,7 @@ const saveLot = (event) => {
         }
         
         history.unshift({
-            id: `PROD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
             lotId: newId,
             arome,
             format,
@@ -908,12 +1040,13 @@ const saveLot = (event) => {
 };
 
 const deleteLot = (id) => {
-    if (confirm('Êtes-vous sûr de vouloir supprimer ce lot ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer ce lot ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const lots = DB.get('lots').filter(l => l.id !== id);
         DB.set('lots', lots);
         showToast('Lot supprimé');
         renderStock();
-    }
+    });
 };
 
 const renderSellableSummary = (lots, aromes, formats, today) => {
@@ -945,13 +1078,13 @@ const renderSellableSummary = (lots, aromes, formats, today) => {
                 ${summary.map(item => `
                     <div class="sellable-item">
                         <div class="sellable-header">
-                            <span class="color-dot" style="background: ${item.couleur || '#5D7B3E'}"></span>
-                            <strong>${item.arome}</strong>
+                            <span class="color-dot" style="background: ${escapeHtml(item.couleur || '#5D7B3E')}"></span>
+                            <strong>${escapeHtml(item.arome)}</strong>
                             <span class="badge badge-success">${item.total} bt</span>
                         </div>
                         <div class="sellable-formats">
                             ${item.formats.map(f => `
-                                <span>${f.format}: <strong>${f.total}</strong></span>
+                                <span>${escapeHtml(f.format)}: <strong>${f.total}</strong></span>
                             `).join('')}
                         </div>
                     </div>
@@ -1103,7 +1236,7 @@ const renderPointage = (tab = 'pointage') => {
                             <label>Employé</label>
                             <select name="employeId" required>
                                 ${employes.filter(e => e.actif).length === 0 ? '<option value="">Aucun employé</option>' : 
-                                  employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                                  employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
                             </select>
                         </div>
                         <div class="form-group">
@@ -1140,7 +1273,7 @@ const renderPointage = (tab = 'pointage') => {
                 <div class="filters">
                     <select id="filterEmploye" onchange="renderPointage('historique')">
                         <option value="">Tous les employés</option>
-                        ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                        ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
                     </select>
                     <input type="date" id="filterDateFrom" placeholder="Du" onchange="renderPointage('historique')">
                     <input type="date" id="filterDateTo" placeholder="Au" onchange="renderPointage('historique')">
@@ -1176,7 +1309,7 @@ const renderPointage = (tab = 'pointage') => {
                         <label>Employé</label>
                         <select id="statsEmploye" onchange="renderPointage('stats')">
                             <option value="">Tous</option>
-                            ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                            ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
@@ -1317,21 +1450,21 @@ const renderHistoriqueTable = (pointages, employes) => {
     
     return filtered.map(p => {
         const emp = employes.find(e => e.id === p.employeId);
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = parseHHMM(p.heureFin);
         let totalMinutes = 0;
-        if (p.heureDebut && p.heureFin) {
-            const [h1, m1] = p.heureDebut.split(':').map(Number);
-            const [h2, m2] = p.heureFin.split(':').map(Number);
-            totalMinutes = (h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0);
+        if (debutMin !== null && finMin !== null) {
+            totalMinutes = finMin - debutMin - (p.pause || 0);
         }
         const heures = Math.floor(totalMinutes / 60);
         const mins = totalMinutes % 60;
-        
+
         return `
             <tr>
                 <td>${formatDate(p.date)}</td>
-                <td>${emp ? emp.prenom + ' ' + emp.nom : 'N/A'}</td>
-                <td>${p.heureDebut || '-'}</td>
-                <td>${p.heureFin || '-'}</td>
+                <td>${emp ? escapeHtml(emp.prenom + ' ' + emp.nom) : 'N/A'}</td>
+                <td>${escapeHtml(p.heureDebut || '-')}</td>
+                <td>${escapeHtml(p.heureFin || '-')}</td>
                 <td>${p.pause || 0} min</td>
                 <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
                 <td>
@@ -1384,10 +1517,11 @@ const getPointageStats = (pointages, employes) => {
     }
     
     const totalMinutes = filtered.reduce((acc, p) => {
-        if (!p.heureDebut || !p.heureFin) return acc;
-        const [h1, m1] = p.heureDebut.split(':').map(Number);
-        const [h2, m2] = p.heureFin.split(':').map(Number);
-        return acc + ((h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0));
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = parseHHMM(p.heureFin);
+        if (debutMin === null || finMin === null) return acc;
+        const diff = finMin - debutMin - (p.pause || 0);
+        return acc + (diff > 0 ? diff : 0);
     }, 0);
     
     const totalHours = (totalMinutes / 60).toFixed(1);
@@ -1398,11 +1532,11 @@ const getPointageStats = (pointages, employes) => {
     const empStats = {};
     filtered.forEach(p => {
         if (!empStats[p.employeId]) empStats[p.employeId] = 0;
-        if (p.heureDebut && p.heureFin) {
-            const [h1, m1] = p.heureDebut.split(':').map(Number);
-            const [h2, m2] = p.heureFin.split(':').map(Number);
-            empStats[p.employeId] += ((h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0)) / 60;
-        }
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = parseHHMM(p.heureFin);
+        if (debutMin === null || finMin === null) return;
+        const diff = finMin - debutMin - (p.pause || 0);
+        if (diff > 0) empStats[p.employeId] += diff / 60;
     });
     
     const maxHours = Math.max(...Object.values(empStats), 1);
@@ -1433,7 +1567,15 @@ const saveQuickPointage = (event) => {
         showToast('Veuillez remplir tous les champs', 'error');
         return;
     }
-    
+    if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
+        showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
+        return;
+    }
+    if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
+        showToast('L\'heure de fin doit être après l\'heure de début', 'error');
+        return;
+    }
+
     const pointages = DB.get('pointages') || [];
     const pointage = {
         id: generateId(),
@@ -1445,7 +1587,7 @@ const saveQuickPointage = (event) => {
     };
     pointages.push(pointage);
     DB.set('pointages', pointages);
-    
+
     form.reset();
     document.querySelector('#quickPointageForm input[name="date"]').value = getLocalDateISOString();
     showToast('Pointage ajouté');
@@ -1477,12 +1619,13 @@ const addNewEmployee = () => {
 };
 
 const deleteEmployee = (id) => {
-    if (confirm('Supprimer cet employé ?')) {
+    confirmDialog('Supprimer cet employé ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const employes = DB.get('employees').filter(e => e.id !== id);
         DB.set('employees', employes);
         showToast('Employé supprimé');
         renderPointage('employes');
-    }
+    });
 };
 
 const exportPointageExcel = () => {
@@ -1508,11 +1651,11 @@ const exportPointageExcel = () => {
         const emp = employes.find(e => e.id === p.employeId);
         const empName = emp ? emp.prenom + ' ' + emp.nom : 'N/A';
         
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = parseHHMM(p.heureFin);
         let totalMinutes = 0;
-        if (p.heureDebut && p.heureFin) {
-            const [h1, m1] = p.heureDebut.split(':').map(Number);
-            const [h2, m2] = p.heureFin.split(':').map(Number);
-            totalMinutes = (h2 * 60 + m2) - (h1 * 60 + m1) - (p.pause || 0);
+        if (debutMin !== null && finMin !== null) {
+            totalMinutes = finMin - debutMin - (p.pause || 0);
         }
         const heures = Math.floor(totalMinutes / 60);
         const mins = totalMinutes % 60;
@@ -1544,7 +1687,7 @@ const showPointageModal = (type) => {
             <div class="form-group">
                 <label>Employé</label>
                 <select name="employeId" required>
-                    ${employes.map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                    ${employes.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group">
@@ -1579,7 +1722,7 @@ const showSaisieManuelleModal = () => {
             <div class="form-group">
                 <label>Employé</label>
                 <select name="employeId" required>
-                    ${employes.map(e => `<option value="${e.id}">${e.prenom} ${e.nom}</option>`).join('')}
+                    ${employes.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group">
@@ -1622,9 +1765,17 @@ const saveSaisieManuelle = (event) => {
         showToast('Veuillez remplir tous les champs', 'error');
         return;
     }
-    
+    if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
+        showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
+        return;
+    }
+    if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
+        showToast('L\'heure de fin doit être après l\'heure de début', 'error');
+        return;
+    }
+
     const pointages = DB.get('pointages');
-    
+
     // Check if there's already a pointage for this employee on this date
     let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
     
@@ -1697,18 +1848,19 @@ const savePointage = (event, type) => {
 };
 
 const deletePointage = (id) => {
-    if (confirm('Êtes-vous sûr de vouloir supprimer ce pointage ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer ce pointage ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const pointages = DB.get('pointages').filter(p => p.id !== id);
         DB.set('pointages', pointages);
         showToast('Pointage supprimé');
         renderPointage();
-    }
+    });
 };
 
 // Commandes
 const renderCommandes = () => {
-    const savedFilterClient = localStorage.getItem('thecol_filter_client') || '';
-    const savedFilterStatut = localStorage.getItem('thecol_filter_statut') || '';
+    const savedFilterClient = DB.getFilter('client');
+    const savedFilterStatut = DB.getFilter('statut');
     const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
     
     const allCommandes = DB.get('commandes') || [];
@@ -1750,11 +1902,11 @@ const renderCommandes = () => {
             
             ${!showArchives ? `
             <div class="filters">
-                <select id="filterClient" onchange="localStorage.setItem('thecol_filter_client', this.value); renderCommandes()">
+                <select id="filterClient" onchange="DB.setFilter('client', this.value); renderCommandes()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
-                <select id="filterStatut" onchange="localStorage.setItem('thecol_filter_statut', this.value); renderCommandes()">
+                <select id="filterStatut" onchange="DB.setFilter('statut', this.value); renderCommandes()">
                     <option value="">Tous les statuts</option>
                     <option value="en_attente" ${savedFilterStatut === 'en_attente' ? 'selected' : ''}>En attente</option>
                     <option value="produite" ${savedFilterStatut === 'produite' ? 'selected' : ''}>Produite</option>
@@ -1794,27 +1946,27 @@ const renderCommandes = () => {
                                 const articlesPreview = safeItems.slice(0, 2).map(i => {
                                     const a = aromes.find(a => a.id === i.aromeId);
                                     const f = formats.find(f => f.id === i.formatId);
-                                    return `${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
                                 }).join(', ');
-                                
-                                const badgeClass = cmd.statut === 'en_attente' ? 'badge-warning' : 
+
+                                const badgeClass = cmd.statut === 'en_attente' ? 'badge-warning' :
                                                   cmd.statut === 'produite' ? 'badge-info' :
                                                   cmd.statut === 'livrée' ? 'badge-success' : 'badge-danger';
-                                
+
                                 return `
                                     <tr>
                                         <td>${getCommandeNumero(cmd)}</td>
-                                        <td>${client?.societe || client?.nom || 'N/A'}</td>
+                                        <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
                                         <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
                                         <td class="status-cell">
-                                            <span class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')">${cmd.statut}</span>
-                                            <div class="status-dropdown" id="statusDropdown-${cmd.id}">
-                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'en_attente')">En attente</div>
-                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'produite')">Produite</div>
-                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'livrée')">Livrée</div>
-                                                <div class="status-option" onclick="updateCommandeStatut('${cmd.id}', 'annulee')">Annulée</div>
+                                            <button type="button" class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')" aria-haspopup="true" aria-expanded="false">${escapeHtml(cmd.statut || '')}</button>
+                                            <div class="status-dropdown" id="statusDropdown-${cmd.id}" role="menu">
+                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'en_attente')">En attente</button>
+                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'produite')">Produite</button>
+                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'livrée')">Livrée</button>
+                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'annulee')">Annulée</button>
                                             </div>
                                         </td>
                                         <td class="actions-cell">
@@ -1838,9 +1990,9 @@ const renderCommandes = () => {
 };
 
 const showCommandeModal = (id = null) => {
-    const clients = DB.get('clients').filter(c => c.actif);
-    const aromes = DB.get('aromes').filter(a => a.actif);
-    const formats = DB.get('formats').filter(f => f.actif);
+    const clients = getActive('clients');
+    const aromes = getActive('aromes');
+    const formats = getActive('formats');
     const commandes = DB.get('commandes');
     
     let commande = null;
@@ -1859,7 +2011,7 @@ const showCommandeModal = (id = null) => {
                 <div class="form-group">
                     <label>Client</label>
                     <select name="clientId" required>
-                        ${clients.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
+                        ${clients.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group">
@@ -1874,13 +2026,13 @@ const showCommandeModal = (id = null) => {
                         <thead>
                             <tr>
                                 <th>Arome</th>
-                                ${formats.map(f => `<th>${f.nom}</th>`).join('')}
+                                ${formats.map(f => `<th>${escapeHtml(f.nom)}</th>`).join('')}
                             </tr>
                         </thead>
                         <tbody>
                             ${aromes.map(a => `
                                 <tr>
-                                    <td>${a.nom}</td>
+                                    <td>${escapeHtml(a.nom)}</td>
                                     ${formats.map(f => {
                                         const item = commande?.items?.find(i => i.aromeId === a.id && i.formatId === f.id);
                                         const qty = item ? item.quantite : '';
@@ -1938,13 +2090,19 @@ const saveCommande = (event, id) => {
             showToast('Veuillez sélectionner un client', 'error');
             return;
         }
-        
+
+        const dateLivraison = formData.get('dateLivraison');
+        if (!dateLivraison || Number.isNaN(new Date(dateLivraison).getTime())) {
+            showToast('Date de livraison invalide', 'error');
+            return;
+        }
+
         const commande = {
             id: id || generateId(),
             numero: id ? DB.get('commandes').find(c => c.id === id)?.numero : getNextCommandeNumero(),
             clientId,
             dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : getLocalDateISOString(),
-            dateLivraison: formData.get('dateLivraison'),
+            dateLivraison,
             statut: formData.get('statut'),
             items
         };
@@ -1976,10 +2134,17 @@ const editCommande = (id) => showCommandeModal(id);
 const showStatusDropdown = (event, id) => {
     event.stopPropagation();
     document.querySelectorAll('.status-dropdown.active').forEach(d => {
-        if (d.id !== 'statusDropdown-' + id) d.classList.remove('active');
+        if (d.id !== 'statusDropdown-' + id) {
+            d.classList.remove('active');
+            d.previousElementSibling?.setAttribute('aria-expanded', 'false');
+        }
     });
     const dropdown = document.getElementById('statusDropdown-' + id);
-    dropdown.classList.toggle('active');
+    if (!dropdown) return;
+    const isOpen = dropdown.classList.toggle('active');
+    if (event.currentTarget && event.currentTarget.setAttribute) {
+        event.currentTarget.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    }
 };
 
 const updateCommandeStatut = (id, statut) => {
@@ -2014,8 +2179,8 @@ const livrerCommande = (id) => {
     
     let totalDeducted = 0;
     const lotsUtilises = [];
-    
-    cmd.items.forEach(item => {
+
+    getItems(cmd).forEach(item => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
         const aromeNom = normalize(arome?.nom || item.aromeId);
@@ -2055,27 +2220,30 @@ const livrerCommande = (id) => {
     showToast(`Commande livrée - ${totalDeducted} bouteille(s) déduite(s) du stock`);
     
     // Proposer de générer un bulletin de livraison
-    if (confirm('Générer un bulletin de livraison maintenant?')) {
+    confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
+        if (!ok) return;
         const livraison = generateBL(id);
         if (livraison) {
             showToast(`BL-${getBLNumero(livraison)} créé`);
             exportBLExcel(livraison.id);
         }
-    }
+    });
 };
 
 const archiverCommande = (id) => {
-    if (confirm('Archiver cette commande? Elle sera déplacée vers les archives.')) {
+    confirmDialog('Archiver cette commande ? Elle sera déplacée vers les archives.').then(ok => {
+        if (!ok) return;
         showToast('Commande archivée');
         renderCommandes();
-    }
+    });
 };
 
 const restaurerCommande = (id) => {
-    if (confirm('Restaurer cette commande? Elle redeviendra "produite".')) {
+    confirmDialog('Restaurer cette commande ? Elle redeviendra "produite".').then(ok => {
+        if (!ok) return;
         updateCommandeStatut(id, 'produite');
         showToast('Commande restaurée');
-    }
+    });
 };
 
 const showLivraisonBouteillesModal = (commandeId) => {
@@ -2101,7 +2269,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
         .filter(lot => new Date(lot.dlc || '9999-12-31') >= new Date())
         .sort((a, b) => new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01'));
 
-    const lignesHtml = cmd.items.map(item => {
+    const lignesHtml = getItems(cmd).map(item => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
         const aromeNom = arome?.nom || '?';
@@ -2129,7 +2297,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
             : lotsDisponibles.map(lot => {
                 const prefill = autoFilled.find(a => a.lotId === lot.id)?.quantite || 0;
                 return `<div class="flex-between" style="padding: 4px 0;">
-                    <span style="font-size: 12px;">#${String(lot.id).slice(-6)} — ${lot.arome} ${lot.format} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
+                    <span style="font-size: 12px;">#${String(lot.id).slice(-6)} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" value="${prefill}" min="0" max="${lot.quantite}" style="width: 60px;">
                         <span style="font-size: 12px; color: var(--text-muted);">/ ${lot.quantite}</span>
@@ -2166,7 +2334,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
             allocations[itemKey].push({ lotId, quantite: qty });
         });
 
-        for (const item of cmd.items) {
+        for (const item of getItems(cmd)) {
             const key = `${item.aromeId}|${item.formatId}`;
             const alloue = allocations[key]?.reduce((s, a) => s + a.quantite, 0) || 0;
             if (alloue !== item.quantite) {
@@ -2212,13 +2380,14 @@ const showLivraisonBouteillesModal = (commandeId) => {
         updateCommandeStatut(commandeId, 'livrée');
         modal.hide();
 
-        if (confirm('Générer un bulletin de livraison maintenant?')) {
+        confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
+            if (!ok) return;
             const livraison = generateBL(commandeId);
             if (livraison) {
                 showToast(`BL-${getBLNumero(livraison)} créé`);
                 exportBLExcel(livraison.id);
             }
-        }
+        });
 
         renderCommandes();
     };
@@ -2252,7 +2421,10 @@ const showLivraisonBouteillesModal = (commandeId) => {
 };
 
 document.addEventListener('click', () => {
-    document.querySelectorAll('.status-dropdown.active').forEach(d => d.classList.remove('active'));
+    document.querySelectorAll('.status-dropdown.active').forEach(d => {
+        d.classList.remove('active');
+        d.previousElementSibling?.setAttribute('aria-expanded', 'false');
+    });
 });
 
 const checkStockAndUpdateCommandes = () => {
@@ -2269,7 +2441,7 @@ const checkStockAndUpdateCommandes = () => {
         if (cmd.statut !== 'en_attente') return cmd;
         
         const needed = {};
-        cmd.items.forEach(item => {
+        getItems(cmd).forEach(item => {
             const format = formats.find(f => f.id === item.formatId);
             const arome = aromes.find(a => a.id === item.aromeId);
             const aromeName = arome?.nom || item.aromeId;
@@ -2314,12 +2486,12 @@ const showCommandeDetails = (id) => {
     const client = clients.find(c => c.id === commande.clientId);
     const clientName = client ? (client.societe || client.nom) : 'N/A';
     
-    const itemsHtml = commande.items.map(item => {
+    const itemsHtml = getItems(commande).map(item => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
         return `<tr>
-            <td>${arome?.nom || '?'}</td>
-            <td>${format?.nom || '?'}</td>
+            <td>${escapeHtml(arome?.nom || '?')}</td>
+            <td>${escapeHtml(format?.nom || '?')}</td>
             <td>${item.quantite}</td>
         </tr>`;
     }).join('');
@@ -2328,8 +2500,8 @@ const showCommandeDetails = (id) => {
         ? commande.lotsUtilises.map(lot => `
             <tr>
                 <td>#${String(lot.lotId).slice(-6)}</td>
-                <td>${lot.arome}</td>
-                <td>${lot.format}</td>
+                <td>${escapeHtml(lot.arome)}</td>
+                <td>${escapeHtml(lot.format)}</td>
                 <td>${lot.quantite}</td>
             </tr>
         `).join('')
@@ -2342,10 +2514,10 @@ const showCommandeDetails = (id) => {
     
     modal.show(`Commande #${getCommandeNumero(commande)}`, `
         <div class="commande-details">
-            <p><strong>Client:</strong> ${clientName}</p>
+            <p><strong>Client:</strong> ${escapeHtml(clientName)}</p>
             <p><strong>Date commande:</strong> ${formatDate(commande.dateCommande)}</p>
             <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
-            <p><strong>Statut:</strong> ${commande.statut}</p>
+            <p><strong>Statut:</strong> ${escapeHtml(commande.statut || '')}</p>
             <p><strong>Total:</strong> ${totalItems} articles</p>
             <table class="details-table">
                 <thead>
@@ -2382,12 +2554,13 @@ const showCommandeDetails = (id) => {
 };
 
 const deleteCommande = (id) => {
-    if (confirm('Êtes-vous sûr de vouloir supprimer cette commande ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer cette commande ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const commandes = DB.get('commandes').filter(c => c.id !== id);
         DB.set('commandes', commandes);
         showToast('Commande supprimée');
         renderCommandes();
-    }
+    });
 };
 
 const toggleArchives = () => {
@@ -2398,8 +2571,8 @@ const toggleArchives = () => {
 
 // Archives
 const renderArchives = () => {
-    const savedFilterYear = localStorage.getItem('thecol_filter_archive_year') || '';
-    const savedFilterClient = localStorage.getItem('thecol_filter_archive_client') || '';
+    const savedFilterYear = DB.getFilter('archive_year');
+    const savedFilterClient = DB.getFilter('archive_client');
     
     const commandes = DB.get('commandes').filter(c => c.statut === 'livrée');
     const clients = DB.get('clients') || [];
@@ -2426,13 +2599,13 @@ const renderArchives = () => {
             </div>
             
             <div class="filters">
-                <select id="filterArchiveYear" onchange="localStorage.setItem('thecol_filter_archive_year', this.value); renderArchives()">
+                <select id="filterArchiveYear" onchange="DB.setFilter('archive_year', this.value); renderArchives()">
                     <option value="">Toutes les années</option>
                     ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
                 </select>
-                <select id="filterArchiveClient" onchange="localStorage.setItem('thecol_filter_archive_client', this.value); renderArchives()">
+                <select id="filterArchiveClient" onchange="DB.setFilter('archive_client', this.value); renderArchives()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
             </div>
             
@@ -2458,13 +2631,13 @@ const renderArchives = () => {
                                 const articlesPreview = safeItems.slice(0, 2).map(i => {
                                     const a = aromes.find(a => a.id === i.aromeId);
                                     const f = formats.find(f => f.id === i.formatId);
-                                    return `${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
                                 }).join(', ');
-                                
+
                                 return `
                                     <tr>
                                         <td>${getCommandeNumero(cmd)}</td>
-                                        <td>${client?.societe || client?.nom || 'N/A'}</td>
+                                        <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
                                         <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
@@ -2491,19 +2664,19 @@ const exportArchivesExcel = () => {
     
     const data = commandes.map(cmd => {
         const client = clients.find(c => c.id === cmd.clientId);
-        const items = cmd.items.map(item => {
+        const items = getItems(cmd).map(item => {
             const a = aromes.find(a => a.id === item.aromeId);
             const f = formats.find(f => f.id === item.formatId);
             return `${item.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
         }).join(', ');
-        
+
         return {
             'N°': getCommandeNumero(cmd),
             'Client': client?.societe || client?.nom || 'N/A',
             'Date commande': cmd.dateCommande,
             'Date livraison': cmd.dateLivraison,
             'Articles': items,
-            'Total': (cmd.items || []).reduce((sum, i) => sum + i.quantite, 0)
+            'Total': getItems(cmd).reduce((sum, i) => sum + i.quantite, 0)
         };
     });
     
@@ -2526,8 +2699,8 @@ const renderLivraisons = () => {
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
     
-    const savedFilterYear = localStorage.getItem('thecol_filter_livraison_year') || '';
-    const savedFilterClient = localStorage.getItem('thecol_filter_livraison_client') || '';
+    const savedFilterYear = DB.getFilter('livraison_year');
+    const savedFilterClient = DB.getFilter('livraison_client');
     
     const years = [...new Set(livraisons.map(l => l.dateBL ? l.dateBL.substring(0, 4) : '2024'))].sort().reverse();
     
@@ -2545,13 +2718,13 @@ const renderLivraisons = () => {
             </div>
             
             <div class="filters">
-                <select id="filterLivraisonYear" onchange="localStorage.setItem('thecol_filter_livraison_year', this.value); renderLivraisons()">
+                <select id="filterLivraisonYear" onchange="DB.setFilter('livraison_year', this.value); renderLivraisons()">
                     <option value="">Toutes les années</option>
                     ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
                 </select>
-                <select id="filterLivraisonClient" onchange="localStorage.setItem('thecol_filter_livraison_client', this.value); renderLivraisons()">
+                <select id="filterLivraisonClient" onchange="DB.setFilter('livraison_client', this.value); renderLivraisons()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${c.societe || c.nom}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
             </div>
             
@@ -2577,14 +2750,14 @@ const renderLivraisons = () => {
                                 const articlesPreview = liv.lignes.slice(0, 2).map(l => {
                                     const a = aromes.find(a => a.id === l.aromeId);
                                     const f = formats.find(f => f.id === l.formatId);
-                                    return `${l.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+                                    return escapeHtml(`${l.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
                                 }).join(', ');
-                                
+
                                 return `
                                     <tr>
                                         <td>BL-${getBLNumero(liv)}</td>
                                         <td>#${commande ? getCommandeNumero(commande) : liv.commandeId.slice(-5)}</td>
-                                        <td>${client?.societe || client?.nom || 'N/A'}</td>
+                                        <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
                                         <td>${formatDate(liv.dateBL)}</td>
                                         <td>${articlesPreview}${liv.lignes.length > 2 ? '...' : ''} (${totalItems})</td>
                                         <td>
@@ -2621,17 +2794,17 @@ const showLivraisonDetails = (id) => {
         const a = aromes.find(a => a.id === l.aromeId);
         const f = formats.find(f => f.id === l.formatId);
         return `<tr>
-            <td>${a?.nom || '?'}</td>
-            <td>${f?.nom || '?'}</td>
+            <td>${escapeHtml(a?.nom || '?')}</td>
+            <td>${escapeHtml(f?.nom || '?')}</td>
             <td>${l.quantite}</td>
         </tr>`;
     }).join('');
-    
+
     const totalItems = livraison.lignes.reduce((sum, l) => sum + l.quantite, 0);
-    
+
     modal.show(`BL #${getBLNumero(livraison)}`, `
         <div class="commande-details">
-            <p><strong>Client:</strong> ${client?.societe || client?.nom || 'N/A'}</p>
+            <p><strong>Client:</strong> ${escapeHtml(client?.societe || client?.nom || 'N/A')}</p>
             <p><strong>Date BL:</strong> ${formatDate(livraison.dateBL)}</p>
             <p><strong>N° Commande:</strong> #${commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5)}</p>
             <p><strong>Total:</strong> ${totalItems} articles</p>
@@ -2656,12 +2829,13 @@ const showLivraisonDetails = (id) => {
 };
 
 const deleteLivraison = (id) => {
-    if (confirm('Êtes-vous sûr de vouloir supprimer ce bulletin de livraison ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer ce bulletin de livraison ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const livraisons = DB.get('livraisons').filter(l => l.id !== id);
         DB.set('livraisons', livraisons);
         showToast('Bulletin de livraison supprimé');
         renderLivraisons();
-    }
+    });
 };
 
 const AROME_BL_NAMES = {
@@ -2701,7 +2875,7 @@ const generateBL = (commandeId) => {
         return null;
     }
     
-    const lignes = commande.items.filter(item => item.quantite > 0).map(item => {
+    const lignes = getItems(commande).filter(item => item.quantite > 0).map(item => {
         const a = aromes.find(ar => ar.id === item.aromeId);
         const f = formats.find(fmt => fmt.id === item.formatId);
         return {
@@ -3181,7 +3355,7 @@ const renderProduction = () => {
     });
     
     // Calculate cuves per arome (max 25L per cuve)
-    const CUVE_MAX = 25;
+    const CUVE_MAX = CONSTANTS.CUVE_MAX_L;
     const cuvesParArome = {};
     
     Object.entries(litresParArome).forEach(([aromeNom, litresTotal]) => {
@@ -3624,8 +3798,13 @@ const validerProduction = (event, encodedAromeNom, cuveIndex) => {
             recette.ingredients.forEach(ing => {
                 if (isWaterIngredient(ing.nom)) return;
 
-                const baseBesoin = (parseFloat(ing.quantite) || 0) * litresProduit;
-                const besoinMajore = baseBesoin * 1.015;
+                const ingQty = parseFloat(ing.quantite);
+                if (Number.isNaN(ingQty)) {
+                    warnings.push(`Quantité de recette invalide pour ${ing.nom}`);
+                    return;
+                }
+                const baseBesoin = ingQty * litresProduit;
+                const besoinMajore = baseBesoin * CONSTANTS.PRODUCTION_LOSS;
                 const item = findInventaireItemByName(inventaire, ing.nom);
 
                 if (!item) {
@@ -3655,7 +3834,7 @@ const validerProduction = (event, encodedAromeNom, cuveIndex) => {
                     warnings.push(`Stock insuffisant: ${item.nom}`);
                 }
 
-                item.quantite = parseFloat(((item.quantite || 0) - besoinInInvUnit).toFixed(4));
+                item.quantite = Math.round(((item.quantite || 0) - besoinInInvUnit) * 10000) / 10000;
             });
         } else {
             warnings.push(`Recette introuvable pour ${aromeNom}`);
@@ -3677,7 +3856,7 @@ const validerProduction = (event, encodedAromeNom, cuveIndex) => {
             const n = normalizeName(item.nom);
             return n.includes('capsule') || n.includes('bouchon');
         });
-        const capsulesNecessaires = Math.ceil(totalBouteilles * 1.075);
+        const capsulesNecessaires = Math.ceil(totalBouteilles * CONSTANTS.CAPSULE_LOSS);
         if (capsulesItem) {
             if ((capsulesItem.quantite || 0) < capsulesNecessaires) {
                 warnings.push(`Stock insuffisant: ${capsulesItem.nom}`);
@@ -3721,7 +3900,7 @@ const validerProduction = (event, encodedAromeNom, cuveIndex) => {
             }
 
             history.unshift({
-                id: `PROD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
                 lotId,
                 arome: aromeNom,
                 format: format.nom,
@@ -3823,10 +4002,12 @@ const renderInventaire = () => {
             
             <!-- Équipement Section (collapsible) -->
             <div class="inventaire-section">
-                <div class="inventaire-section-header" onclick="toggleEquipementSection()">
-                    <h4>Équipement</h4>
-                    <span class="inventaire-toggle" id="equipementToggle">▶</span>
-                </div>
+                <h4 class="inventaire-section-heading">
+                    <button type="button" class="inventaire-section-header" onclick="toggleEquipementSection()" aria-expanded="false" aria-controls="equipementContent">
+                        <span>Équipement</span>
+                        <span class="inventaire-toggle" id="equipementToggle">▶</span>
+                    </button>
+                </h4>
                 <div class="inventaire-grid collapse-content" id="equipementContent">
                     ${equipement.length === 0 ? '<p class="text-muted">Aucun équipement</p>' : 
                       equipement.map(item => {
@@ -3859,8 +4040,9 @@ const renderInventaire = () => {
 const toggleEquipementSection = () => {
     const content = document.getElementById('equipementContent');
     const toggle = document.getElementById('equipementToggle');
-    content.classList.toggle('open');
-    toggle.textContent = content.classList.contains('open') ? '▼' : '▶';
+    const isOpen = content.classList.toggle('open');
+    toggle.textContent = isOpen ? '▼' : '▶';
+    toggle.parentElement?.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
 };
 
 // Show inventaire modal
@@ -3872,10 +4054,10 @@ const showInventaireModal = (categorie, id = null) => {
     
     modal.show(id ? 'Modifier item' : 'Nouvel item', `
         <form id="inventaireForm">
-            <input type="hidden" name="categorie" value="${categorie}">
+            <input type="hidden" name="categorie" value="${escapeHtml(categorie)}">
             <div class="form-group">
                 <label>Nom</label>
-                <input type="text" name="nom" value="${item?.nom || ''}" required>
+                <input type="text" name="nom" value="${escapeHtml(item?.nom || '')}" required>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -3943,12 +4125,13 @@ const updateInventaireQty = (id, delta) => {
 
 // Delete inventaire item
 const deleteInventaireItem = (id) => {
-    if (confirm('Supprimer cet item ?')) {
+    confirmDialog('Supprimer cet item ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const items = DB.get('inventaire').filter(i => i.id !== id);
         DB.set('inventaire', items);
         showToast('Item supprimé');
         renderInventaire();
-    }
+    });
 };
 
 // Settings
@@ -3994,7 +4177,7 @@ const renderParametres = () => {
                       aromes.map(a => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <span class="color-dot" style="background: ${a.couleur}"></span>
+                                <span class="color-dot" style="background: ${escapeHtml(a.couleur || '#ccc')}"></span>
                                 <span>${escapeHtml(a.nom)}</span>
                                 <span class="badge ${a.actif ? 'badge-success' : 'badge-default'}">${a.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
@@ -4071,12 +4254,12 @@ const renderParametres = () => {
                     </div>
                 </div>
                 <ul class="settings-list">
-                    ${clients.length === 0 ? '<li class="settings-item text-muted">Aucun client</li>' : 
+                    ${clients.length === 0 ? '<li class="settings-item text-muted">Aucun client</li>' :
                       clients.map(c => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <div><strong>${c.societe || ''}</strong> ${c.nom || ''}</div>
-                                <div class="text-muted" style="font-size:12px;">${c.adresse || ''} ${c.npa || ''}</div>
+                                <div><strong>${escapeHtml(c.societe || '')}</strong> ${escapeHtml(c.nom || '')}</div>
+                                <div class="text-muted" style="font-size:12px;">${escapeHtml(c.adresse || '')} ${escapeHtml(c.npa || '')}</div>
                                 <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
@@ -4146,11 +4329,11 @@ const showEmployeModal = (id = null) => {
             <div class="form-row">
                 <div class="form-group">
                     <label>Nom</label>
-                    <input type="text" name="nom" value="${emp?.nom || ''}" required>
+                    <input type="text" name="nom" value="${escapeHtml(emp?.nom || '')}" required>
                 </div>
                 <div class="form-group">
                     <label>Prénom</label>
-                    <input type="text" name="prenom" value="${emp?.prenom || ''}" required>
+                    <input type="text" name="prenom" value="${escapeHtml(emp?.prenom || '')}" required>
                 </div>
             </div>
             <div class="form-row">
@@ -4200,16 +4383,17 @@ const deleteEmploye = (id) => {
     const hasPointages = pointages.some(p => p.employeId === id);
     
     if (hasPointages) {
-        alert('Impossible de supprimer cet employé car il possède des pointages enregistrés. Vous pouvez le désactiver à la place.');
+        showToast('Impossible de supprimer cet employé : il a des pointages enregistrés. Vous pouvez le désactiver à la place.', 'error');
         return;
     }
 
-    if (confirm('Êtes-vous sûr de vouloir supprimer cet employé ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer cet employé ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const employes = DB.get('employees').filter(e => e.id !== id);
         DB.set('employees', employes);
         showToast('Employé supprimé');
         renderParametres();
-    }
+    });
 };
 
 // Settings - Aromes
@@ -4221,11 +4405,11 @@ const showAromeModal = (id = null) => {
         <form id="aromeForm">
             <div class="form-group">
                 <label>Nom</label>
-                <input type="text" name="nom" value="${arome?.nom || ''}" required>
+                <input type="text" name="nom" value="${escapeHtml(arome?.nom || '')}" required>
             </div>
             <div class="form-group">
                 <label>Couleur (code hex)</label>
-                <input type="color" name="couleur" value="${arome?.couleur || '#5D7B3E'}" style="height: 40px; padding: 4px;">
+                <input type="color" name="couleur" value="${escapeHtml(arome?.couleur || '#5D7B3E')}" style="height: 40px; padding: 4px;">
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
@@ -4270,20 +4454,21 @@ const deleteArome = (id) => {
     const commandes = DB.get('commandes');
     const recettes = DB.get('recettes');
     
-    const isUsedInCommandes = commandes.some(c => c.items.some(i => i.aromeId === id));
+    const isUsedInCommandes = commandes.some(c => getItems(c).some(i => i.aromeId === id));
     const isUsedInRecettes = recettes.some(r => r.aromeId === id);
     
     if (isUsedInCommandes || isUsedInRecettes) {
-        alert('Impossible de supprimer cet arôme car il est utilisé dans des commandes ou des recettes. Vous pouvez le désactiver à la place.');
+        showToast('Impossible de supprimer cet arôme : il est utilisé dans des commandes ou des recettes. Vous pouvez le désactiver à la place.', 'error');
         return;
     }
 
-    if (confirm('Êtes-vous sûr de vouloir supprimer cet arôme ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer cet arôme ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const aromes = DB.get('aromes').filter(a => a.id !== id);
         DB.set('aromes', aromes);
         showToast('Arôme supprimé');
         renderParametres();
-    }
+    });
 };
 
 // Settings - Formats
@@ -4296,7 +4481,7 @@ const showFormatModal = (id = null) => {
             <div class="form-row">
                 <div class="form-group">
                     <label>Nom (ex: 50cl, 1L)</label>
-                    <input type="text" name="nom" value="${format?.nom || ''}" required>
+                    <input type="text" name="nom" value="${escapeHtml(format?.nom || '')}" required>
                 </div>
                 <div class="form-group">
                     <label>Contenance (cl)</label>
@@ -4344,19 +4529,20 @@ const saveFormat = (event, id) => {
 
 const deleteFormat = (id) => {
     const commandes = DB.get('commandes');
-    const isUsedInCommandes = commandes.some(c => c.items.some(i => i.formatId === id));
+    const isUsedInCommandes = commandes.some(c => getItems(c).some(i => i.formatId === id));
     
     if (isUsedInCommandes) {
-        alert('Impossible de supprimer ce format car il est utilisé dans des commandes. Vous pouvez le désactiver à la place.');
+        showToast('Impossible de supprimer ce format : il est utilisé dans des commandes. Vous pouvez le désactiver à la place.', 'error');
         return;
     }
 
-    if (confirm('Êtes-vous sûr de vouloir supprimer ce format ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer ce format ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const formats = DB.get('formats').filter(f => f.id !== id);
         DB.set('formats', formats);
         showToast('Format supprimé');
         renderParametres();
-    }
+    });
 };
 
 // Settings - Recettes
@@ -4374,14 +4560,14 @@ const showRecetteModal = (id = null) => {
     const consumableNames = inventaire.filter(i => i.categorie === 'consommable').map(i => i.nom);
     const suggestionsId = 'ingredientSuggestions';
     const suggestionsList = consumableNames.length > 0
-        ? `<datalist id="${suggestionsId}">${consumableNames.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join('')}</datalist>`
+        ? `<datalist id="${suggestionsId}">${consumableNames.map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>`
         : '';
 
     const ingredientsHtml = recette ? recette.ingredients.map((ing, idx) => `
         <div class="ingredient-row">
-            <input type="text" name="ingredients[${idx}][nom]" value="${ing.nom}" placeholder="Ingrédient" list="${suggestionsId}" required>
+            <input type="text" name="ingredients[${idx}][nom]" value="${escapeHtml(ing.nom)}" placeholder="Ingrédient" list="${suggestionsId}" required>
             <input type="number" name="ingredients[${idx}][quantite]" value="${ing.quantite}" placeholder="Qté" step="0.01" required>
-            <input type="text" name="ingredients[${idx}][unite]" value="${displayUnit(ing.unite)}" placeholder="Unité" required>
+            <input type="text" name="ingredients[${idx}][unite]" value="${escapeHtml(displayUnit(ing.unite))}" placeholder="Unité" required>
             <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
         </div>
     `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>`;
@@ -4405,7 +4591,7 @@ const showRecetteModal = (id = null) => {
                           if (recette && recette.aromeId === a.id) return true;
                           const existingRecipe = recettes.find(r => r.aromeId === a.id);
                           return !existingRecipe;
-                      }).map(a => `<option value="${a.id}" ${recette?.aromeId === a.id ? 'selected' : ''}>${a.nom}</option>`).join('')}
+                      }).map(a => `<option value="${a.id}" ${recette?.aromeId === a.id ? 'selected' : ''}>${escapeHtml(a.nom)}</option>`).join('')}
                 </select>
                 ${id ? '<input type="hidden" name="aromeId" value="' + recette.aromeId + '">' : ''}
             </div>
@@ -4509,12 +4695,13 @@ const saveRecette = (event, id) => {
 };
 
 const deleteRecette = (id) => {
-    if (confirm('Êtes-vous sûr de vouloir supprimer cette recette ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer cette recette ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const recettes = DB.get('recettes').filter(r => r.id !== id);
         DB.set('recettes', recettes);
         showToast('Recette supprimée');
         renderParametres();
-    }
+    });
 };
 
 const syncRecettesInventaire = () => {
@@ -4570,49 +4757,49 @@ const showClientModal = (id = null) => {
             <div class="form-row">
                 <div class="form-group">
                     <label>Société</label>
-                    <input type="text" name="societe" value="${client?.societe || ''}">
+                    <input type="text" name="societe" value="${escapeHtml(client?.societe || '')}">
                 </div>
                 <div class="form-group">
                     <label>Prénom & Nom</label>
-                    <input type="text" name="nom" value="${client?.nom || ''}">
+                    <input type="text" name="nom" value="${escapeHtml(client?.nom || '')}">
                 </div>
             </div>
             <div class="form-group">
                 <label>Adresse</label>
-                <input type="text" name="adresse" value="${client?.adresse || ''}">
+                <input type="text" name="adresse" value="${escapeHtml(client?.adresse || '')}">
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>NPA & Localité</label>
-                    <input type="text" name="npa" value="${client?.npa || ''}">
+                    <input type="text" name="npa" value="${escapeHtml(client?.npa || '')}">
                 </div>
                 <div class="form-group">
                     <label>Tarifs</label>
-                    <input type="text" name="tarifs" value="${client?.tarifs || ''}">
+                    <input type="text" name="tarifs" value="${escapeHtml(client?.tarifs || '')}">
                 </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>Prix 25cl</label>
-                    <input type="text" name="prix25cl" value="${client?.prix25cl || ''}">
+                    <input type="text" name="prix25cl" value="${escapeHtml(client?.prix25cl || '')}">
                 </div>
                 <div class="form-group">
                     <label>Prix 50cl</label>
-                    <input type="text" name="prix50cl" value="${client?.prix50cl || ''}">
+                    <input type="text" name="prix50cl" value="${escapeHtml(client?.prix50cl || '')}">
                 </div>
                 <div class="form-group">
                     <label>Prix 100cl</label>
-                    <input type="text" name="prix100cl" value="${client?.prix100cl || ''}">
+                    <input type="text" name="prix100cl" value="${escapeHtml(client?.prix100cl || '')}">
                 </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>Mode facturation</label>
-                    <input type="text" name="modeFact" value="${client?.modeFact || ''}">
+                    <input type="text" name="modeFact" value="${escapeHtml(client?.modeFact || '')}">
                 </div>
                 <div class="form-group">
                     <label>Coordonnées</label>
-                    <input type="text" name="coord" value="${client?.coord || ''}">
+                    <input type="text" name="coord" value="${escapeHtml(client?.coord || '')}">
                 </div>
             </div>
             <div class="form-group">
@@ -4667,16 +4854,17 @@ const deleteClient = (id) => {
     const isUsedInCommandes = commandes.some(c => c.clientId === id);
     
     if (isUsedInCommandes) {
-        alert('Impossible de supprimer ce client car il a des commandes associées. Vous pouvez le désactiver à la place.');
+        showToast('Impossible de supprimer ce client : il a des commandes associées. Vous pouvez le désactiver à la place.', 'error');
         return;
     }
 
-    if (confirm('Êtes-vous sûr de vouloir supprimer ce client ?')) {
+    confirmDialog('Êtes-vous sûr de vouloir supprimer ce client ?', { danger: true }).then(ok => {
+        if (!ok) return;
         const clients = DB.get('clients').filter(c => c.id !== id);
         DB.set('clients', clients);
         showToast('Client supprimé');
         renderParametres();
-    }
+    });
 };
 
 // Excel: Export/Import Clients
@@ -4803,11 +4991,12 @@ document.querySelectorAll('.nav-item').forEach(item => {
 
 // Reset clients data if corrupted
 const resetClients = () => {
-    if (confirm('Voulez-vous effacer tous les clients et recommencer ?')) {
+    confirmDialog('Voulez-vous effacer tous les clients et recommencer ?', { danger: true, confirmLabel: 'Effacer tout' }).then(ok => {
+        if (!ok) return;
         DB.set('clients', []);
         showToast('Clients effacés');
         renderParametres();
-    }
+    });
 };
 
 // Export all data to JSON

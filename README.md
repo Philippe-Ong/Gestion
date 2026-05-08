@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v6.16**
+**v8.0**
 
 ## Adresse
 
@@ -124,3 +124,16 @@ Pour sauvegarder vos données:
 Pour restaurer:
 1. Cliquez sur **"Restaurer depuis JSON"**
 2. Sélectionnez votre fichier de sauvegarde
+
+## Tests
+
+Aucune CI ; le filet de sécurité est `stress-test.js` (≈850 lignes). Il s'exécute depuis l'UI :
+
+1. Ouvrez **Paramètres** → encadré **🔧 Outils de développement**
+2. Cliquez sur **"Lancer le stress test"**
+
+Le runner couvre :
+- Phase 1 : rendu de toutes les vues + alerte si > 2 s
+- Phase 2-5 : CRUD massif (création / mise à jour / suppression / opérations en lot)
+
+Une sauvegarde automatique des données est faite avant l'exécution.
