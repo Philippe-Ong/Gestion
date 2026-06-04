@@ -387,6 +387,157 @@ const safeRender = (html) => {
     if (el) el.innerHTML = html;
 };
 
+const renderEmptyState = (message, actionHtml = '') => `
+    <div class="empty-state">
+        <p>${escapeHtml(message)}</p>
+        ${actionHtml}
+    </div>
+`;
+
+const renderSegmentedFilter = (name, currentValue, options, renderFnName) => `
+    <div class="segmented-filter" role="group" aria-label="${escapeHtml(name)}">
+        ${options.map(opt => `
+            <button type="button" class="segment ${currentValue === opt.value ? 'active' : ''}" onclick="DB.setFilter('${name}', '${opt.value}'); ${renderFnName}()">
+                ${escapeHtml(opt.label)}
+            </button>
+        `).join('')}
+    </div>
+`;
+
+const getClientLabel = (client) => client ? (client.societe || client.nom || 'Client sans nom') : 'N/A';
+
+const getStatusLabel = (status) => ({
+    en_attente: 'En attente',
+    produite: 'Produite',
+    livrée: 'Livrée',
+    annulee: 'Annulée'
+})[status] || status || '';
+
+const includesText = (value, query) => {
+    if (!query) return true;
+    return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').includes(
+        String(query || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    );
+};
+
+const getGlobalSearchMatches = (query) => {
+    const q = String(query || '').trim();
+    if (q.length < 2) return [];
+
+    const commandes = DB.get('commandes') || [];
+    const clients = DB.get('clients') || [];
+    const livraisons = DB.get('livraisons') || [];
+    const lots = DB.get('lots') || [];
+    const matches = [];
+
+    commandes.forEach(cmd => {
+        const client = clients.find(c => c.id === cmd.clientId);
+        const label = `Commande #${getCommandeNumero(cmd)} - ${getClientLabel(client)}`;
+        if (includesText(label, q) || includesText(cmd.statut, q)) {
+            matches.push({ type: 'commande', id: cmd.id, label, meta: getStatusLabel(cmd.statut) });
+        }
+    });
+
+    clients.forEach(client => {
+        const label = getClientLabel(client);
+        if (includesText(label, q) || includesText(client.email, q) || includesText(client.telephone, q)) {
+            matches.push({ type: 'client', id: client.id, label, meta: 'Client' });
+        }
+    });
+
+    livraisons.forEach(liv => {
+        const client = clients.find(c => c.id === liv.clientId);
+        const label = `BL-${getBLNumero(liv)} - ${getClientLabel(client)}`;
+        if (includesText(label, q) || includesText(liv.dateBL, q)) {
+            matches.push({ type: 'livraison', id: liv.id, label, meta: liv.dateBL || 'Livraison' });
+        }
+    });
+
+    lots.forEach(lot => {
+        const label = `Lot #${String(lot.id).slice(-6)} - ${lot.arome || ''} ${lot.format || ''}`;
+        if (includesText(label, q) || includesText(lot.dlc, q)) {
+            matches.push({ type: 'lot', id: lot.id, label, meta: `${lot.quantite || 0} bt` });
+        }
+    });
+
+    return matches.slice(0, 8);
+};
+
+const renderGlobalSearchResults = () => {
+    const input = document.getElementById('globalSearchInput');
+    const resultsEl = document.getElementById('globalSearchResults');
+    if (!input || !resultsEl) return;
+
+    const matches = getGlobalSearchMatches(input.value);
+    if (matches.length === 0) {
+        resultsEl.classList.remove('active');
+        resultsEl.innerHTML = '';
+        return;
+    }
+
+    resultsEl.innerHTML = matches.map(match => `
+        <button type="button" class="global-search-result" onclick="openGlobalSearchResult('${match.type}', '${match.id}')">
+            <span>${escapeHtml(match.label)}</span>
+            <small>${escapeHtml(match.meta)}</small>
+        </button>
+    `).join('');
+    resultsEl.classList.add('active');
+};
+
+const openGlobalSearchResult = (type, id) => {
+    const input = document.getElementById('globalSearchInput');
+    const resultsEl = document.getElementById('globalSearchResults');
+    if (input) input.value = '';
+    if (resultsEl) {
+        resultsEl.classList.remove('active');
+        resultsEl.innerHTML = '';
+    }
+
+    if (type === 'commande') {
+        window.location.hash = '#commandes';
+        setTimeout(() => showCommandeDetails(id), 100);
+        return;
+    }
+    if (type === 'client') {
+        DB.setFilter('client', id);
+        DB.setFilter('statut', '');
+        DB.setFilter('commande_search', '');
+        if (window.location.hash === '#commandes') renderCommandes();
+        else window.location.hash = '#commandes';
+        return;
+    }
+    if (type === 'livraison') {
+        window.location.hash = '#livraisons';
+        setTimeout(() => showLivraisonDetails(id), 100);
+        return;
+    }
+    if (type === 'lot') {
+        DB.setFilter('stock_search', id);
+        if (window.location.hash === '#stock') renderStock();
+        else window.location.hash = '#stock';
+    }
+};
+
+const initGlobalSearch = () => {
+    const input = document.getElementById('globalSearchInput');
+    const resultsEl = document.getElementById('globalSearchResults');
+    if (!input || !resultsEl) return;
+
+    input.addEventListener('input', renderGlobalSearchResults);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            input.value = '';
+            resultsEl.classList.remove('active');
+            resultsEl.innerHTML = '';
+        }
+    });
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.global-search')) {
+            resultsEl.classList.remove('active');
+        }
+    });
+};
+
 // UI Lock helper (Anti-Double Clic)
 const disableSaveBtn = (event) => {
     if (!event || !event.target) return null;
@@ -568,8 +719,11 @@ const renderDashboard = () => {
         return dlc >= today && dlc <= oneMonthFromNow;
     }).length;
     const sellableBottles = lots.filter(lot => lot.dlc && new Date(lot.dlc) >= today).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const inventaire = DB.get('inventaire') || [];
+    const stockBas = inventaire.filter(item => item.seuilAlerte && (item.quantite || 0) <= item.seuilAlerte).length;
     
     const commandesEnAttente = commandes.filter(c => c.statut === 'en_attente').length;
+    const commandesProduites = commandes.filter(c => c.statut === 'produite').length;
 
     const commandesPeriode = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
 
@@ -601,6 +755,36 @@ const renderDashboard = () => {
     }).filter(b => b.aProduire > 0).sort((a, b) => b.aProduire - a.aProduire);
 
     const totalBouteillesAProduire = bouteillesAProduire.reduce((sum, b) => sum + b.aProduire, 0);
+    const actionsPrioritaires = [
+        commandesProduites > 0 ? {
+            label: `${commandesProduites} commande(s) prête(s) à livrer`,
+            meta: 'Ouvrir les commandes produites',
+            href: '#commandes',
+            onclick: "DB.setFilter('statut', 'produite')"
+        } : null,
+        commandesEnAttente > 0 ? {
+            label: `${commandesEnAttente} commande(s) en attente`,
+            meta: 'Vérifier le stock et produire',
+            href: '#commandes',
+            onclick: "DB.setFilter('statut', 'en_attente')"
+        } : null,
+        totalBouteillesAProduire > 0 ? {
+            label: `${totalBouteillesAProduire} bouteille(s) à produire`,
+            meta: 'Ouvrir le planificateur',
+            href: '#production'
+        } : null,
+        moinsUnMois > 0 ? {
+            label: `${moinsUnMois} lot(s) bientôt en DLC`,
+            meta: 'Consulter le stock',
+            href: '#stock'
+        } : null,
+        stockBas > 0 ? {
+            label: `${stockBas} item(s) d'inventaire en alerte`,
+            meta: 'Réapprovisionner',
+            href: '#inventaire',
+            onclick: "DB.setFilter('inventaire_type', 'alerte')"
+        } : null
+    ].filter(Boolean).slice(0, 5);
     
     const heuresAujourdhui = pointages
         .filter(p => p.date === todayStr)
@@ -615,7 +799,7 @@ const renderDashboard = () => {
 
     safeRender(`
         <div class="stats-grid">
-            <div class="stat-card">
+            <a href="#stock" class="stat-card stat-link">
                 <div class="stat-icon green">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
                 </div>
@@ -623,8 +807,8 @@ const renderDashboard = () => {
                     <h3>${sellableBottles}</h3>
                     <p>Bouteilles vendables</p>
                 </div>
-            </div>
-            <div class="stat-card">
+            </a>
+            <a href="#stock" class="stat-card stat-link">
                 <div class="stat-icon orange">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 </div>
@@ -632,8 +816,8 @@ const renderDashboard = () => {
                     <h3>${totalBouteilles}</h3>
                     <p>Total bouteilles</p>
                 </div>
-            </div>
-            <div class="stat-card">
+            </a>
+            <a href="#stock" class="stat-card stat-link">
                 <div class="stat-icon red">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
                 </div>
@@ -641,8 +825,8 @@ const renderDashboard = () => {
                     <h3>${expiries}</h3>
                     <p>Expirés (DLC)</p>
                 </div>
-            </div>
-            <div class="stat-card">
+            </a>
+            <a href="#commandes" class="stat-card stat-link" onclick="DB.setFilter('statut', 'en_attente')">
                 <div class="stat-icon blue">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/></svg>
                 </div>
@@ -650,7 +834,23 @@ const renderDashboard = () => {
                     <h3>${commandesEnAttente}</h3>
                     <p>Commandes en attente</p>
                 </div>
+            </a>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">À traiter maintenant</h3>
             </div>
+            ${actionsPrioritaires.length === 0 ? renderEmptyState('Aucune action urgente pour le moment.', '<a href="#commandes" class="btn btn-primary">Créer une commande</a>') : `
+                <div class="priority-list">
+                    ${actionsPrioritaires.map(action => `
+                        <a class="priority-item" href="${action.href}" ${action.onclick ? `onclick="${action.onclick}"` : ''}>
+                            <strong>${escapeHtml(action.label)}</strong>
+                            <span>${escapeHtml(action.meta)}</span>
+                        </a>
+                    `).join('')}
+                </div>
+            `}
         </div>
 
         <div class="card">
@@ -682,9 +882,9 @@ const renderDashboard = () => {
                 <h3 class="card-title">Actions rapides</h3>
             </div>
             <div class="flex gap-4">
-                <a href="#stock" class="btn btn-primary">Nouveau lot</a>
+                <button type="button" class="btn btn-primary" onclick="showNouveauLotModal()">Nouveau lot</button>
                 <a href="#pointage" class="btn btn-secondary">Pointer</a>
-                <a href="#commandes" class="btn btn-secondary">Nouvelle commande</a>
+                <button type="button" class="btn btn-secondary" onclick="showCommandeModal()">Nouvelle commande</button>
             </div>
         </div>
         
@@ -702,6 +902,9 @@ const renderStock = () => {
     const lots = DB.get('lots') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
+    const savedFilterArome = DB.getFilter('stock_arome');
+    const savedFilterFormat = DB.getFilter('stock_format');
+    const savedStockSearch = DB.getFilter('stock_search');
     
     const today = new Date();
     const oneMonthFromNow = new Date();
@@ -715,6 +918,12 @@ const renderStock = () => {
         return dlc >= today && dlc <= oneMonthFromNow;
     }).length;
     const sellableBottles = lots.filter(lot => lot.dlc && new Date(lot.dlc) >= today).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const filteredLots = lots.filter(lot => {
+        const searchText = `${lot.id || ''} ${lot.arome || ''} ${lot.format || ''} ${lot.dateProduction || ''} ${lot.dlv || ''} ${lot.dlc || ''}`;
+        return (!savedFilterArome || lot.arome === savedFilterArome) &&
+               (!savedFilterFormat || lot.format === savedFilterFormat) &&
+               includesText(searchText, savedStockSearch);
+    });
     
     let html = `
         <div class="stats-grid" style="margin-bottom: 24px;">
@@ -785,14 +994,16 @@ const renderStock = () => {
             </div>
             
             <div class="filters">
-                <select id="filterArome" onchange="renderStock()">
+                <input type="search" id="filterStockSearch" placeholder="Rechercher lot, arôme, DLC..." value="${escapeHtml(savedStockSearch)}" oninput="DB.setFilter('stock_search', this.value); window.__focusStockSearch = true; renderStock()">
+                <select id="filterArome" onchange="DB.setFilter('stock_arome', this.value); renderStock()">
                     <option value="">Tous les arômes</option>
-                    ${aromes.filter(a => a.actif).map(a => `<option value="${escapeHtml(a.nom)}">${escapeHtml(a.nom)}</option>`).join('')}
+                    ${aromes.filter(a => a.actif).map(a => `<option value="${escapeHtml(a.nom)}" ${savedFilterArome === a.nom ? 'selected' : ''}>${escapeHtml(a.nom)}</option>`).join('')}
                 </select>
-                <select id="filterFormat" onchange="renderStock()">
+                <select id="filterFormat" onchange="DB.setFilter('stock_format', this.value); renderStock()">
                     <option value="">Tous les formats</option>
-                    ${formats.filter(f => f.actif).map(f => `<option value="${escapeHtml(f.nom)}">${escapeHtml(f.nom)}</option>`).join('')}
+                    ${formats.filter(f => f.actif).map(f => `<option value="${escapeHtml(f.nom)}" ${savedFilterFormat === f.nom ? 'selected' : ''}>${escapeHtml(f.nom)}</option>`).join('')}
                 </select>
+                ${(savedFilterArome || savedFilterFormat || savedStockSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('stock_arome', ''); DB.setFilter('stock_format', ''); DB.setFilter('stock_search', ''); renderStock()">Réinitialiser</button>` : ''}
             </div>
             
             <div class="table-container">
@@ -811,12 +1022,8 @@ const renderStock = () => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${lots.length === 0 ? '<tr><td colspan="9" class="text-center">Aucun lot en stock</td></tr>' : 
-                          lots.filter(lot => {
-                              const filterArome = document.getElementById('filterArome')?.value || '';
-                              const filterFormat = document.getElementById('filterFormat')?.value || '';
-                              return (!filterArome || lot.arome === filterArome) && (!filterFormat || lot.format === filterFormat);
-                          }).map(lot => {
+                        ${filteredLots.length === 0 ? `<tr><td colspan="9">${renderEmptyState('Aucun lot trouvé.', '<button class="btn btn-primary" onclick="showNouveauLotModal()">Créer un lot</button>')}</td></tr>` :
+                          filteredLots.map(lot => {
                               const arome = aromes.find(a => a.nom === lot.arome);
                               const status = getStatus(lot.dlc);
                               const statusBadge = status === 'expired' ? '<span class="badge badge-danger">Expiré</span>' : 
@@ -848,6 +1055,14 @@ const renderStock = () => {
     `;
     
     safeRender(html);
+    if (window.__focusStockSearch) {
+        const input = document.getElementById('filterStockSearch');
+        if (input) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+        }
+        window.__focusStockSearch = false;
+    }
 };
 
 const showNouveauLotModal = () => {
@@ -1861,6 +2076,7 @@ const deletePointage = (id) => {
 const renderCommandes = () => {
     const savedFilterClient = DB.getFilter('client');
     const savedFilterStatut = DB.getFilter('statut');
+    const savedSearch = DB.getFilter('commande_search');
     const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
     
     const allCommandes = DB.get('commandes') || [];
@@ -1870,6 +2086,21 @@ const renderCommandes = () => {
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
+    const statusOptions = [
+        { value: '', label: 'Tous' },
+        { value: 'en_attente', label: 'En attente' },
+        { value: 'produite', label: 'Produites' },
+        { value: 'annulee', label: 'Annulées' }
+    ];
+    const filteredCommandes = commandes
+        .filter(c => {
+            const client = clients.find(cl => cl.id === c.clientId);
+            const searchText = `${getCommandeNumero(c)} ${getClientLabel(client)} ${c.dateCommande || ''} ${c.dateLivraison || ''} ${c.statut || ''}`;
+            return (!savedFilterClient || c.clientId === savedFilterClient) &&
+                   (!savedFilterStatut || c.statut === savedFilterStatut) &&
+                   includesText(searchText, savedSearch);
+        })
+        .sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
     
     let html = `
         <div class="card">
@@ -1902,17 +2133,13 @@ const renderCommandes = () => {
             
             ${!showArchives ? `
             <div class="filters">
+                ${renderSegmentedFilter('statut', savedFilterStatut, statusOptions, 'renderCommandes')}
+                <input type="search" id="filterCommandeSearch" placeholder="Rechercher n°, client, date..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('commande_search', this.value); window.__focusCommandeSearch = true; renderCommandes()">
                 <select id="filterClient" onchange="DB.setFilter('client', this.value); renderCommandes()">
                     <option value="">Tous les clients</option>
                     ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
-                <select id="filterStatut" onchange="DB.setFilter('statut', this.value); renderCommandes()">
-                    <option value="">Tous les statuts</option>
-                    <option value="en_attente" ${savedFilterStatut === 'en_attente' ? 'selected' : ''}>En attente</option>
-                    <option value="produite" ${savedFilterStatut === 'produite' ? 'selected' : ''}>Produite</option>
-                    <option value="livrée" ${savedFilterStatut === 'livrée' ? 'selected' : ''}>Livrée</option>
-                    <option value="annulee" ${savedFilterStatut === 'annulee' ? 'selected' : ''}>Annulée</option>
-                </select>
+                ${(savedFilterClient || savedFilterStatut || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('client', ''); DB.setFilter('statut', ''); DB.setFilter('commande_search', ''); renderCommandes()">Réinitialiser</button>` : ''}
             </div>
             ` : ''}
             
@@ -1930,16 +2157,8 @@ const renderCommandes = () => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${commandes.length === 0 ? '<tr><td colspan="7" class="text-center">Aucune commande</td></tr>' : 
-                          commandes
-                            .filter(c => {
-                                const filterClient = document.getElementById('filterClient')?.value || '';
-                                const filterStatut = document.getElementById('filterStatut')?.value || '';
-                                return (!filterClient || c.clientId === filterClient) && 
-                                       (!filterStatut || c.statut === filterStatut);
-                            })
-                            .sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande))
-                            .map(cmd => {
+                        ${filteredCommandes.length === 0 ? `<tr><td colspan="7">${renderEmptyState(showArchives ? 'Aucune archive trouvée.' : 'Aucune commande trouvée.', showArchives ? '' : '<button class="btn btn-primary" onclick="showCommandeModal()">Créer une commande</button>')}</td></tr>` :
+                          filteredCommandes.map(cmd => {
                                 const client = clients.find(cl => cl.id === cmd.clientId);
                                 const safeItems = cmd.items || [];
                                 const totalItems = safeItems.reduce((sum, i) => sum + i.quantite, 0);
@@ -1970,8 +2189,8 @@ const renderCommandes = () => {
                                             </div>
                                         </td>
                                         <td class="actions-cell">
-                                            <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
                                             ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="showLivraisonBouteillesModal('${cmd.id}')">Livrer</button>` : ''}
+                                            <button class="btn btn-sm btn-primary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
                                             ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="restaurerCommande('${cmd.id}')">Restaurer</button>` : ''}
                                             ${cmd.statut !== 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
                                             <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
@@ -1982,11 +2201,19 @@ const renderCommandes = () => {
                     </tbody>
                 </table>
             </div>
-            ${!showArchives ? '' : ''}
+            <p class="text-muted" style="margin-top: 12px; font-size: 12px;">${filteredCommandes.length} commande(s) affichée(s)</p>
         </div>
     `;
     
     safeRender(html);
+    if (window.__focusCommandeSearch) {
+        const input = document.getElementById('filterCommandeSearch');
+        if (input) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+        }
+        window.__focusCommandeSearch = false;
+    }
 };
 
 const showCommandeModal = (id = null) => {
@@ -2299,7 +2526,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
                 return `<div class="flex-between" style="padding: 4px 0;">
                     <span style="font-size: 12px;">#${String(lot.id).slice(-6)} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" value="${prefill}" min="0" max="${lot.quantite}" style="width: 60px;">
+                        <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" data-auto="${prefill}" value="${prefill}" min="0" max="${lot.quantite}" style="width: 60px;">
                         <span style="font-size: 12px; color: var(--text-muted);">/ ${lot.quantite}</span>
                     </div>
                 </div>`;
@@ -2421,6 +2648,8 @@ const showLivraisonBouteillesModal = (commandeId) => {
     };
 
     const computeTotals = () => {
+        let totalAlloueGlobal = 0;
+        let ecarts = 0;
         document.querySelectorAll('.lot-qty-input').forEach(input => {
             const itemKey = input.dataset.item;
             const itemInputs = document.querySelectorAll(`.lot-qty-input[data-item="${itemKey}"]`);
@@ -2428,11 +2657,39 @@ const showLivraisonBouteillesModal = (commandeId) => {
             const totalEl = document.getElementById(`item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_') + '-count');
             if (totalEl) totalEl.textContent = total;
         });
+        getItems(cmd).forEach(item => {
+            const itemKey = `${item.aromeId}|${item.formatId}`;
+            const itemInputs = document.querySelectorAll(`.lot-qty-input[data-item="${itemKey}"]`);
+            const total = Array.from(itemInputs).reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
+            totalAlloueGlobal += total;
+            if (total !== item.quantite) ecarts++;
+        });
+        const totalEl = document.getElementById('livraison-total-alloue');
+        const ecartsEl = document.getElementById('livraison-ecarts');
+        if (totalEl) totalEl.textContent = totalAlloueGlobal;
+        if (ecartsEl) ecartsEl.textContent = ecarts === 0 ? 'Aucun écart' : `${ecarts} écart(s)`;
+    };
+
+    const allouerAutoFifo = () => {
+        document.querySelectorAll('.lot-qty-input').forEach(input => {
+            input.value = input.dataset.auto || '0';
+        });
+        computeTotals();
+        showToast('Allocation FIFO appliquée');
     };
 
     modal.show(`Livrer commande #${getCommandeNumero(cmd)} — ${clientName}`, `
         <div style="max-height: 65vh; overflow-y: auto;">
-            <p style="margin-bottom: 16px; font-size: 13px; color: var(--text-muted);">${totalItems} articles au total. Répartissez les bouteilles par lot (FIFO auto-rempli, modifiable).</p>
+            <div class="workflow-summary">
+                <div><span>Client</span><strong>${escapeHtml(clientName)}</strong></div>
+                <div><span>Commandé</span><strong>${totalItems}</strong></div>
+                <div><span>Alloué</span><strong id="livraison-total-alloue">0</strong></div>
+                <div><span>Écarts</span><strong id="livraison-ecarts">Calcul...</strong></div>
+            </div>
+            <div class="modal-toolbar">
+                <button type="button" class="btn btn-sm btn-secondary" id="auto-fifo-btn">Allouer automatiquement FIFO</button>
+                <span class="text-muted">L'allocation reste modifiable avant confirmation.</span>
+            </div>
             ${lignesHtml}
         </div>
     `, `
@@ -2444,7 +2701,9 @@ const showLivraisonBouteillesModal = (commandeId) => {
         input.addEventListener('input', computeTotals);
     });
 
+    document.getElementById('auto-fifo-btn')?.addEventListener('click', allouerAutoFifo);
     document.getElementById('confirm-livraison-btn')?.addEventListener('click', validateAndDeliver);
+    computeTotals();
 };
 
 document.addEventListener('click', () => {
@@ -3474,6 +3733,7 @@ const renderProduction = () => {
                             <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
                             <strong>${escapeHtml(aromeNom)}</strong>
                             <span> - ${totalLitres.toFixed(1)}L (${cuves.length} cuve${cuves.length > 1 ? 's' : ''})</span>
+                            <button class="btn btn-sm btn-success" onclick="confirmerProductionArome('${encodeURIComponent(aromeNom)}')">Produire tout l'arôme</button>
                           </div>
                           ${cuves.map((cuve, cuveIndex) => `
                             <div class="cuve-detail" data-arome="${escapeHtml(aromeNom)}" data-cuve-index="${cuveIndex}">
@@ -3774,6 +4034,225 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
     }
 };
 
+const confirmerProductionArome = (encodedAromeNom) => {
+    try {
+        const aromeNom = decodeURIComponent(encodedAromeNom || '');
+        const formats = DB.get('formats') || [];
+        const aromes = DB.get('aromes') || [];
+        const recettes = DB.get('recettes') || [];
+        const state = productionPlannerState;
+
+        if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) {
+            showToast('Plan de production introuvable, rechargez la page', 'error');
+            return;
+        }
+
+        const cuves = state.cuvesParArome[aromeNom] || [];
+        const totalLitres = cuves.reduce((sum, c) => sum + (c.litres || 0), 0);
+        const besoinsArome = Object.values(state.productionNecesaire || {}).filter(b => b.aromeNom === aromeNom && b.aProduire > 0);
+        const arome = aromes.find(a => a.nom === aromeNom);
+        const recette = recettes.find(r => r.aromeId === arome?.id);
+        const ingredients = calculerIngredientsCuve(recette, totalLitres);
+
+        const formRows = formats.map(format => {
+            const prefill = besoinsArome.find(b => b.formatNom === format.nom)?.aProduire || 0;
+            return `
+                <div class="form-group" style="margin-bottom: 10px;">
+                    <label>${escapeHtml(format.nom)}</label>
+                    <input type="number" min="0" step="1" name="format_${format.id}" value="${prefill}">
+                </div>
+            `;
+        }).join('');
+
+        modal.show(`Production groupée - ${aromeNom}`, `
+            <form id="productionAromeForm">
+                <div class="workflow-summary">
+                    <div><span>Arôme</span><strong>${escapeHtml(aromeNom)}</strong></div>
+                    <div><span>Cuves</span><strong>${cuves.length}</strong></div>
+                    <div><span>Litres prévus</span><strong>${totalLitres.toFixed(1)} L</strong></div>
+                    <div><span>Formats</span><strong>${besoinsArome.length}</strong></div>
+                </div>
+                <div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
+                    <strong>Ingrédients prévus pour tout l'arôme</strong>
+                    <ul class="ingredient-list" style="margin-top: 8px;">
+                        ${ingredients.map(ing => `
+                            <li>
+                                <span>${escapeHtml(ing.nom)}</span>
+                                <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>
+                <div>
+                    <strong>Bouteilles produites (modifiable)</strong>
+                    <div style="margin-top: 8px;">
+                        ${formRows || '<p class="text-muted">Aucun format actif</p>'}
+                    </div>
+                </div>
+            </form>
+        `, `
+            <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
+            <button class="btn btn-success" onclick="validerProductionArome(event, '${encodeURIComponent(aromeNom)}')">Confirmer tout l'arôme</button>
+        `, 'large');
+    } catch (e) {
+        console.error('Error opening grouped production modal:', e);
+        showToast('Erreur ouverture production groupée', 'error');
+    }
+};
+
+const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProduit, totalBouteilles) => {
+    const aromes = DB.get('aromes') || [];
+    const recettes = DB.get('recettes') || [];
+    const inventaire = (DB.get('inventaire') || []).map(item => ({ ...item }));
+    const lots = DB.get('lots') || [];
+    const history = DB.get('history') || [];
+    const arome = aromes.find(a => a.nom === aromeNom);
+    const recette = recettes.find(r => r.aromeId === arome?.id);
+    const warnings = [];
+
+    if (recette && Array.isArray(recette.ingredients)) {
+        recette.ingredients.forEach(ing => {
+            if (isWaterIngredient(ing.nom)) return;
+            const ingQty = parseFloat(ing.quantite);
+            if (Number.isNaN(ingQty)) {
+                warnings.push(`Quantité de recette invalide pour ${ing.nom}`);
+                return;
+            }
+            const besoinMajore = ingQty * litresProduit * CONSTANTS.PRODUCTION_LOSS;
+            const item = findInventaireItemByName(inventaire, ing.nom);
+            if (!item) {
+                warnings.push(`Ingrédient absent: ${ing.nom}`);
+                return;
+            }
+            const ingUnit = displayUnit(ing.unite);
+            const invUnit = displayUnit(item.unite);
+            if (!areUnitsCompatible(ingUnit, invUnit)) {
+                warnings.push(`Unité incompatible pour ${ing.nom} (recette: ${ingUnit}, inventaire: ${invUnit})`);
+                return;
+            }
+            const converted = ingUnit !== invUnit ? convertQuantity(besoinMajore, ingUnit, invUnit) : besoinMajore;
+            if (converted === null) {
+                warnings.push(`Conversion impossible pour ${ing.nom}`);
+                return;
+            }
+            if ((item.quantite || 0) < converted) warnings.push(`Stock insuffisant: ${item.nom}`);
+            item.quantite = Math.round(((item.quantite || 0) - converted) * 10000) / 10000;
+        });
+    } else {
+        warnings.push(`Recette introuvable pour ${aromeNom}`);
+    }
+
+    producedByFormat.forEach(({ format, quantite }) => {
+        const bottleItem = getBottleInventoryItem(inventaire, format);
+        if (!bottleItem) {
+            warnings.push(`Bouteilles vides absentes pour ${format.nom}`);
+        } else {
+            if ((bottleItem.quantite || 0) < quantite) warnings.push(`Stock insuffisant: ${bottleItem.nom}`);
+            bottleItem.quantite = (bottleItem.quantite || 0) - quantite;
+        }
+    });
+
+    const capsulesItem = inventaire.find(item => {
+        const n = normalizeName(item.nom);
+        return n.includes('capsule') || n.includes('bouchon');
+    });
+    const capsulesNecessaires = Math.ceil(totalBouteilles * CONSTANTS.CAPSULE_LOSS);
+    if (capsulesItem) {
+        if ((capsulesItem.quantite || 0) < capsulesNecessaires) warnings.push(`Stock insuffisant: ${capsulesItem.nom}`);
+        capsulesItem.quantite = (capsulesItem.quantite || 0) - capsulesNecessaires;
+    } else {
+        warnings.push('Capsules/bouchons absents de l\'inventaire');
+    }
+
+    if (warnings.length > 0) {
+        const ok = await confirmDialog(
+            `Attention: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}. Confirmer quand même la production ?`,
+            { danger: true, confirmLabel: 'Confirmer quand même', title: 'Inventaire insuffisant' }
+        );
+        if (!ok) return false;
+    }
+
+    const dateProduction = getLocalDateISOString();
+    const dates = calculateDates(dateProduction);
+    producedByFormat.forEach(({ format, quantite }) => {
+        const existingLot = lots.find(l => l.arome === aromeNom && l.format === format.nom && l.dateProduction === dateProduction);
+        let lotId;
+        if (existingLot) {
+            existingLot.quantite = (existingLot.quantite || 0) + quantite;
+            lotId = existingLot.id;
+        } else {
+            let maxNum = 0;
+            lots.forEach(l => {
+                const num = parseInt(l.id, 10);
+                if (!isNaN(num) && num > maxNum) maxNum = num;
+            });
+            lotId = String(maxNum + 1).padStart(6, '0');
+            lots.push({ id: lotId, arome: aromeNom, format: format.nom, quantite, dateProduction, dlv: dates.dlv, dlc: dates.dlc });
+        }
+        history.unshift({
+            id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+            lotId,
+            arome: aromeNom,
+            format: format.nom,
+            quantity: quantite,
+            productionDate: dateProduction,
+            dateAdded: new Date().toISOString()
+        });
+    });
+
+    DB.set('inventaire', inventaire);
+    DB.set('lots', lots);
+    DB.set('history', history);
+    return { warnings };
+};
+
+const validerProductionArome = async (event, encodedAromeNom) => {
+    const reenable = disableSaveBtn(event);
+    try {
+        const aromeNom = decodeURIComponent(encodedAromeNom || '');
+        const form = document.getElementById('productionAromeForm');
+        if (!form) {
+            showToast('Données de production introuvables', 'error');
+            return;
+        }
+
+        const formats = DB.get('formats') || [];
+        const producedByFormat = [];
+        let totalBouteilles = 0;
+        let litresProduit = 0;
+
+        formats.forEach(format => {
+            const input = form.querySelector(`input[name="format_${format.id}"]`);
+            const quantite = Math.max(0, parseInt(input?.value, 10) || 0);
+            if (quantite > 0) {
+                producedByFormat.push({ format, quantite });
+                totalBouteilles += quantite;
+                litresProduit += ((format.contenanceCl || 0) * quantite) / 100;
+            }
+        });
+
+        if (producedByFormat.length === 0) {
+            showToast('Veuillez saisir au moins une quantité produite', 'warning');
+            return;
+        }
+
+        const result = await finaliserProductionFormats(aromeNom, producedByFormat, litresProduit, totalBouteilles);
+        if (!result) return;
+
+        modal.hide();
+        showToast(`Production groupée confirmée: ${totalBouteilles} bouteille(s) ajoutée(s)`);
+        if (result.warnings.length > 0) {
+            showToast(`Attention: ${result.warnings[0]}${result.warnings.length > 1 ? ` (+${result.warnings.length - 1})` : ''}`, 'warning');
+        }
+        renderProduction();
+    } catch (e) {
+        console.error('Error validating grouped production:', e);
+        showToast('Erreur lors de la validation de la production groupée', 'error');
+    } finally {
+        if (reenable) reenable();
+    }
+};
+
 const validerProduction = async (event, encodedAromeNom, cuveIndex) => {
     const reenable = disableSaveBtn(event);
     try {
@@ -3994,8 +4473,18 @@ const renderInventaire = () => {
         DB.set('inventaire', items);
     }
     
-    const consommables = items.filter(i => i.categorie === 'consommable');
-    const equipement = items.filter(i => i.categorie === 'equipement');
+    const savedSearch = DB.getFilter('inventaire_search');
+    const savedType = DB.getFilter('inventaire_type') || 'tous';
+    const filterInventaireItem = (item) => {
+        const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
+        const matchesType = savedType === 'tous' ||
+            (savedType === 'alerte' && isAlerte) ||
+            item.categorie === savedType;
+        return matchesType && includesText(`${item.nom} ${item.unite} ${item.categorie}`, savedSearch);
+    };
+
+    const consommables = items.filter(i => i.categorie === 'consommable').filter(filterInventaireItem);
+    const equipement = items.filter(i => i.categorie === 'equipement').filter(filterInventaireItem);
     
     const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
     
@@ -4008,12 +4497,22 @@ const renderInventaire = () => {
                     <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('equipement')">+ Équipement</button>
                 </div>
             </div>
+
+            <div class="filters">
+                ${renderSegmentedFilter('inventaire_type', savedType, [
+                    { value: 'tous', label: 'Tous' },
+                    { value: 'alerte', label: 'Stock bas' },
+                    { value: 'consommable', label: 'Consommables' },
+                    { value: 'equipement', label: 'Équipement' }
+                ], 'renderInventaire')}
+                <input type="search" id="filterInventaireSearch" placeholder="Rechercher un item..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('inventaire_search', this.value); window.__focusInventaireSearch = true; renderInventaire()">
+            </div>
             
             <!-- Consommables Section -->
             <div class="inventaire-section">
                 <h4>Consommables</h4>
                 <div class="inventaire-grid">
-                    ${consommables.length === 0 ? '<p class="text-muted">Aucun consommable</p>' : 
+                    ${consommables.length === 0 ? renderEmptyState('Aucun consommable trouvé.', '<button class="btn btn-primary" onclick="showInventaireModal(\'consommable\')">Ajouter un consommable</button>') :
                         consommables.map(item => {
                             const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
                             return `
@@ -4021,7 +4520,8 @@ const renderInventaire = () => {
                                 <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
                                 <div class="inventaire-qty-controls">
                                     <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
-                                    <span class="inventaire-qty">${item.quantite} ${item.unite}</span>
+                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${item.quantite}" onchange="setInventaireQty('${item.id}', this.value)">
+                                    <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
                                     <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', 1)">+</button>
                                 </div>
                                 <div class="inventaire-item-actions">
@@ -4044,7 +4544,7 @@ const renderInventaire = () => {
                     </button>
                 </h4>
                 <div class="inventaire-grid collapse-content" id="equipementContent">
-                    ${equipement.length === 0 ? '<p class="text-muted">Aucun équipement</p>' : 
+                    ${equipement.length === 0 ? renderEmptyState('Aucun équipement trouvé.', '<button class="btn btn-primary" onclick="showInventaireModal(\'equipement\')">Ajouter un équipement</button>') :
                       equipement.map(item => {
                             const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
                             return `
@@ -4052,7 +4552,8 @@ const renderInventaire = () => {
                                 <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
                                 <div class="inventaire-qty-controls">
                                     <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
-                                    <span class="inventaire-qty">${item.quantite} ${item.unite}</span>
+                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${item.quantite}" onchange="setInventaireQty('${item.id}', this.value)">
+                                    <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
                                     <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', 1)">+</button>
                                 </div>
                                 <div class="inventaire-item-actions">
@@ -4069,6 +4570,14 @@ const renderInventaire = () => {
     `;
     
     safeRender(html);
+    if (window.__focusInventaireSearch) {
+        const input = document.getElementById('filterInventaireSearch');
+        if (input) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+        }
+        window.__focusInventaireSearch = false;
+    }
 };
 
 // Toggle equipement section
@@ -4156,6 +4665,22 @@ const updateInventaireQty = (id, delta) => {
         DB.set('inventaire', items);
         renderInventaire();
     }
+};
+
+const setInventaireQty = (id, value) => {
+    const items = DB.get('inventaire');
+    const item = items.find(i => i.id === id);
+    if (!item) return;
+    const qty = parseFloat(value);
+    if (Number.isNaN(qty) || qty < 0) {
+        showToast('Quantité invalide', 'error');
+        renderInventaire();
+        return;
+    }
+    item.quantite = Math.round(qty * 100) / 100;
+    DB.set('inventaire', items);
+    showToast(`${item.nom}: stock ajusté à ${item.quantite} ${displayUnit(item.unite)}`);
+    renderInventaire();
 };
 
 // Delete inventaire item
@@ -5082,6 +5607,7 @@ const importAllData = (event) => {
 // Initialize app
 document.addEventListener('DOMContentLoaded', async () => {
     DB.init();
+    initGlobalSearch();
     const waitForFirebase = (timeoutMs = 3000) => new Promise(resolve => {
         const startedAt = Date.now();
         const check = () => {

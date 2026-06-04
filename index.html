@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=2.6">
+    <link rel="stylesheet" href="styles.css?v=2.7">
 </head>
 <body>
     <aside class="sidebar">
@@ -64,8 +64,12 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             </button>
             <h2 id="pageTitle">Dashboard</h2>
+            <div class="global-search">
+                <input type="search" id="globalSearchInput" placeholder="Rechercher commande, client, BL, lot..." autocomplete="off" aria-label="Recherche globale">
+                <div class="global-search-results" id="globalSearchResults" role="listbox"></div>
+            </div>
             <div class="header-actions" id="headerActions">
-                <span style="font-size: 11px; color: var(--text-lighter);">v8.1</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v8.2</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -131,13 +135,13 @@
             window.firebaseReady = false;
         }
     </script>
-    <script src="app.js?v=8.1"></script>
+    <script src="app.js?v=8.2"></script>
     <script>
         (() => {
             const isLocalDev = ['localhost', '127.0.0.1', ''].includes(window.location.hostname);
             if (!isLocalDev) return;
             const script = document.createElement('script');
-            script.src = 'stress-test.js?v=8.1';
+            script.src = 'stress-test.js?v=8.2';
             document.body.appendChild(script);
         })();
     </script>
