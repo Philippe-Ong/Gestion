@@ -798,6 +798,21 @@ const renderDashboard = () => {
         }, 0);
 
     safeRender(`
+        <div class="dashboard-hero">
+            <div class="dashboard-hero-label">${today.toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</div>
+            <h2 class="dashboard-hero-title">${today.getHours() < 12 ? 'Bonjour' : today.getHours() < 18 ? 'Bon après-midi' : 'Bonsoir'}</h2>
+            <div class="dashboard-hero-sub">
+                ${commandesEnAttente > 0 ? `${commandesEnAttente} commande${commandesEnAttente > 1 ? 's' : ''} en attente` : 'Aucune commande en attente'}
+                ${totalBouteillesAProduire > 0 ? ` - ${totalBouteillesAProduire} bouteille${totalBouteillesAProduire > 1 ? 's' : ''} à produire` : ''}
+                ${heuresAujourdhui > 0 ? ` - ${heuresAujourdhui.toFixed(1)}h pointées` : ''}
+            </div>
+            <div class="dashboard-hero-actions">
+                <button type="button" class="btn" onclick="showCommandeModal()">Nouvelle commande</button>
+                <a href="#pointage" class="btn btn-ghost">Pointer</a>
+                <button type="button" class="btn btn-ghost" onclick="showNouveauLotModal()">Nouveau lot</button>
+            </div>
+        </div>
+
         <div class="stats-grid">
             <a href="#stock" class="stat-card stat-link">
                 <div class="stat-icon green">
@@ -1431,9 +1446,21 @@ const renderPointage = (tab = 'pointage') => {
     `;
     
     if (tab === 'pointage') {
+        const todayPointages = pointages.filter(p => p.date === today);
+        const todayHeures = todayPointages.reduce((sum, p) => {
+            const debutMin = parseHHMM(p.heureDebut);
+            const finMin = parseHHMM(p.heureFin);
+            if (debutMin === null || finMin === null) return sum;
+            const pause = parseInt(p.pause, 10) || 0;
+            const minutes = (finMin - debutMin) - pause;
+            return sum + (minutes > 0 ? minutes / 60 : 0);
+        }, 0);
+        const hour = new Date().getHours();
+        const greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir';
         html += `
             <div class="pointage-clock">
-                <div class="current-time">${currentTime}</div>
+                <div style="font-size:13px;font-weight:500;opacity:0.85;margin-bottom:4px;">${greeting}</div>
+                <div class="current-time" id="liveClock">${currentTime}</div>
                 <div class="current-date">${formatDate(today)}</div>
                 <div class="pointage-actions">
                     <button class="btn btn-success" onclick="showSaisieManuelleModal()">
@@ -1443,38 +1470,74 @@ const renderPointage = (tab = 'pointage') => {
                 </div>
             </div>
             
-            <div class="card">
-                <h3 class="card-title" style="margin-bottom: 16px;">Ajouter un pointage</h3>
-                <form id="quickPointageForm">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Employé</label>
-                            <select name="employeId" required>
-                                ${employes.filter(e => e.actif).length === 0 ? '<option value="">Aucun employé</option>' : 
-                                  employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Date</label>
-                            <input type="date" name="date" value="${today}" required>
-                        </div>
+            <div class="dashboard-grid">
+                <div class="card" style="margin-bottom:0;">
+                    <div class="card-header">
+                        <h3 class="card-title">Ajouter un pointage</h3>
                     </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Heure de début</label>
-                            <input type="time" name="heureDebut" required>
+                    <form id="quickPointageForm">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Employé</label>
+                                <select name="employeId" required>
+                                    ${employes.filter(e => e.actif).length === 0 ? '<option value="">Aucun employé</option>' :
+                                      employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Date</label>
+                                <input type="date" name="date" value="${today}" required>
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label>Heure de fin</label>
-                            <input type="time" name="heureFin" required>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Heure de début</label>
+                                <input type="time" name="heureDebut" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Heure de fin</label>
+                                <input type="time" name="heureFin" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Pause (min)</label>
+                                <input type="number" name="pause" value="0" min="0">
+                            </div>
                         </div>
+                        <button type="button" class="btn btn-primary" onclick="saveQuickPointage(event)" style="width:100%;">Enregistrer le pointage</button>
+                    </form>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:16px;">
+                    <div class="card" style="margin-bottom:0;">
+                        <div class="card-header" style="margin-bottom:12px;padding-bottom:10px;">
+                            <h3 class="card-title">Total aujourd'hui</h3>
+                        </div>
+                        <div style="font-size:36px;font-weight:700;color:var(--primary-darker);line-height:1;letter-spacing:-0.5px;">${todayHeures.toFixed(1)}<span style="font-size:18px;font-weight:600;color:var(--text-light);"> h</span></div>
+                        <div style="font-size:12px;color:var(--text-light);margin-top:6px;">${todayPointages.length} pointage${todayPointages.length > 1 ? 's' : ''}</div>
                     </div>
-                    <div class="form-group">
-                        <label>Pause (minutes)</label>
-                        <input type="number" name="pause" value="0" min="0" style="max-width: 150px;">
+
+                    <div class="card" style="margin-bottom:0;">
+                        <div class="card-header" style="margin-bottom:12px;padding-bottom:10px;">
+                            <h3 class="card-title">Aujourd'hui</h3>
+                        </div>
+                        ${todayPointages.length === 0 ? renderEmptyState('Aucun pointage aujourd\'hui.') : todayPointages.slice(0, 5).map((p, i, arr) => {
+                            const emp = employes.find(e => e.id === p.employeId);
+                            const empName = emp ? `${emp.prenom} ${emp.nom}` : 'N/A';
+                            const initials = `${emp?.prenom?.[0] || ''}${emp?.nom?.[0] || ''}`;
+                            const debutMin = parseHHMM(p.heureDebut);
+                            const finMin = parseHHMM(p.heureFin);
+                            const total = (debutMin !== null && finMin !== null) ? (((finMin - debutMin) - (parseInt(p.pause, 10) || 0)) / 60).toFixed(1) : '-';
+                            return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;${i < arr.length - 1 ? 'border-bottom:1px solid var(--border-light);' : ''}">
+                                <div style="width:30px;height:30px;border-radius:50%;background:var(--bg-success);color:var(--success-dark);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;flex-shrink:0;">${escapeHtml(initials)}</div>
+                                <div style="flex:1;min-width:0;">
+                                    <div style="font-size:12.5px;font-weight:600;color:var(--text);">${escapeHtml(empName)}</div>
+                                    <div style="font-size:10.5px;color:var(--text-light);">${escapeHtml(p.heureDebut)} → ${escapeHtml(p.heureFin)}</div>
+                                </div>
+                                <strong style="font-size:13px;color:var(--primary-darker);">${total}h</strong>
+                            </div>`;
+                        }).join('')}
                     </div>
-                    <button type="button" class="btn btn-primary" onclick="saveQuickPointage(event)">Ajouter</button>
-                </form>
+                </div>
             </div>
         `;
     } else if (tab === 'historique') {
@@ -2101,8 +2164,43 @@ const renderCommandes = () => {
                    includesText(searchText, savedSearch);
         })
         .sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
+    const activeCommandes = allCommandes.filter(c => c.statut !== 'livrée' && c.statut !== 'annulee');
+    const countAttente = activeCommandes.filter(c => c.statut === 'en_attente').length;
+    const countProduite = activeCommandes.filter(c => c.statut === 'produite').length;
+    const countLivree = allCommandes.filter(c => c.statut === 'livrée').length;
+    const todayISO = getLocalDateISOString();
+    const countLivraisonDue = activeCommandes.filter(c => c.dateLivraison && c.dateLivraison <= todayISO).length;
     
     let html = `
+        ${!showArchives ? `
+        <div class="stats-grid">
+            <a href="#commandes" class="stat-card stat-link" onclick="DB.setFilter('statut', 'en_attente'); renderCommandes()">
+                <div class="stat-icon orange">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </div>
+                <div class="stat-content"><h3>${countAttente}</h3><p>En attente</p></div>
+            </a>
+            <a href="#commandes" class="stat-card stat-link" onclick="DB.setFilter('statut', 'produite'); renderCommandes()">
+                <div class="stat-icon blue">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                </div>
+                <div class="stat-content"><h3>${countProduite}</h3><p>Produites</p></div>
+            </a>
+            <div class="stat-card">
+                <div class="stat-icon red">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </div>
+                <div class="stat-content"><h3>${countLivraisonDue}</h3><p>Livraison ≤ aujourd'hui</p></div>
+            </div>
+            <a href="#archives" class="stat-card stat-link">
+                <div class="stat-icon green">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                </div>
+                <div class="stat-content"><h3>${countLivree}</h3><p>Livrées</p></div>
+            </a>
+        </div>
+        ` : ''}
+
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">${showArchives ? 'Archives' : 'Liste des commandes'}</h3>
@@ -3682,6 +3780,38 @@ const renderProduction = () => {
         cuvesParArome
     };
 
+    const totalBouteillesProduction = Object.values(productionNecesaire).reduce((sum, b) => sum + (b.aProduire || 0), 0);
+    const totalLitresProduction = Object.values(litresParArome).reduce((sum, litres) => sum + litres, 0);
+    const totalCuvesProduction = Object.values(cuvesParArome).reduce((sum, cuves) => sum + cuves.length, 0);
+    const kpiHtml = `
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon blue">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/></svg>
+                </div>
+                <div class="stat-content"><h3>${commandesPeriode.length}</h3><p>Commandes à produire</p></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon green">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                </div>
+                <div class="stat-content"><h3>${totalBouteillesProduction}</h3><p>Bouteilles à produire</p></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon orange">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.2 7.8l-7.7 7.7-4-4-5.7 5.7"/></svg>
+                </div>
+                <div class="stat-content"><h3>${totalLitresProduction.toFixed(1)}</h3><p>Litres</p></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon red">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg>
+                </div>
+                <div class="stat-content"><h3>${totalCuvesProduction}</h3><p>Cuves</p></div>
+            </div>
+        </div>
+    `;
+
     // Render results
     const resultHtml = `
         <div class="production-summary">
@@ -3767,6 +3897,7 @@ const renderProduction = () => {
     `;
     
     let html = `
+        ${kpiHtml}
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Planificateur de production</h3>
@@ -4485,10 +4616,52 @@ const renderInventaire = () => {
 
     const consommables = items.filter(i => i.categorie === 'consommable').filter(filterInventaireItem);
     const equipement = items.filter(i => i.categorie === 'equipement').filter(filterInventaireItem);
+    const allConsommablesCount = items.filter(i => i.categorie === 'consommable').length;
+    const allEquipementCount = items.filter(i => i.categorie === 'equipement').length;
+    const alertItems = items.filter(item => item.seuilAlerte && (item.quantite || 0) <= item.seuilAlerte);
     
     const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
     
     let html = `
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon blue">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                </div>
+                <div class="stat-content"><h3>${items.length}</h3><p>Articles total</p></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon green">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                </div>
+                <div class="stat-content"><h3>${allConsommablesCount}</h3><p>Consommables</p></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon orange">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                </div>
+                <div class="stat-content"><h3>${allEquipementCount}</h3><p>Équipement</p></div>
+            </div>
+            <a href="#inventaire" class="stat-card stat-link" onclick="DB.setFilter('inventaire_type', 'alerte'); renderInventaire()">
+                <div class="stat-icon red">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+                </div>
+                <div class="stat-content"><h3>${alertItems.length}</h3><p>Stock bas</p></div>
+            </a>
+        </div>
+
+        ${alertItems.length > 0 ? `
+        <div class="card" style="border-left: 4px solid var(--warning); background: var(--bg-warning);">
+            <div class="flex-between">
+                <div>
+                    <strong>Articles sous seuil</strong>
+                    <p style="margin-top: 4px; color: var(--text-light);">${alertItems.slice(0, 4).map(item => `${escapeHtml(item.nom)} (${item.quantite} ${displayUnit(item.unite)})`).join(', ')}${alertItems.length > 4 ? ` +${alertItems.length - 4}` : ''}</p>
+                </div>
+                <button class="btn btn-sm btn-secondary" onclick="DB.setFilter('inventaire_type', 'alerte'); renderInventaire()">Voir</button>
+            </div>
+        </div>
+        ` : ''}
+
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Inventaire</h3>
