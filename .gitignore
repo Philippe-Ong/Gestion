@@ -1,1 +1,13 @@
 .claude/
+
+# Local dependencies and generated artifacts
+node_modules/
+package.json
+package-lock.json
+.opencode/
+fix_*.py
+generate_test.js
+test_*.js
+test_*.xlsx
+ui_v9_gestion/
+templates/Bulletin de livraison.xlsx
