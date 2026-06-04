@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v8.0**
+**v9.1**
 
 ## Adresse
 

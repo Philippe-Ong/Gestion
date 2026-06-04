@@ -92,6 +92,27 @@
 }
 ```
 
+### Livraisons / Bulletins de livraison
+```json
+{
+  "id": "uuid",
+  "numeroBL": "string",
+  "commandeId": "uuid",
+  "clientId": "uuid",
+  "dateBL": "date",
+  "lignes": [
+    { "aromeId": "uuid", "formatId": "uuid", "quantite": "number" }
+  ],
+  "caissesVertesLivrees": "number (optionnel)",
+  "caissesNoiresLivrees": "number (optionnel)",
+  "notes": "string (optionnel, interne)",
+  "dateDernierExport": "datetime (optionnel)",
+  "lotsTraces": [
+    { "lotId": "uuid", "arome": "string", "format": "string", "dlc": "date", "quantite": "number" }
+  ]
+}
+```
+
 ### Pointages
 ```json
 {

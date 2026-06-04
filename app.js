@@ -2520,6 +2520,7 @@ const livrerCommande = (id) => {
                     lotId: lot.id,
                     arome: lot.arome,
                     format: lot.format,
+                    dlc: lot.dlc || '',
                     quantite: qtyTaken
                 });
                 
@@ -2547,11 +2548,7 @@ const livrerCommande = (id) => {
     // Proposer de générer un bulletin de livraison
     confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
         if (!ok) return;
-        const livraison = generateBL(id);
-        if (livraison) {
-            showToast(`BL-${getBLNumero(livraison)} créé`);
-            exportBLExcel(livraison.id);
-        }
+        prepareCommandeBLExport(id);
     });
 };
 
@@ -2711,6 +2708,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
                     lotId: lot.id,
                     arome: lot.arome,
                     format: lot.format,
+                    dlc: lot.dlc || '',
                     quantite: taken,
                     quantiteDemandee: quantite,
                     forceStockInsuffisant: taken < quantite
@@ -2735,11 +2733,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
 
         confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
             if (!ok) return;
-            const livraison = generateBL(commandeId);
-            if (livraison) {
-                showToast(`BL-${getBLNumero(livraison)} créé`);
-                exportBLExcel(livraison.id);
-            }
+            prepareCommandeBLExport(commandeId);
         });
 
         renderCommandes();
@@ -3085,14 +3079,26 @@ const renderLivraisons = () => {
     
     const savedFilterYear = DB.getFilter('livraison_year');
     const savedFilterClient = DB.getFilter('livraison_client');
+    const savedSearch = DB.getFilter('livraison_search');
     
     const years = [...new Set(livraisons.map(l => l.dateBL ? l.dateBL.substring(0, 4) : '2024'))].sort().reverse();
     
     const filteredLivraisons = livraisons.filter(l => {
         const year = l.dateBL ? l.dateBL.substring(0, 4) : '2024';
+        const commande = commandes.find(c => c.id === l.commandeId);
+        const client = clients.find(cl => cl.id === l.clientId);
+        const searchText = [
+            `BL-${getBLNumero(l)}`,
+            commande ? `#${getCommandeNumero(commande)}` : '',
+            client?.societe || '',
+            client?.nom || '',
+            l.dateBL || '',
+            ...(l.lignes || []).map(line => `${line.aromeNom || ''} ${line.formatNom || ''}`)
+        ].join(' ').toLowerCase();
         const matchesYear = !savedFilterYear || year === savedFilterYear;
         const matchesClient = !savedFilterClient || l.clientId === savedFilterClient;
-        return matchesYear && matchesClient;
+        const matchesSearch = !savedSearch || searchText.includes(savedSearch.toLowerCase().trim());
+        return matchesYear && matchesClient && matchesSearch;
     });
     
     let html = `
@@ -3102,6 +3108,7 @@ const renderLivraisons = () => {
             </div>
             
             <div class="filters">
+                <input type="search" id="filterLivraisonSearch" placeholder="Rechercher BL, client, commande..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('livraison_search', this.value); window.__focusLivraisonSearch = true; renderLivraisons()">
                 <select id="filterLivraisonYear" onchange="DB.setFilter('livraison_year', this.value); renderLivraisons()">
                     <option value="">Toutes les années</option>
                     ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
@@ -3110,6 +3117,7 @@ const renderLivraisons = () => {
                     <option value="">Tous les clients</option>
                     ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
+                ${(savedFilterYear || savedFilterClient || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('livraison_year', ''); DB.setFilter('livraison_client', ''); DB.setFilter('livraison_search', ''); renderLivraisons()">Réinitialiser</button>` : ''}
             </div>
             
             <div class="table-container" id="livraisonsTableContainer">
@@ -3121,21 +3129,25 @@ const renderLivraisons = () => {
                             <th>Client</th>
                             <th>Date BL</th>
                             <th>Articles</th>
+                            <th>Trace</th>
+                            <th>Dernier export</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${filteredLivraisons.length === 0 ? '<tr><td colspan="6" class="text-center">Aucun bulletin de livraison</td></tr>' : 
+                        ${filteredLivraisons.length === 0 ? '<tr><td colspan="8" class="text-center">Aucun bulletin de livraison</td></tr>' :
                           filteredLivraisons.sort((a, b) => new Date(b.dateBL) - new Date(a.dateBL))
                             .map(liv => {
                                 const commande = commandes.find(c => c.id === liv.commandeId);
                                 const client = clients.find(cl => cl.id === liv.clientId);
-                                const totalItems = liv.lignes.reduce((sum, l) => sum + l.quantite, 0);
-                                const articlesPreview = liv.lignes.slice(0, 2).map(l => {
+                                const totalItems = (liv.lignes || []).reduce((sum, l) => sum + l.quantite, 0);
+                                const traceItems = (liv.lotsTraces || []).reduce((sum, l) => sum + (l.quantite || 0), 0);
+                                const articlesPreview = (liv.lignes || []).slice(0, 2).map(l => {
                                     const a = aromes.find(a => a.id === l.aromeId);
                                     const f = formats.find(f => f.id === l.formatId);
-                                    return escapeHtml(`${l.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
+                                    return escapeHtml(`${l.quantite}x ${a?.nom || l.aromeNom || '?'} ${f?.nom || l.formatNom || '?'}`);
                                 }).join(', ');
+                                const lastExport = liv.dateDernierExport ? formatDateTime(liv.dateDernierExport) : 'Jamais exporté';
 
                                 return `
                                     <tr>
@@ -3143,10 +3155,12 @@ const renderLivraisons = () => {
                                         <td>#${commande ? getCommandeNumero(commande) : liv.commandeId.slice(-5)}</td>
                                         <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
                                         <td>${formatDate(liv.dateBL)}</td>
-                                        <td>${articlesPreview}${liv.lignes.length > 2 ? '...' : ''} (${totalItems})</td>
+                                        <td>${articlesPreview}${(liv.lignes || []).length > 2 ? '...' : ''} (${totalItems})</td>
+                                        <td>${traceItems > 0 ? `${traceItems} bouteille(s)` : '<span class="text-muted">Non tracé</span>'}</td>
+                                        <td>${lastExport}</td>
                                         <td>
                                             <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
-                                            <button class="btn btn-sm btn-primary" onclick="exportBLExcel('${liv.id}')">Export Excel</button>
+                                            <button class="btn btn-sm btn-primary" onclick="showPrepareBLExportModal('${liv.id}')">Préparer / Exporter</button>
                                             <button class="btn btn-sm btn-danger" onclick="deleteLivraison('${liv.id}')">Supprimer</button>
                                         </td>
                                     </tr>
@@ -3159,6 +3173,15 @@ const renderLivraisons = () => {
     `;
     
     safeRender(html);
+
+    if (window.__focusLivraisonSearch) {
+        const input = document.getElementById('filterLivraisonSearch');
+        if (input) {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+        }
+        window.__focusLivraisonSearch = false;
+    }
 };
 
 const showLivraisonDetails = (id) => {
@@ -3174,23 +3197,42 @@ const showLivraisonDetails = (id) => {
     const client = clients.find(c => c.id === livraison.clientId);
     const commande = commandes.find(c => c.id === livraison.commandeId);
     
-    const lignesHtml = livraison.lignes.map(l => {
+    const lignesHtml = (livraison.lignes || []).map(l => {
         const a = aromes.find(a => a.id === l.aromeId);
         const f = formats.find(f => f.id === l.formatId);
         return `<tr>
-            <td>${escapeHtml(a?.nom || '?')}</td>
-            <td>${escapeHtml(f?.nom || '?')}</td>
+            <td>${escapeHtml(a?.nom || l.aromeNom || '?')}</td>
+            <td>${escapeHtml(f?.nom || l.formatNom || '?')}</td>
             <td>${l.quantite}</td>
         </tr>`;
     }).join('');
 
-    const totalItems = livraison.lignes.reduce((sum, l) => sum + l.quantite, 0);
+    const lotsTraces = (livraison.lotsTraces && livraison.lotsTraces.length > 0)
+        ? livraison.lotsTraces
+        : buildLotsTracesForCommande(commande);
+    const traceHtml = lotsTraces.map(lot => `
+        <tr>
+            <td>#${String(lot.lotId || '').slice(-6)}</td>
+            <td>${escapeHtml(lot.arome || '?')}</td>
+            <td>${escapeHtml(lot.format || '?')}</td>
+            <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
+            <td>${lot.quantite || 0}</td>
+        </tr>
+    `).join('');
+    const forcedTraceCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
+    const totalItems = (livraison.lignes || []).reduce((sum, l) => sum + l.quantite, 0);
+    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const caissesVertes = parseInt(livraison.caissesVertesLivrees, 10) || 0;
+    const caissesNoires = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
 
     modal.show(`BL #${getBLNumero(livraison)}`, `
         <div class="commande-details">
             <p><strong>Client:</strong> ${escapeHtml(client?.societe || client?.nom || 'N/A')}</p>
             <p><strong>Date BL:</strong> ${formatDate(livraison.dateBL)}</p>
-            <p><strong>N° Commande:</strong> #${commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5)}</p>
+            <p><strong>N° commande:</strong> #${commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5)}</p>
+            <p><strong>Dernier export:</strong> ${livraison.dateDernierExport ? formatDateTime(livraison.dateDernierExport) : 'Jamais exporté'}</p>
+            <p><strong>Caisses IFCO:</strong> ${caissesVertes} verte(s), ${caissesNoires} noire(s)</p>
+            ${livraison.notes ? `<p><strong>Notes internes:</strong> ${escapeHtml(livraison.notes)}</p>` : ''}
             <p><strong>Total:</strong> ${totalItems} articles</p>
             <table class="details-table">
                 <thead>
@@ -3204,11 +3246,30 @@ const showLivraisonDetails = (id) => {
                     ${lignesHtml}
                 </tbody>
             </table>
+            <h4 style="margin-top:20px;">Traçabilité interne</h4>
+            ${forcedTraceCount > 0 ? `<p class="badge badge-warning">Alerte interne: ${forcedTraceCount} ligne(s) avec stock insuffisant confirmé.</p>` : ''}
+            ${traceHtml ? `
+            <p class="text-muted">${totalTrace} bouteille(s) tracée(s) depuis les lots réellement livrés.</p>
+            <table class="details-table">
+                <thead>
+                    <tr>
+                        <th>Lot</th>
+                        <th>Arôme</th>
+                        <th>Format</th>
+                        <th>DLC</th>
+                        <th>Quantité livrée</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${traceHtml}
+                </tbody>
+            </table>
+            ` : '<p class="text-muted">Aucune trace de lot enregistrée pour ce BL.</p>'}
         </div>
     `, `
         <button class="btn btn-danger" onclick="deleteLivraison('${id}')">Supprimer</button>
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
-        <button class="btn btn-primary" onclick="exportBLExcel('${id}')">Export Excel</button>
+        <button class="btn btn-primary" onclick="showPrepareBLExportModal('${id}')">Préparer / Exporter</button>
     `);
 };
 
@@ -3248,6 +3309,167 @@ const getAromeBLName = (nom) => {
     return AROME_BL_NAMES[base] || nom;
 };
 
+const buildLotsTracesForCommande = (commande) => {
+    if (!commande || !Array.isArray(commande.lotsUtilises)) return [];
+    return commande.lotsUtilises
+        .filter(lot => (lot.quantite || 0) > 0)
+        .map(lot => ({
+            lotId: lot.lotId,
+            arome: lot.arome || '',
+            format: lot.format || '',
+            dlc: lot.dlc || '',
+            quantite: lot.quantite || 0,
+            forceStockInsuffisant: !!lot.forceStockInsuffisant
+        }));
+};
+
+const syncBLTraceFromCommande = (livraison, commande) => {
+    const lotsTraces = buildLotsTracesForCommande(commande);
+    return {
+        ...livraison,
+        lotsTraces: lotsTraces.length > 0 ? lotsTraces : (livraison.lotsTraces || [])
+    };
+};
+
+const getOrCreateBL = (commandeId) => {
+    const commandes = DB.get('commandes') || [];
+    const livraisons = DB.get('livraisons') || [];
+    const commande = commandes.find(c => c.id === commandeId);
+    if (!commande) {
+        showToast('Commande non trouvée', 'error');
+        return null;
+    }
+
+    const existingIndex = livraisons.findIndex(l => l.commandeId === commandeId);
+    if (existingIndex !== -1) {
+        const updated = syncBLTraceFromCommande(livraisons[existingIndex], commande);
+        livraisons[existingIndex] = updated;
+        DB.set('livraisons', livraisons);
+        return updated;
+    }
+
+    return generateBL(commandeId);
+};
+
+const prepareCommandeBLExport = (commandeId) => {
+    const livraison = getOrCreateBL(commandeId);
+    if (!livraison) return;
+    showPrepareBLExportModal(livraison.id);
+};
+
+const saveBLPreparation = (livraisonId) => {
+    const livraisons = DB.get('livraisons') || [];
+    const commandes = DB.get('commandes') || [];
+    const index = livraisons.findIndex(l => l.id === livraisonId);
+    if (index === -1) {
+        showToast('Livraison non trouvée', 'error');
+        return null;
+    }
+
+    const parseCaisseInput = (id) => {
+        const raw = document.getElementById(id)?.value.trim() || '';
+        if (raw === '') return 0;
+        return parseInt(raw, 10);
+    };
+    const vertes = parseCaisseInput('blCaissesVertes');
+    const noires = parseCaisseInput('blCaissesNoires');
+    if ((Number.isNaN(vertes) || vertes < 0) || (Number.isNaN(noires) || noires < 0)) {
+        showToast('Les caisses IFCO doivent être des nombres positifs', 'error');
+        return null;
+    }
+
+    const commande = commandes.find(c => c.id === livraisons[index].commandeId);
+    livraisons[index] = syncBLTraceFromCommande({
+        ...livraisons[index],
+        caissesVertesLivrees: vertes,
+        caissesNoiresLivrees: noires,
+        notes: document.getElementById('blNotesInternes')?.value.trim() || ''
+    }, commande);
+    DB.set('livraisons', livraisons);
+    return livraisons[index];
+};
+
+const showPrepareBLExportModal = (livraisonId) => {
+    const livraisons = DB.get('livraisons') || [];
+    const clients = DB.get('clients') || [];
+    const commandes = DB.get('commandes') || [];
+    const livraison = livraisons.find(l => l.id === livraisonId);
+    if (!livraison) {
+        showToast('Livraison non trouvée', 'error');
+        return;
+    }
+
+    const commande = commandes.find(c => c.id === livraison.commandeId);
+    const client = clients.find(c => c.id === livraison.clientId);
+    const totalItems = (livraison.lignes || []).reduce((sum, l) => sum + (l.quantite || 0), 0);
+    const lotsTraces = (livraison.lotsTraces && livraison.lotsTraces.length > 0)
+        ? livraison.lotsTraces
+        : buildLotsTracesForCommande(commande);
+    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const forcedCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
+    const tracePreview = lotsTraces.slice(0, 4).map(lot => `
+        <tr>
+            <td>#${String(lot.lotId || '').slice(-6)}</td>
+            <td>${escapeHtml(lot.arome || '?')}</td>
+            <td>${escapeHtml(lot.format || '?')}</td>
+            <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
+            <td>${lot.quantite || 0}</td>
+        </tr>
+    `).join('');
+
+    modal.show(`Préparer BL-${getBLNumero(livraison)}`, `
+        <div class="commande-details">
+            <div class="workflow-summary">
+                <div><span>Client</span><strong>${escapeHtml(client?.societe || client?.nom || 'N/A')}</strong></div>
+                <div><span>Commande</span><strong>#${commande ? getCommandeNumero(commande) : String(livraison.commandeId).slice(-5)}</strong></div>
+                <div><span>Articles</span><strong>${totalItems}</strong></div>
+                <div><span>Trace interne</span><strong>${totalTrace}</strong></div>
+            </div>
+            ${forcedCount > 0 ? `<p class="badge badge-warning">Alerte interne: ${forcedCount} ligne(s) livrée(s) avec stock insuffisant confirmé.</p>` : ''}
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="blCaissesVertes">Caisses vertes livrées (IFCO)</label>
+                    <input type="number" id="blCaissesVertes" min="0" step="1" value="${parseInt(livraison.caissesVertesLivrees, 10) || 0}">
+                </div>
+                <div class="form-group">
+                    <label for="blCaissesNoires">Caisses noires livrées (IFCO)</label>
+                    <input type="number" id="blCaissesNoires" min="0" step="1" value="${parseInt(livraison.caissesNoiresLivrees, 10) || 0}">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="blNotesInternes">Notes internes</label>
+                <textarea id="blNotesInternes" rows="3" placeholder="Notes non imprimées sur le BL client">${escapeHtml(livraison.notes || '')}</textarea>
+            </div>
+            <h4 style="margin-top:16px;">Traçabilité interne</h4>
+            ${tracePreview ? `
+            <table class="details-table">
+                <thead>
+                    <tr>
+                        <th>Lot</th>
+                        <th>Arôme</th>
+                        <th>Format</th>
+                        <th>DLC</th>
+                        <th>Quantité</th>
+                    </tr>
+                </thead>
+                <tbody>${tracePreview}</tbody>
+            </table>
+            ${lotsTraces.length > 4 ? `<p class="text-muted">+${lotsTraces.length - 4} autre(s) ligne(s) tracée(s)</p>` : ''}
+            ` : '<p class="text-muted">Aucun lot tracé pour cette livraison.</p>'}
+        </div>
+    `, `
+        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
+        <button class="btn btn-primary" id="confirmBLExportBtn">Exporter Excel</button>
+    `, 'large');
+
+    document.getElementById('confirmBLExportBtn')?.addEventListener('click', () => {
+        const saved = saveBLPreparation(livraisonId);
+        if (!saved) return;
+        modal.hide();
+        exportBLExcel(saved.id);
+    });
+};
+
 const generateBL = (commandeId) => {
     const commandes = DB.get('commandes') || [];
     const aromes = DB.get('aromes') || [];
@@ -3281,7 +3503,11 @@ const generateBL = (commandeId) => {
         retours: [],
         facturationMode: '',
         notes: '',
-        signatureNom: ''
+        signatureNom: '',
+        caissesVertesLivrees: 0,
+        caissesNoiresLivrees: 0,
+        dateDernierExport: '',
+        lotsTraces: buildLotsTracesForCommande(commande)
     };
     
     const livraisons = DB.get('livraisons') || [];
@@ -3333,7 +3559,7 @@ const exportBLExcel = (livraisonId) => {
 
     const client = clients.find(c => c.id === livraison.clientId);
 
-    const lignesFiltered = livraison.lignes.filter(l => l.quantite > 0);
+    const lignesFiltered = (livraison.lignes || []).filter(l => l.quantite > 0);
     if (lignesFiltered.length === 0) {
         showToast('Aucun article à livrer', 'warning');
         return;
@@ -3427,18 +3653,8 @@ const exportBLExcel = (livraisonId) => {
                 const clientContact = client ? (client.nom || '') : '';
                 const clientAdresse = client ? (client.adresse || '') : '';
                 const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
-
-                const promptNum = (label) => {
-                    const raw = prompt(label);
-                    if (raw === null) return null;
-                    const n = parseInt(raw, 10);
-                    return isNaN(n) || n < 0 ? 0 : n;
-                };
-                const CaisseRow = (label) => promptNum(label);
-                const cVerteLivree = CaisseRow('Caisses vertes livrées (IFCO)');
-                if (cVerteLivree === null) { showToast('Export annulé', 'warning'); return; }
-                const cNoireLivree = CaisseRow('Caisses noires livrées (IFCO)');
-                if (cNoireLivree === null) { showToast('Export annulé', 'warning'); return; }
+                const cVerteLivree = parseInt(livraison.caissesVertesLivrees, 10) || 0;
+                const cNoireLivree = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
 
                 const setCellTextDom = (cell, text) => {
                     cell.setAttribute('t', 's');
@@ -3641,7 +3857,17 @@ const exportBLExcel = (livraisonId) => {
                     a.download = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
                     a.click();
                     URL.revokeObjectURL(url);
+                    const freshLivraisons = DB.get('livraisons') || [];
+                    const freshIndex = freshLivraisons.findIndex(l => l.id === livraison.id);
+                    if (freshIndex !== -1) {
+                        freshLivraisons[freshIndex] = {
+                            ...freshLivraisons[freshIndex],
+                            dateDernierExport: new Date().toISOString()
+                        };
+                        DB.set('livraisons', freshLivraisons);
+                    }
                     showToast('Bulletin de livraison exporté');
+                    if (window.location.hash === '#livraisons') renderLivraisons();
                 }).catch(err => {
                     console.error('ZIP gen error:', err);
                     showToast('Erreur génération fichier', 'error');
