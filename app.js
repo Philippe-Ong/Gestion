@@ -102,6 +102,13 @@ const getCommandeNumero = (commande) => {
     return commande.numero || commande.id.slice(-5);
 };
 
+const getCommandeStatutLabel = (statut) => ({
+    en_attente: 'En attente',
+    produite: 'Produite',
+    livrée: 'Livrée',
+    annulee: 'Annulée'
+}[statut] || statut || '');
+
 const getNextBLNumero = () => {
     const livraisons = DB.get('livraisons');
     let maxNum = 0;
@@ -406,12 +413,7 @@ const renderSegmentedFilter = (name, currentValue, options, renderFnName) => `
 
 const getClientLabel = (client) => client ? (client.societe || client.nom || 'Client sans nom') : 'N/A';
 
-const getStatusLabel = (status) => ({
-    en_attente: 'En attente',
-    produite: 'Produite',
-    livrée: 'Livrée',
-    annulee: 'Annulée'
-})[status] || status || '';
+const getStatusLabel = (status) => getCommandeStatutLabel(status);
 
 const includesText = (value, query) => {
     if (!query) return true;
@@ -2278,7 +2280,7 @@ const renderCommandes = () => {
                                         <td>${formatDate(cmd.dateLivraison)}</td>
                                         <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
                                         <td class="status-cell">
-                                            <button type="button" class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')" aria-haspopup="true" aria-expanded="false">${escapeHtml(cmd.statut || '')}</button>
+                                            <button type="button" class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')" aria-haspopup="true" aria-expanded="false">${escapeHtml(getCommandeStatutLabel(cmd.statut))}</button>
                                             <div class="status-dropdown" id="statusDropdown-${cmd.id}" role="menu">
                                                 <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'en_attente')">En attente</button>
                                                 <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'produite')">Produite</button>
@@ -2456,20 +2458,44 @@ const saveCommande = (event, id) => {
 
 const editCommande = (id) => showCommandeModal(id);
 
+const closeStatusDropdowns = () => {
+    document.querySelectorAll('.status-dropdown.active').forEach(d => {
+        d.classList.remove('active');
+        d.removeAttribute('style');
+        d.previousElementSibling?.setAttribute('aria-expanded', 'false');
+    });
+};
+
 const showStatusDropdown = (event, id) => {
     event.stopPropagation();
-    document.querySelectorAll('.status-dropdown.active').forEach(d => {
-        if (d.id !== 'statusDropdown-' + id) {
-            d.classList.remove('active');
-            d.previousElementSibling?.setAttribute('aria-expanded', 'false');
-        }
-    });
+    const button = event.currentTarget;
     const dropdown = document.getElementById('statusDropdown-' + id);
     if (!dropdown) return;
-    const isOpen = dropdown.classList.toggle('active');
-    if (event.currentTarget && event.currentTarget.setAttribute) {
-        event.currentTarget.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+
+    const wasOpen = dropdown.classList.contains('active');
+    closeStatusDropdowns();
+    if (wasOpen) return;
+
+    dropdown.classList.add('active');
+    if (button && button.setAttribute) {
+        button.setAttribute('aria-expanded', 'true');
     }
+
+    const rect = button.getBoundingClientRect();
+    const dropdownWidth = Math.max(dropdown.offsetWidth, 160);
+    const dropdownHeight = dropdown.offsetHeight;
+    const gap = 6;
+    const viewportPadding = 8;
+    let left = rect.left + (rect.width / 2) - (dropdownWidth / 2);
+    left = Math.max(viewportPadding, Math.min(left, window.innerWidth - dropdownWidth - viewportPadding));
+    let top = rect.bottom + gap;
+    if (top + dropdownHeight > window.innerHeight - viewportPadding) {
+        top = Math.max(viewportPadding, rect.top - dropdownHeight - gap);
+    }
+
+    dropdown.style.left = `${left}px`;
+    dropdown.style.top = `${top}px`;
+    dropdown.style.minWidth = `${dropdownWidth}px`;
 };
 
 const updateCommandeStatut = (id, statut) => {
@@ -2478,7 +2504,7 @@ const updateCommandeStatut = (id, statut) => {
     if (index !== -1) {
         commandes[index].statut = statut;
         DB.set('commandes', commandes);
-        document.querySelectorAll('.status-dropdown.active').forEach(d => d.classList.remove('active'));
+        closeStatusDropdowns();
         renderCommandes();
     }
 };
@@ -2798,12 +2824,9 @@ const showLivraisonBouteillesModal = (commandeId) => {
     computeTotals();
 };
 
-document.addEventListener('click', () => {
-    document.querySelectorAll('.status-dropdown.active').forEach(d => {
-        d.classList.remove('active');
-        d.previousElementSibling?.setAttribute('aria-expanded', 'false');
-    });
-});
+document.addEventListener('click', closeStatusDropdowns);
+window.addEventListener('scroll', closeStatusDropdowns, true);
+window.addEventListener('resize', closeStatusDropdowns);
 
 const checkStockAndUpdateCommandes = () => {
     const commandes = DB.get('commandes');
@@ -2895,7 +2918,7 @@ const showCommandeDetails = (id) => {
             <p><strong>Client:</strong> ${escapeHtml(clientName)}</p>
             <p><strong>Date commande:</strong> ${formatDate(commande.dateCommande)}</p>
             <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
-            <p><strong>Statut:</strong> ${escapeHtml(commande.statut || '')}</p>
+            <p><strong>Statut:</strong> ${escapeHtml(getCommandeStatutLabel(commande.statut))}</p>
             <p><strong>Total:</strong> ${totalItems} articles</p>
             <table class="details-table">
                 <thead>
