@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v9.2**
+**v9.3**
 
 ## Adresse
 
@@ -50,7 +50,7 @@ Application de gestion pour votre entreprise de thé froid.
 - Planificateur de production
 - Calcul automatique des litres par arôme
 - Ingrédients nécessaires selon les recettes
-- Gestion des cuves (25L max) avec sliders interactifs
+- Répartition par récipients: cuves 25L, casserole 9L et casserole 4L
 - Confirmation des quantités réellement produites par format
 - Ajout automatique des bouteilles produites au stock
 - Déduction automatique de l'inventaire à la validation de production:

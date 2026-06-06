@@ -4,7 +4,7 @@
 const CONSTANTS = {
     PRODUCTION_LOSS: 1.015,    // +1.5% loss buffer applied to ingredient consumption
     CAPSULE_LOSS: 1.075,       // +7.5% loss buffer for capsules
-    CUVE_MAX_L: 25,            // max litres per cuve
+    CUVE_MAX_L: 25,            // max litres per production cuve
     STOCK_WARN_DAYS: 30        // DLC warning threshold in days
 };
 
@@ -3914,6 +3914,56 @@ const exportBLExcel = (livraisonId) => {
 
 let productionPlannerState = null;
 
+const roundHalfLiter = (value) => Math.round((parseFloat(value) || 0) * 2) / 2;
+
+const createProductionRecipient = (type, nom, capacite, litres, numero = null) => ({
+    type,
+    nom,
+    capacite,
+    litres: roundHalfLiter(litres),
+    numero,
+    ingredients: []
+});
+
+const distributeBalancedCuves = (litresTotal) => {
+    const totalUnits = Math.round(litresTotal * 2);
+    const count = Math.max(1, Math.ceil(litresTotal / CONSTANTS.CUVE_MAX_L));
+    const baseUnits = Math.floor(totalUnits / count);
+    let remainder = totalUnits - (baseUnits * count);
+
+    return Array.from({ length: count }, (_, index) => {
+        const units = baseUnits + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder--;
+        return createProductionRecipient('cuve', `Cuve ${index + 1}`, CONSTANTS.CUVE_MAX_L, units / 2, index + 1);
+    });
+};
+
+const getProductionRecipients = (litresTotal) => {
+    const litres = roundHalfLiter(litresTotal);
+    if (litres <= 0) return [];
+
+    if (litres <= CONSTANTS.CUVE_MAX_L) {
+        return [createProductionRecipient('cuve', 'Cuve 25L', CONSTANTS.CUVE_MAX_L, litres, 1)];
+    }
+
+    const reste = roundHalfLiter(litres - CONSTANTS.CUVE_MAX_L);
+    if (reste > 0 && reste <= 4) {
+        return [
+            createProductionRecipient('cuve', 'Cuve 25L', CONSTANTS.CUVE_MAX_L, CONSTANTS.CUVE_MAX_L, 1),
+            createProductionRecipient('casserole', 'Casserole 4L', 4, reste, 1)
+        ];
+    }
+
+    if (reste > 0 && reste <= 9) {
+        return [
+            createProductionRecipient('cuve', 'Cuve 25L', CONSTANTS.CUVE_MAX_L, CONSTANTS.CUVE_MAX_L, 1),
+            createProductionRecipient('casserole', 'Casserole 9L', 9, reste, 1)
+        ];
+    }
+
+    return distributeBalancedCuves(litres);
+};
+
 // Production Planner
 const renderProduction = () => {
     const commandes = DB.get('commandes');
@@ -3987,51 +4037,25 @@ const renderProduction = () => {
         }
     });
     
-    // Calculate cuves per arome (max 25L per cuve)
-    const CUVE_MAX = CONSTANTS.CUVE_MAX_L;
-    const cuvesParArome = {};
-    
+    const recipientsParArome = {};
     Object.entries(litresParArome).forEach(([aromeNom, litresTotal]) => {
-        const nombreCuves = Math.ceil(litresTotal / CUVE_MAX);
-        cuvesParArome[aromeNom] = [];
-        
-        let litresRestants = litresTotal;
-        for (let i = 0; i < nombreCuves; i++) {
-            const litresCuve = Math.min(litresRestants, CUVE_MAX);
-            
-            const arome = aromes.find(a => a.nom === aromeNom);
-            const recette = recettes.find(r => r.aromeId === arome?.id);
-            const ingredientsCuve = [];
-            
-            if (recette) {
-                recette.ingredients.forEach(ing => {
-                    ingredientsCuve.push({
-                        nom: ing.nom,
-                        quantite: (ing.quantite * litresCuve).toFixed(2),
-                        unite: ing.unite
-                    });
-                });
-            }
-            
-            cuvesParArome[aromeNom].push({
-                numero: i + 1,
-                litres: litresCuve,
-                ingredients: ingredientsCuve
-            });
-            
-            litresRestants -= litresCuve;
-        }
+        const arome = aromes.find(a => a.nom === aromeNom);
+        const recette = recettes.find(r => r.aromeId === arome?.id);
+        recipientsParArome[aromeNom] = getProductionRecipients(litresTotal).map(recipient => ({
+            ...recipient,
+            ingredients: calculerIngredientsRecipient(recette, recipient.litres)
+        }));
     });
     
     productionPlannerState = {
         productionNecesaire,
         litresParArome,
-        cuvesParArome
+        recipientsParArome
     };
 
     const totalBouteillesProduction = Object.values(productionNecesaire).reduce((sum, b) => sum + (b.aProduire || 0), 0);
     const totalLitresProduction = Object.values(litresParArome).reduce((sum, litres) => sum + litres, 0);
-    const totalCuvesProduction = Object.values(cuvesParArome).reduce((sum, cuves) => sum + cuves.length, 0);
+    const totalRecipientsProduction = Object.values(recipientsParArome).reduce((sum, recipients) => sum + recipients.length, 0);
     const kpiHtml = `
         <div class="stats-grid">
             <div class="stat-card">
@@ -4056,7 +4080,7 @@ const renderProduction = () => {
                 <div class="stat-icon red">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg>
                 </div>
-                <div class="stat-content"><h3>${totalCuvesProduction}</h3><p>Cuves</p></div>
+                <div class="stat-content"><h3>${totalRecipientsProduction}</h3><p>Récipients</p></div>
             </div>
         </div>
     `;
@@ -4100,32 +4124,36 @@ const renderProduction = () => {
             <div class="production-item" style="grid-column: 1 / -1;">
                 <h4>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-                    Production par cuves (max 25L)
+                    Répartition par récipients
                 </h4>
-                ${Object.entries(cuvesParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : 
-                  Object.entries(cuvesParArome).map(([aromeNom, cuves]) => {
+                ${Object.entries(recipientsParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' :
+                  Object.entries(recipientsParArome).map(([aromeNom, recipients]) => {
                       const arome = aromes.find(a => a.nom === aromeNom);
-                      const totalLitres = cuves.reduce((sum, c) => sum + c.litres, 0);
+                      const totalLitres = recipients.reduce((sum, r) => sum + r.litres, 0);
+                      const totalCapacite = recipients.reduce((sum, r) => sum + r.capacite, 0);
+                      const remplissageMoyen = totalCapacite > 0 ? (totalLitres / totalCapacite) * 100 : 0;
                       return `
                         <div class="cuve-arome">
                           <div class="cuve-header">
                             <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
                             <strong>${escapeHtml(aromeNom)}</strong>
-                            <span> - ${totalLitres.toFixed(1)}L (${cuves.length} cuve${cuves.length > 1 ? 's' : ''})</span>
+                            <span> - ${totalLitres.toFixed(1)}L (${recipients.length} récipient${recipients.length > 1 ? 's' : ''}, remplissage moyen ${remplissageMoyen.toFixed(0)}%)</span>
                             <button class="btn btn-sm btn-success" onclick="confirmerProductionArome('${encodeURIComponent(aromeNom)}')">Produire tout l'arôme</button>
                           </div>
-                          ${cuves.map((cuve, cuveIndex) => `
-                            <div class="cuve-detail" data-arome="${escapeHtml(aromeNom)}" data-cuve-index="${cuveIndex}">
+                          ${recipients.map((recipient, recipientIndex) => {
+                              const fillPercent = recipient.capacite > 0 ? Math.round((recipient.litres / recipient.capacite) * 100) : 0;
+                              return `
+                            <div class="cuve-detail" data-arome="${escapeHtml(aromeNom)}" data-recipient-index="${recipientIndex}">
                               <div class="flex-between" style="margin-bottom: 8px;">
-                                <div class="cuve-title" style="margin-bottom: 0;">Cuve ${cuve.numero}</div>
-                                <button class="btn btn-sm btn-success" onclick="confirmerProduction('${encodeURIComponent(aromeNom)}', ${cuveIndex})">Produite</button>
+                                <div class="cuve-title" style="margin-bottom: 0;">${escapeHtml(recipient.nom)} (${recipient.litres.toFixed(1)}L / ${recipient.capacite}L - ${fillPercent}%)</div>
+                                <button class="btn btn-sm btn-success" onclick="confirmerProduction('${encodeURIComponent(aromeNom)}', ${recipientIndex})">Produite</button>
                               </div>
                               <div class="cuve-slider-row">
-                                <input type="range" class="cuve-slider" min="1" max="25" step="0.5" value="${cuve.litres}" data-arome="${escapeHtml(aromeNom)}" data-cuve-index="${cuveIndex}">
-                                <span class="cuve-litres-display">${cuve.litres.toFixed(1)}L</span>
+                                <input type="range" class="cuve-slider" min="0.5" max="${recipient.capacite}" step="0.5" value="${recipient.litres}" data-arome="${escapeHtml(aromeNom)}" data-recipient-index="${recipientIndex}">
+                                <span class="cuve-litres-display">${recipient.litres.toFixed(1)}L</span>
                               </div>
                               <ul class="ingredient-list">
-                                ${cuve.ingredients.map(ing => `
+                                ${recipient.ingredients.map(ing => `
                                   <li>
                                     <span>${escapeHtml(ing.nom)}</span>
                                     <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
@@ -4133,7 +4161,8 @@ const renderProduction = () => {
                                 `).join('')}
                               </ul>
                             </div>
-                          `).join('')}
+                              `;
+                          }).join('')}
                         </div>
                       `;
                   }).join('')}
@@ -4163,83 +4192,84 @@ const attacherSliderEvents = () => {
     document.querySelectorAll('.cuve-slider').forEach(slider => {
         slider.addEventListener('input', (e) => {
             const aromeNom = e.target.dataset.arome;
-            const cuveIndex = parseInt(e.target.dataset.cuveIndex, 10);
+            const recipientIndex = parseInt(e.target.dataset.recipientIndex, 10);
             const nouvelleValeur = parseFloat(e.target.value);
-            ajusterCuves(aromeNom, cuveIndex, nouvelleValeur);
+            rebalanceRecipients(aromeNom, recipientIndex, nouvelleValeur);
         });
     });
 };
 
-const ajusterCuves = (aromeNom, cuveIndex, nouvelleValeur) => {
+const rebalanceRecipients = (aromeNom, recipientIndex, nouvelleValeur) => {
     const state = productionPlannerState;
-    if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) return;
+    if (!state || !state.recipientsParArome || !state.recipientsParArome[aromeNom]) return;
 
-    const cuves = state.cuvesParArome[aromeNom];
-    if (!cuves || cuves.length === 0) return;
+    const recipients = state.recipientsParArome[aromeNom];
+    if (!recipients || recipients.length === 0) return;
 
-    const autresIndices = cuves.map((_, i) => i).filter(i => i !== cuveIndex);
-    if (autresIndices.length === 0) return;
+    const recipient = recipients[recipientIndex];
+    if (!recipient) return;
 
-    const totalAvant = cuves.reduce((sum, c) => sum + c.litres, 0);
+    const autresIndices = recipients.map((_, i) => i).filter(i => i !== recipientIndex);
+    const totalAvant = roundHalfLiter(recipients.reduce((sum, r) => sum + r.litres, 0));
 
-    cuves[cuveIndex].litres = nouvelleValeur;
+    if (autresIndices.length === 0) {
+        recipient.litres = totalAvant;
+        mettreAJourRecipientsUI(aromeNom);
+        return;
+    }
 
-    const delta = totalAvant - nouvelleValeur;
+    recipient.litres = Math.max(0.5, Math.min(recipient.capacite, roundHalfLiter(nouvelleValeur)));
+    const delta = roundHalfLiter(totalAvant - recipients.reduce((sum, r) => sum + r.litres, 0));
 
     if (Math.abs(delta) < 0.001) {
-        mettreAJourSlidersUI(aromeNom);
+        mettreAJourRecipientsUI(aromeNom);
         return;
     }
 
     const ajustables = autresIndices.filter(i => {
-        if (delta > 0) return cuves[i].litres < 25;
-        return cuves[i].litres > 1;
+        if (delta > 0) return recipients[i].litres < recipients[i].capacite;
+        return recipients[i].litres > 0.5;
     });
 
     if (ajustables.length === 0) {
-        cuves[cuveIndex].litres = totalAvant - autresIndices.reduce((s, i) => s + cuves[i].litres, 0);
-        cuves[cuveIndex].litres = Math.max(1, Math.min(25, Math.round(cuves[cuveIndex].litres * 2) / 2));
-        mettreAJourSlidersUI(aromeNom);
+        recipient.litres = Math.max(0.5, Math.min(recipient.capacite, roundHalfLiter(totalAvant - autresIndices.reduce((s, i) => s + recipients[i].litres, 0))));
+        mettreAJourRecipientsUI(aromeNom);
         return;
     }
 
-    const totalAjustable = ajustables.reduce((sum, i) => sum + cuves[i].litres, 0);
+    let remainingUnits = Math.round(delta * 2);
+    while (remainingUnits !== 0) {
+        const candidates = ajustables.filter(i => remainingUnits > 0
+            ? recipients[i].litres < recipients[i].capacite
+            : recipients[i].litres > 0.5
+        );
+        if (candidates.length === 0) break;
 
-    if (totalAjustable === 0) {
-        const parCuve = delta / ajustables.length;
-        ajustables.forEach(i => {
-            cuves[i].litres = Math.round((cuves[i].litres + parCuve) * 2) / 2;
-            cuves[i].litres = Math.max(1, Math.min(25, cuves[i].litres));
-        });
-    } else {
-        ajustables.forEach((i, idx) => {
-            const proportion = cuves[i].litres / totalAjustable;
-            let ajustement = delta * proportion;
-            ajustement = Math.round(ajustement * 2) / 2;
-
-            let newVal = cuves[i].litres + ajustement;
-            newVal = Math.max(1, Math.min(25, newVal));
-            newVal = Math.round(newVal * 2) / 2;
-
-            cuves[i].litres = newVal;
+        candidates.forEach(i => {
+            if (remainingUnits === 0) return;
+            const step = remainingUnits > 0 ? 0.5 : -0.5;
+            const next = roundHalfLiter(recipients[i].litres + step);
+            if (next >= 0.5 && next <= recipients[i].capacite) {
+                recipients[i].litres = next;
+                remainingUnits += remainingUnits > 0 ? -1 : 1;
+            }
         });
     }
 
-    const nouveauTotal = cuves.reduce((sum, c) => sum + c.litres, 0);
-    const erreur = Math.round((totalAvant - nouveauTotal) * 2) / 2;
+    const nouveauTotal = roundHalfLiter(recipients.reduce((sum, r) => sum + r.litres, 0));
+    const erreur = roundHalfLiter(totalAvant - nouveauTotal);
 
     if (Math.abs(erreur) > 0.001) {
         const correctionIndices = autresIndices.filter(i => {
-            if (erreur > 0) return cuves[i].litres < 25;
-            return cuves[i].litres > 1;
+            if (erreur > 0) return recipients[i].litres < recipients[i].capacite;
+            return recipients[i].litres > 0.5;
         });
 
         if (correctionIndices.length > 0) {
-            cuves[correctionIndices[0]].litres = Math.round((cuves[correctionIndices[0]].litres + erreur) * 2) / 2;
-            cuves[correctionIndices[0]].litres = Math.max(1, Math.min(25, cuves[correctionIndices[0]].litres));
+            const i = correctionIndices[0];
+            recipients[i].litres = Math.max(0.5, Math.min(recipients[i].capacite, roundHalfLiter(recipients[i].litres + erreur)));
         } else {
-            cuves[cuveIndex].litres = Math.round((cuves[cuveIndex].litres + erreur) * 2) / 2;
-            cuves[cuveIndex].litres = Math.max(1, Math.min(25, cuves[cuveIndex].litres));
+            recipient.litres = Math.max(0.5, Math.min(recipient.capacite, roundHalfLiter(recipient.litres + erreur)));
         }
     }
 
@@ -4248,14 +4278,14 @@ const ajusterCuves = (aromeNom, cuveIndex, nouvelleValeur) => {
     const arome = aromes.find(a => a.nom === aromeNom);
     const recette = recettes.find(r => r.aromeId === arome?.id);
 
-    cuves.forEach(cuve => {
-        cuve.ingredients = calculerIngredientsCuve(recette, cuve.litres);
+    recipients.forEach(r => {
+        r.ingredients = calculerIngredientsRecipient(recette, r.litres);
     });
 
-    mettreAJourSlidersUI(aromeNom);
+    mettreAJourRecipientsUI(aromeNom);
 };
 
-const calculerIngredientsCuve = (recette, litres) => {
+const calculerIngredientsRecipient = (recette, litres) => {
     if (!recette || !Array.isArray(recette.ingredients) || litres <= 0) return [];
     return recette.ingredients.map(ing => ({
         nom: ing.nom,
@@ -4264,30 +4294,37 @@ const calculerIngredientsCuve = (recette, litres) => {
     }));
 };
 
-const mettreAJourSlidersUI = (aromeNom) => {
+const calculerIngredientsCuve = calculerIngredientsRecipient;
+
+const mettreAJourRecipientsUI = (aromeNom) => {
     const state = productionPlannerState;
-    if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) return;
+    if (!state || !state.recipientsParArome || !state.recipientsParArome[aromeNom]) return;
 
-    const cuves = state.cuvesParArome[aromeNom];
+    const recipients = state.recipientsParArome[aromeNom];
 
-    document.querySelectorAll(`.cuve-slider[data-arome="${aromeNom}"]`).forEach(slider => {
-        const idx = parseInt(slider.dataset.cuveIndex, 10);
-        const cuve = cuves[idx];
-        if (!cuve) return;
+    document.querySelectorAll('.cuve-slider').forEach(slider => {
+        if (slider.dataset.arome !== aromeNom) return;
+        const idx = parseInt(slider.dataset.recipientIndex, 10);
+        const recipient = recipients[idx];
+        if (!recipient) return;
 
-        slider.value = cuve.litres;
+        slider.max = recipient.capacite;
+        slider.value = recipient.litres;
 
         const detail = slider.closest('.cuve-detail');
         if (detail) {
             const display = detail.querySelector('.cuve-litres-display');
-            if (display) display.textContent = `${cuve.litres.toFixed(1)}L`;
+            if (display) display.textContent = `${recipient.litres.toFixed(1)}L`;
 
             const titre = detail.querySelector('.cuve-title');
-            if (titre) titre.textContent = `Cuve ${cuve.numero} (${cuve.litres.toFixed(1)}L)`;
+            if (titre) {
+                const fillPercent = recipient.capacite > 0 ? Math.round((recipient.litres / recipient.capacite) * 100) : 0;
+                titre.textContent = `${recipient.nom} (${recipient.litres.toFixed(1)}L / ${recipient.capacite}L - ${fillPercent}%)`;
+            }
 
             const ingList = detail.querySelector('.ingredient-list');
-            if (ingList && cuve.ingredients) {
-                ingList.innerHTML = cuve.ingredients.map(ing => `
+            if (ingList && recipient.ingredients) {
+                ingList.innerHTML = recipient.ingredients.map(ing => `
                     <li>
                         <span>${escapeHtml(ing.nom)}</span>
                         <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
@@ -4348,30 +4385,30 @@ const getBottleInventoryItem = (items, format) => {
     return null;
 };
 
-const confirmerProduction = (encodedAromeNom, cuveIndex) => {
+const confirmerProduction = (encodedAromeNom, recipientIndex) => {
     try {
         const aromeNom = decodeURIComponent(encodedAromeNom || '');
         const formats = DB.get('formats') || [];
         const state = productionPlannerState;
 
-        if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) {
+        if (!state || !state.recipientsParArome || !state.recipientsParArome[aromeNom]) {
             showToast('Plan de production introuvable, rechargez la page', 'error');
             return;
         }
 
-        const cuve = state.cuvesParArome[aromeNom][cuveIndex];
-        if (!cuve) {
-            showToast('Cuve introuvable', 'error');
+        const recipient = state.recipientsParArome[aromeNom][recipientIndex];
+        if (!recipient) {
+            showToast('Récipient introuvable', 'error');
             return;
         }
 
         const litresTotalArome = state.litresParArome[aromeNom] || 0;
-        const ratioCuve = litresTotalArome > 0 ? (cuve.litres / litresTotalArome) : 0;
+        const ratioRecipient = litresTotalArome > 0 ? (recipient.litres / litresTotalArome) : 0;
 
         const besoinsArome = Object.values(state.productionNecesaire || {}).filter(b => b.aromeNom === aromeNom && b.aProduire > 0);
         const prefillByFormat = {};
         besoinsArome.forEach(b => {
-            prefillByFormat[b.formatNom] = Math.max(0, Math.floor((b.aProduire || 0) * ratioCuve));
+            prefillByFormat[b.formatNom] = Math.max(0, Math.floor((b.aProduire || 0) * ratioRecipient));
         });
 
         const formRows = formats.map(format => {
@@ -4384,12 +4421,12 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
             `;
         }).join('');
 
-        modal.show(`Production - ${aromeNom} - Cuve ${cuve.numero}`, `
-            <form id="productionCuveForm">
+        modal.show(`Production - ${aromeNom} - ${recipient.nom}`, `
+            <form id="productionRecipientForm">
                 <div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
-                    <strong>Ingrédients prévus pour cette cuve (${cuve.litres.toFixed(1)}L)</strong>
+                    <strong>Ingrédients prévus pour ce récipient (${recipient.litres.toFixed(1)}L / ${recipient.capacite}L)</strong>
                     <ul class="ingredient-list" style="margin-top: 8px;">
-                        ${cuve.ingredients.map(ing => `
+                        ${recipient.ingredients.map(ing => `
                             <li>
                                 <span>${escapeHtml(ing.nom)}</span>
                                 <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
@@ -4406,7 +4443,7 @@ const confirmerProduction = (encodedAromeNom, cuveIndex) => {
             </form>
         `, `
             <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-            <button class="btn btn-success" onclick="validerProduction(event, '${encodeURIComponent(aromeNom)}', ${cuveIndex})">Confirmer la production</button>
+            <button class="btn btn-success" onclick="validerProduction(event, '${encodeURIComponent(aromeNom)}', ${recipientIndex})">Confirmer la production</button>
         `);
     } catch (e) {
         console.error('Error opening production modal:', e);
@@ -4422,17 +4459,17 @@ const confirmerProductionArome = (encodedAromeNom) => {
         const recettes = DB.get('recettes') || [];
         const state = productionPlannerState;
 
-        if (!state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) {
+        if (!state || !state.recipientsParArome || !state.recipientsParArome[aromeNom]) {
             showToast('Plan de production introuvable, rechargez la page', 'error');
             return;
         }
 
-        const cuves = state.cuvesParArome[aromeNom] || [];
-        const totalLitres = cuves.reduce((sum, c) => sum + (c.litres || 0), 0);
+        const recipients = state.recipientsParArome[aromeNom] || [];
+        const totalLitres = recipients.reduce((sum, r) => sum + (r.litres || 0), 0);
         const besoinsArome = Object.values(state.productionNecesaire || {}).filter(b => b.aromeNom === aromeNom && b.aProduire > 0);
         const arome = aromes.find(a => a.nom === aromeNom);
         const recette = recettes.find(r => r.aromeId === arome?.id);
-        const ingredients = calculerIngredientsCuve(recette, totalLitres);
+        const ingredients = calculerIngredientsRecipient(recette, totalLitres);
 
         const formRows = formats.map(format => {
             const prefill = besoinsArome.find(b => b.formatNom === format.nom)?.aProduire || 0;
@@ -4448,7 +4485,7 @@ const confirmerProductionArome = (encodedAromeNom) => {
             <form id="productionAromeForm">
                 <div class="workflow-summary">
                     <div><span>Arôme</span><strong>${escapeHtml(aromeNom)}</strong></div>
-                    <div><span>Cuves</span><strong>${cuves.length}</strong></div>
+                    <div><span>Récipients</span><strong>${recipients.length}</strong></div>
                     <div><span>Litres prévus</span><strong>${totalLitres.toFixed(1)} L</strong></div>
                     <div><span>Formats</span><strong>${besoinsArome.length}</strong></div>
                 </div>
@@ -4633,20 +4670,20 @@ const validerProductionArome = async (event, encodedAromeNom) => {
     }
 };
 
-const validerProduction = async (event, encodedAromeNom, cuveIndex) => {
+const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
     const reenable = disableSaveBtn(event);
     try {
         const aromeNom = decodeURIComponent(encodedAromeNom || '');
         const state = productionPlannerState;
-        const form = document.getElementById('productionCuveForm');
-        if (!form || !state || !state.cuvesParArome || !state.cuvesParArome[aromeNom]) {
+        const form = document.getElementById('productionRecipientForm');
+        if (!form || !state || !state.recipientsParArome || !state.recipientsParArome[aromeNom]) {
             showToast('Données de production introuvables', 'error');
             return;
         }
 
-        const cuve = state.cuvesParArome[aromeNom][cuveIndex];
-        if (!cuve) {
-            showToast('Cuve introuvable', 'error');
+        const recipient = state.recipientsParArome[aromeNom][recipientIndex];
+        if (!recipient) {
+            showToast('Récipient introuvable', 'error');
             return;
         }
 

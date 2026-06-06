@@ -1,5 +1,5 @@
 /* ============================================================
-   ThéCol Gestion — Refonte UI v9.2
+   ThéCol Gestion — Refonte UI v9.3
    Drop-in replacement for styles.css
    Conserves all class names — just modernizes the look
    ============================================================ */
@@ -1595,7 +1595,7 @@ input[type="checkbox"] {
     border-bottom: none;
 }
 
-/* ── Cuves ───────────────────────────────────────────────── */
+/* ── Récipients de production ─────────────────────────────── */
 .cuve-arome {
     margin-bottom: 18px;
     padding-bottom: 14px;

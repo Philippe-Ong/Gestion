@@ -214,7 +214,12 @@
    - Calculer total bouteilles par format
    - Convertir en litres
    - Appliquer recette pour ingrédients
-4. Afficher résumé:
+4. Répartir les litres par récipients:
+   - Jusqu'à 25L: cuve 25L partielle ou pleine
+   - Reste jusqu'à 4L: casserole 4L
+   - Reste jusqu'à 9L: casserole 9L
+   - Reste supérieur à 9L: cuves 25L équilibrées
+5. Afficher résumé:
    - Bouteilles par arôme/format
    - Litres totaux par arôme
    - Ingrédients requis
