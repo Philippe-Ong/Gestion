@@ -992,17 +992,44 @@ window.addEventListener('storage', (e) => {
 
 window.addEventListener('hashchange', router);
 
+const addTodo = (text) => {
+    if (!text || !text.trim()) return;
+    const todos = DB.get('todos') || [];
+    todos.unshift({
+        id: generateId(),
+        text: text.trim(),
+        done: false,
+        dateAdded: new Date().toISOString()
+    });
+    DB.set('todos', todos);
+    renderDashboard();
+};
+
+const toggleTodo = (id) => {
+    const todos = DB.get('todos') || [];
+    const todo = todos.find(t => t.id === id);
+    if (todo) {
+        todo.done = !todo.done;
+        DB.set('todos', todos);
+        renderDashboard();
+    }
+};
+
+const deleteTodo = (id) => {
+    const todos = (DB.get('todos') || []).filter(t => t.id !== id);
+    DB.set('todos', todos);
+    renderDashboard();
+};
+
 // Dashboard
 const renderDashboard = () => {
     const lots = DB.get('lots') || [];
     const commandes = DB.get('commandes') || [];
-    const pointages = DB.get('pointages') || [];
-    const employes = DB.get('employees') || [];
+    const todos = DB.get('todos') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
 
     const today = new Date();
-    const todayStr = getLocalDateISOString();
     const oneMonthFromNow = new Date();
     oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
     const inSevenDays = new Date();
@@ -1058,63 +1085,6 @@ const renderDashboard = () => {
 
     const totalBouteillesAProduire = bouteillesAProduire.reduce((sum, b) => sum + b.aProduire, 0);
 
-    // Pointage du jour : a-t-on déjà pointé ? (premier pointage du patron / actif)
-    const pointagesAujourdhui = pointages.filter(p => p.date === todayStr);
-    const heuresAujourdhui = pointagesAujourdhui.reduce((sum, p) => {
-        const debutMin = parseHHMM(p.heureDebut);
-        const finMin = parseHHMM(p.heureFin);
-        if (debutMin === null || finMin === null) return sum;
-        const pause = parseInt(p.pause, 10) || 0;
-        const minutes = (finMin - debutMin) - pause;
-        return sum + (minutes > 0 ? minutes / 60 : 0);
-    }, 0);
-
-    // Card hero pointage : on affiche l'heure actuelle + statut
-    const currentTime = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
-    const pointageSubtext = pointagesAujourdhui.length === 0
-        ? 'Pas encore pointé aujourd\'hui'
-        : `${pointagesAujourdhui.length} pointage${pointagesAujourdhui.length > 1 ? 's' : ''} • ${heuresAujourdhui.toFixed(1)}h`;
-
-    // 3 todos dynamiques selon l'état des données
-    const todos = [];
-    if (commandesUrgentes > 0) {
-        todos.push({
-            label: `${commandesUrgentes} commande${commandesUrgentes > 1 ? 's' : ''} urgente${commandesUrgentes > 1 ? 's' : ''} (≤ 3 jours)`,
-            href: '#commandes',
-            done: false
-        });
-    }
-    if (expiries > 0) {
-        todos.push({
-            label: `${expiries} lot${expiries > 1 ? 's' : ''} expiré${expiries > 1 ? 's' : ''} à retirer`,
-            href: '#stock',
-            done: false
-        });
-    }
-    if (pointagesAujourdhui.length === 0) {
-        todos.push({ label: 'Pointer ton arrivée', href: '#pointage', done: false });
-    } else {
-        todos.push({ label: 'Pointage du jour enregistré', href: '#pointage', done: true });
-    }
-    if (totalBouteillesAProduire > 0 && todos.length < 3) {
-        todos.push({
-            label: `Planifier ${totalBouteillesAProduire} bouteille${totalBouteillesAProduire > 1 ? 's' : ''} à produire`,
-            href: '#production',
-            done: false
-        });
-    }
-    if (moinsUnMois > 0 && todos.length < 3) {
-        todos.push({
-            label: `${moinsUnMois} lot${moinsUnMois > 1 ? 's' : ''} DLC < 1 mois`,
-            href: '#stock',
-            done: false
-        });
-    }
-    while (todos.length < 3) {
-        todos.push({ label: 'Tout est en ordre 👌', href: '#dashboard', done: true });
-    }
-    const top3Todos = todos.slice(0, 3);
-
     const showAlert = expiries > 0 || moinsUnMois > 0;
 
     safeRender(`
@@ -1123,27 +1093,21 @@ const renderDashboard = () => {
             <div class="header-subtext">${formatDate(today)}</div>
         </div>
 
-        <div class="card card--hero-dark dash-hero-pointage" style="margin-bottom: 16px;">
-            <div class="section-label">POINTAGE</div>
-            <div class="dash-hero-time">${currentTime}</div>
-            <div class="dash-hero-subtext">${pointageSubtext}</div>
-            <a href="#pointage" class="dash-hero-btn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                ${pointagesAujourdhui.length === 0 ? 'Pointer mon arrivée' : 'Voir mes pointages'}
-            </a>
-        </div>
-
         <div class="card" style="margin-bottom: 16px;">
-            <div class="card-header" style="margin-bottom: 8px; padding-bottom: 0; border: none;">
-                <h3 class="card-title">3 choses à faire</h3>
+            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
+                <h3 class="card-title">À faire</h3>
+            </div>
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <input type="text" id="todoInput" placeholder="Ajouter une tâche..." style="flex:1;" onkeydown="if(event.key==='Enter'){addTodo(this.value); this.value='';}">
+                <button class="btn btn-primary btn-sm" onclick="const inp=document.getElementById('todoInput'); addTodo(inp.value); inp.value='';">Ajouter</button>
             </div>
             <div class="dash-todo-list">
-                ${top3Todos.map(t => `
-                    <a href="${t.href}" class="dash-todo-item ${t.done ? 'done' : ''}">
-                        <span class="dash-todo-check"></span>
-                        <span class="dash-todo-label">${escapeHtml(t.label)}</span>
-                        <span class="dash-todo-arrow">›</span>
-                    </a>
+                ${todos.length === 0 ? '<p style="color: var(--text-light); font-size: 13px; padding: 8px 0;">Aucune tâche. Ajoute-en une ci-dessus.</p>' : todos.map(t => `
+                    <div class="dash-todo-item ${t.done ? 'done' : ''}" style="cursor:pointer;" onclick="toggleTodo('${t.id}')">
+                        <span class="dash-todo-check" style="${t.done ? 'display:flex;align-items:center;justify-content:center;color:white;font-size:12px;' : ''}">${t.done ? '✓' : ''}</span>
+                        <span class="dash-todo-label">${escapeHtml(t.text)}</span>
+                        <button class="btn-bare" style="color: var(--text-lighter); font-size: 16px; padding: 0 4px;" onclick="event.stopPropagation(); deleteTodo('${t.id}')" aria-label="Supprimer">✕</button>
+                    </div>
                 `).join('')}
             </div>
         </div>
@@ -2587,8 +2551,8 @@ const renderCommandes = () => {
 
     const allCommandes = DB.get('commandes') || [];
     const commandesScope = showArchives
-        ? allCommandes.filter(c => c.statut === 'livrée')
-        : allCommandes.filter(c => c.statut !== 'livrée');
+        ? allCommandes.filter(c => c.statut === 'livrée' || c.statut === 'annulee')
+        : allCommandes.filter(c => c.statut !== 'livrée' && c.statut !== 'annulee');
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
@@ -2678,7 +2642,6 @@ const renderCommandes = () => {
                 </button>
                 ${pillBtn('en_attente', 'En attente')}
                 ${pillBtn('produite', 'Produite')}
-                ${pillBtn('annulee', 'Annulée')}
             </div>
         ` : ''}
 
@@ -2846,6 +2809,9 @@ const saveCommande = (event, id) => {
             commandes.push(commande);
         }
         DB.set('commandes', commandes);
+        if (commande.statut === 'annulee') {
+            deleteBLForCommande(commande.id);
+        }
         
         modal.hide();
         showToast('Commande enregistrée');
@@ -2904,6 +2870,9 @@ const updateCommandeStatut = (id, statut) => {
     if (index !== -1) {
         commandes[index].statut = statut;
         DB.set('commandes', commandes);
+        if (statut === 'annulee') {
+            deleteBLForCommande(id);
+        }
         closeStatusDropdowns();
         renderCommandes();
     }
@@ -2981,15 +2950,17 @@ const livrerCommande = (id) => {
 const archiverCommande = (id) => {
     confirmDialog('Archiver cette commande ? Elle sera déplacée vers les archives.').then(ok => {
         if (!ok) return;
+        modal.hide();
         showToast('Commande archivée');
         renderCommandes();
     });
 };
 
 const restaurerCommande = (id) => {
-    confirmDialog('Restaurer cette commande ? Elle redeviendra "produite".').then(ok => {
+    confirmDialog('Restaurer cette commande ? Elle redeviendra "produite" et réapparaîtra dans les commandes actives.').then(ok => {
         if (!ok) return;
         updateCommandeStatut(id, 'produite');
+        modal.hide();
         showToast('Commande restaurée');
     });
 };
@@ -3313,7 +3284,8 @@ const showCommandeDetails = (id) => {
     
     const totalItems = (commande.items || []).reduce((sum, i) => sum + i.quantite, 0);
     
-    modal.show(`Commande #${getCommandeNumero(commande)}`, `
+    const modalTitle = `Commande #${getCommandeNumero(commande)}`;
+    const modalBody = `
         <div class="commande-details">
             <p><strong>Client:</strong> ${escapeHtml(clientName)}</p>
             <p><strong>Date commande:</strong> ${formatDate(commande.dateCommande)}</p>
@@ -3350,9 +3322,17 @@ const showCommandeDetails = (id) => {
             </table>
             ` : ''}
         </div>
-    `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
-    `);
+    `;
+    
+    let actionsHtml = `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`;
+    if (commande.statut === 'en_attente' || commande.statut === 'produite') {
+        actionsHtml = `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
+    } else if (commande.statut === 'livrée') {
+        actionsHtml = `<button class="btn btn-primary" onclick="archiverCommande('${id}')">Archiver</button>` + actionsHtml;
+    } else if (commande.statut === 'annulee') {
+        actionsHtml = `<button class="btn btn-secondary" onclick="restaurerCommande('${id}')">Restaurer</button>` + actionsHtml;
+    }
+    modal.show(modalTitle, modalBody, actionsHtml);
 };
 
 const deleteCommande = (id) => {
@@ -3372,10 +3352,11 @@ const togglePillStatut = (statut) => {
 };
 
 const confirmAnnulerCommande = (id) => {
-    confirmDialog('Annuler définitivement cette commande ?', { danger: true, confirmLabel: 'Annuler la commande' }).then(ok => {
+    confirmDialog('Annuler définitivement cette commande ? Le bulletin de livraison associé sera supprimé.', { danger: true, confirmLabel: 'Annuler la commande' }).then(ok => {
         if (!ok) return;
         updateCommandeStatut(id, 'annulee');
         modal.hide();
+        showToast('Commande annulée');
     });
 };
 
@@ -3409,8 +3390,9 @@ const toggleArchives = () => {
 const renderArchives = () => {
     const savedFilterYear = DB.getFilter('archive_year');
     const savedFilterClient = DB.getFilter('archive_client');
+    const savedFilterStatut = DB.getFilter('archive_statut') || '';
     
-    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée');
+    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée' || c.statut === 'annulee');
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
@@ -3421,7 +3403,8 @@ const renderArchives = () => {
         const year = c.dateCommande ? c.dateCommande.substring(0, 4) : '2024';
         const matchesYear = !savedFilterYear || year === savedFilterYear;
         const matchesClient = !savedFilterClient || c.clientId === savedFilterClient;
-        return matchesYear && matchesClient;
+        const matchesStatut = !savedFilterStatut || c.statut === savedFilterStatut;
+        return matchesYear && matchesClient && matchesStatut;
     });
     
     let html = `
@@ -3443,6 +3426,11 @@ const renderArchives = () => {
                     <option value="">Tous les clients</option>
                     ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
+                <select id="filterArchiveStatut" onchange="DB.setFilter('archive_statut', this.value); renderArchives()">
+                    <option value="">Tous les statuts</option>
+                    <option value="livrée" ${savedFilterStatut === 'livrée' ? 'selected' : ''}>Livrées</option>
+                    <option value="annulee" ${savedFilterStatut === 'annulee' ? 'selected' : ''}>Annulées</option>
+                </select>
             </div>
             
             <div class="table-container" id="archivesTableContainer">
@@ -3450,6 +3438,7 @@ const renderArchives = () => {
                     <thead>
                         <tr>
                             <th>N°</th>
+                            <th>Statut</th>
                             <th>Client</th>
                             <th>Date commande</th>
                             <th>Date livraison</th>
@@ -3458,7 +3447,7 @@ const renderArchives = () => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${filteredCommandes.length === 0 ? '<tr><td colspan="6" class="text-center">Aucune commande archivée</td></tr>' : 
+                        ${filteredCommandes.length === 0 ? '<tr><td colspan="7" class="text-center">Aucune commande archivée</td></tr>' : 
                           filteredCommandes.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande))
                             .map(cmd => {
                                 const client = clients.find(cl => cl.id === cmd.clientId);
@@ -3473,6 +3462,7 @@ const renderArchives = () => {
                                 return `
                                     <tr>
                                         <td>${getCommandeNumero(cmd)}</td>
+                                        <td>${cmd.statut === 'annulee' ? '<span class="badge badge-annulee">Annulée</span>' : '<span class="badge badge-livree">Livrée</span>'}</td>
                                         <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
@@ -3493,7 +3483,7 @@ const renderArchives = () => {
 };
 
 const exportArchivesExcel = () => {
-    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée');
+    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée' || c.statut === 'annulee');
     const clients = DB.get('clients');
     const aromes = DB.get('aromes');
     const formats = DB.get('formats');
@@ -3508,6 +3498,7 @@ const exportArchivesExcel = () => {
 
         return {
             'N°': getCommandeNumero(cmd),
+            'Statut': cmd.statut === 'annulee' ? 'Annulée' : 'Livrée',
             'Client': client?.societe || client?.nom || 'N/A',
             'Date commande': cmd.dateCommande,
             'Date livraison': cmd.dateLivraison,
@@ -3736,6 +3727,14 @@ const showLivraisonDetails = (id) => {
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
         <button class="btn btn-primary" onclick="showPrepareBLExportModal('${id}')">Préparer / Exporter</button>
     `);
+};
+
+const deleteBLForCommande = (commandeId) => {
+    const livraisons = DB.get('livraisons') || [];
+    const filtered = livraisons.filter(l => l.commandeId !== commandeId);
+    if (filtered.length !== livraisons.length) {
+        DB.set('livraisons', filtered);
+    }
 };
 
 const deleteLivraison = (id) => {
