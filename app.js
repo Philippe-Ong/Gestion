@@ -1256,6 +1256,58 @@ const renderStock = () => {
     const fmtPill = (val, label) => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" onclick="toggleStockFormatFilter('${escapeHtml(val).replace(/'/g, '\\\'')}')">${escapeHtml(label)}</button>`;
     const statPill = (val, label) => `<button type="button" class="status-pill ${savedStatut === val ? 'active' : ''}" onclick="toggleStockStatutFilter('${val}')">${escapeHtml(label)}</button>`;
 
+    // Traçabilité : retrouver les lots épuisés (disparus du stock) via la recherche
+    let archivedLotsHtml = '';
+    if (savedQuery) {
+        const knownIds = new Set(lots.map(l => String(l.id)));
+        const archived = {};
+        (DB.get('commandes') || []).forEach(cmd => {
+            (cmd.lotsUtilises || []).forEach(lu => {
+                const idS = String(lu.lotId || '');
+                if (!idS || knownIds.has(idS) || archived[idS]) return;
+                archived[idS] = { id: idS, arome: lu.arome || '', format: lu.format || '', dlc: lu.dlc || '', dateProduction: '' };
+            });
+        });
+        (DB.get('history') || []).forEach(h => {
+            const idS = String(h.lotId || '');
+            if (!idS || knownIds.has(idS)) return;
+            if (!archived[idS]) {
+                archived[idS] = { id: idS, arome: h.arome || '', format: h.format || '', dlc: '', dateProduction: h.productionDate || '' };
+            } else if (!archived[idS].dateProduction) {
+                archived[idS].dateProduction = h.productionDate || '';
+            }
+        });
+        const matches = Object.values(archived)
+            .filter(l => `${l.id} ${l.arome} ${l.format}`.toLowerCase().includes(savedQuery))
+            .slice(0, 12);
+        if (matches.length > 0) {
+            archivedLotsHtml = `
+                <h3 style="margin: 16px 0 8px; font-size: 15px;">Lots épuisés (traçabilité)</h3>
+                ${matches.map(l => {
+                    const arome = aromes.find(a => a.nom === l.arome);
+                    return `<div class="lot-card">
+                        <div class="lot-card-header">
+                            <span class="lot-card-numero">#${escapeHtml(String(l.id).padStart(6, '0'))}</span>
+                            <span class="badge badge-default">Épuisé</span>
+                        </div>
+                        <div class="lot-card-aroma">
+                            <span class="aroma-tile-dot" style="background:${escapeHtml(arome?.couleur || '#ccc')}"></span>
+                            <span class="lot-card-aroma-name">${escapeHtml(l.arome || '?')}</span>
+                            <span class="lot-card-aroma-format">• ${escapeHtml(l.format || '?')}</span>
+                        </div>
+                        <div class="lot-card-meta">
+                            ${l.dateProduction ? `<span>Prod. <strong>${formatDate(l.dateProduction)}</strong></span>` : ''}
+                            ${l.dlc ? `<span>DLC <strong>${formatDate(l.dlc)}</strong></span>` : ''}
+                        </div>
+                        <div class="lot-card-actions">
+                            <button class="btn btn-sm btn-ghost" onclick="showLotTraceModal('${escapeHtml(l.id)}')">Tracer</button>
+                        </div>
+                    </div>`;
+                }).join('')}
+            `;
+        }
+    }
+
     const lotCardsHtml = filteredLots.length === 0
         ? '<div class="commande-empty">Aucun lot ne correspond aux filtres</div>'
         : filteredLots.map(lot => {
@@ -1280,6 +1332,7 @@ const renderStock = () => {
                 </div>
                 <div class="lot-card-actions">
                     ${status !== 'expired' ? `<button class="btn btn-sm btn-success" onclick="showVendreModal('${lot.id}')">Vendre</button>` : ''}
+                    <button class="btn btn-sm btn-ghost" onclick="showLotTraceModal('${lot.id}')">Tracer</button>
                     <button class="btn btn-sm btn-ghost" onclick="showEditLotModal('${lot.id}')">Modifier</button>
                     <button class="btn btn-sm btn-ghost" style="color: var(--danger);" onclick="deleteLot('${lot.id}')">Supprimer</button>
                 </div>
@@ -1323,6 +1376,7 @@ const renderStock = () => {
         <div class="commande-section" style="padding: 0; background: transparent; border: none; box-shadow: none;">
             <div class="commande-section-title" style="padding: 0 4px;">Lots récents</div>
             ${lotCardsHtml}
+            ${archivedLotsHtml}
         </div>
 
         <div class="card" style="margin-top: 16px;">
@@ -1438,13 +1492,14 @@ const renderHistoryTable = () => {
     }
     return history.map(record => {
         const lotNum = record.lotId ? `#${String(record.lotId)}` : 'N/A';
+        const isVente = String(record.id).startsWith('VENTE-');
         return `
         <tr>
-            <td>${lotNum}</td>
+            <td>${lotNum}${isVente ? ' <span class="badge badge-default">Vente</span>' : ''}</td>
             <td>${formatDate(record.productionDate)}</td>
             <td>${escapeHtml(record.arome)}</td>
             <td>${escapeHtml(record.format)}</td>
-            <td style="color:var(--primary);font-weight:bold;">${record.quantity}</td>
+            <td style="color:${isVente ? 'var(--danger)' : 'var(--primary)'};font-weight:bold;">${isVente ? '−' : ''}${record.quantity}</td>
             <td>${new Date(record.dateAdded).toLocaleDateString('fr-CH')}</td>
             <td><button class="btn btn-sm btn-danger" onclick="deleteHistoryRecord('${record.id}')">✕</button></td>
         </tr>
@@ -1627,20 +1682,153 @@ const vendreLot = (lotId) => {
     const quantite = parseInt(document.querySelector('#vendreForm input[name="quantite"]').value);
     const lots = DB.get('lots');
     const lotIndex = lots.findIndex(l => l.id === lotId);
-    
+
     if (lotIndex === -1) return;
-    
+
     const lot = lots[lotIndex];
     lot.quantite -= quantite;
-    
+
+    // Traçabilité : journaliser la vente directe
+    const history = DB.get('history') || [];
+    history.unshift({
+        id: `VENTE-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+        lotId: lot.id,
+        arome: lot.arome,
+        format: lot.format,
+        quantity: quantite,
+        productionDate: lot.dateProduction,
+        dateAdded: new Date().toISOString()
+    });
+
     if (lot.quantite <= 0) {
         lots.splice(lotIndex, 1);
     }
-    
+
     DB.set('lots', lots);
+    DB.set('history', history);
     modal.hide();
     showToast(`${quantite} bouteille(s) vendu(e)s`);
     renderStock();
+};
+
+// --- Traçabilité des bouteilles : parcours complet d'un lot ---
+const getLotTraceData = (lotId) => {
+    const idStr = String(lotId);
+    const lots = DB.get('lots') || [];
+    const history = DB.get('history') || [];
+    const commandes = DB.get('commandes') || [];
+    const clients = DB.get('clients') || [];
+    const livraisons = DB.get('livraisons') || [];
+
+    const lot = lots.find(l => String(l.id) === idStr) || null;
+
+    const productions = history.filter(h => String(h.lotId) === idStr && String(h.id).startsWith('PROD-'));
+    const totalProduit = productions.reduce((s, h) => s + (h.quantity || 0), 0);
+
+    const ventes = history.filter(h => String(h.lotId) === idStr && String(h.id).startsWith('VENTE-'));
+    const totalVenteDirecte = ventes.reduce((s, h) => s + (h.quantity || 0), 0);
+
+    const livraisonsClients = [];
+    commandes.forEach(cmd => {
+        (cmd.lotsUtilises || []).forEach(lu => {
+            if (String(lu.lotId) !== idStr || !(lu.quantite > 0)) return;
+            const client = clients.find(c => c.id === cmd.clientId);
+            const bl = livraisons.find(l => l.commandeId === cmd.id);
+            livraisonsClients.push({
+                date: cmd.dateLivraison || '',
+                commandeNumero: getCommandeNumero(cmd),
+                clientNom: client ? (client.societe || client.nom) : '(client inconnu)',
+                numeroBL: bl?.numeroBL || '',
+                quantite: lu.quantite,
+                arome: lu.arome || '',
+                format: lu.format || '',
+                dlc: lu.dlc || ''
+            });
+        });
+    });
+    livraisonsClients.sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0));
+    const totalLivre = livraisonsClients.reduce((s, l) => s + l.quantite, 0);
+
+    // Infos de référence : lot en stock, sinon production, sinon trace de livraison
+    const ref = lot || productions[productions.length - 1] || livraisonsClients[0] || ventes[0] || {};
+    return {
+        lotId: idStr,
+        lot,
+        arome: ref.arome || '',
+        format: ref.format || '',
+        dateProduction: lot?.dateProduction || ref.productionDate || '',
+        dlc: lot?.dlc || ref.dlc || '',
+        enStock: lot ? (lot.quantite || 0) : 0,
+        totalProduit,
+        totalLivre,
+        totalVenteDirecte,
+        livraisonsClients,
+        ventes
+    };
+};
+
+const showLotTraceModal = (lotId) => {
+    const t = getLotTraceData(lotId);
+    if (!t.arome && t.livraisonsClients.length === 0 && t.totalProduit === 0) {
+        showToast('Aucune donnée de traçabilité pour ce lot', 'error');
+        return;
+    }
+
+    const ligne = (label, value) => `
+        <div class="flex-between" style="padding: 6px 0; border-bottom: 1px solid var(--border-light);">
+            <span style="color: var(--text-light);">${escapeHtml(label)}</span>
+            <strong>${value}</strong>
+        </div>`;
+
+    // Écart = produit − livré − vendu − en stock (pertes, casse, ajustements manuels)
+    const ecart = t.totalProduit > 0 ? t.totalProduit - t.totalLivre - t.totalVenteDirecte - t.enStock : null;
+
+    const livraisonsHtml = t.livraisonsClients.length === 0
+        ? '<p class="text-muted">Aucune livraison client pour ce lot</p>'
+        : `<table class="details-table">
+            <thead>
+                <tr><th>Date</th><th>Client</th><th>Cmd</th><th>BL</th><th>Qté</th></tr>
+            </thead>
+            <tbody>
+                ${t.livraisonsClients.map(l => `
+                    <tr>
+                        <td>${l.date ? formatDate(l.date) : '—'}</td>
+                        <td>${escapeHtml(l.clientNom)}</td>
+                        <td>#${escapeHtml(String(l.commandeNumero || '—'))}</td>
+                        <td>${l.numeroBL ? escapeHtml(String(l.numeroBL)) : '—'}</td>
+                        <td><strong>${l.quantite} bt</strong></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>`;
+
+    const ventesHtml = t.ventes.length === 0 ? '' : `
+        <h4 style="margin-top: 16px;">Ventes directes</h4>
+        ${t.ventes.map(v => `
+            <div class="flex-between" style="padding: 6px 0; border-bottom: 1px solid var(--border-light); font-size: 13px;">
+                <span>${v.dateAdded ? new Date(v.dateAdded).toLocaleDateString('fr-CH') : '—'}</span>
+                <strong>${v.quantity} bt</strong>
+            </div>
+        `).join('')}`;
+
+    modal.show(`Traçabilité lot #${escapeHtml(String(t.lotId).padStart(6, '0'))}`, `
+        <div class="commande-details">
+            ${ligne('Arôme / Format', `${escapeHtml(t.arome || '?')} • ${escapeHtml(t.format || '?')}`)}
+            ${t.dateProduction ? ligne('Date de production', formatDate(t.dateProduction)) : ''}
+            ${t.dlc ? ligne('DLC', formatDate(t.dlc)) : ''}
+            ${t.totalProduit > 0 ? ligne('Produit', `${t.totalProduit} bt`) : ''}
+            ${ligne('Livré aux clients', `${t.totalLivre} bt`)}
+            ${t.totalVenteDirecte > 0 ? ligne('Ventes directes', `${t.totalVenteDirecte} bt`) : ''}
+            ${ligne('En stock', t.lot ? `${t.enStock} bt` : '<span class="badge badge-default">Épuisé</span>')}
+            ${ecart !== null && ecart !== 0 ? ligne('Écart (pertes / ajustements)', `${ecart} bt`) : ''}
+
+            <h4 style="margin-top: 16px;">Livraisons clients</h4>
+            ${livraisonsHtml}
+            ${ventesHtml}
+        </div>
+    `, `
+        <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
+    `);
 };
 
 const showEditLotModal = (lotId) => {
@@ -3350,7 +3538,7 @@ const showCommandeDetails = (id) => {
     const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0 
         ? commande.lotsUtilises.map(lot => `
             <tr>
-                <td>#${String(lot.lotId).slice(-6)}</td>
+                <td><a href="#" style="color: var(--primary); font-weight: 600;" onclick="event.preventDefault(); showLotTraceModal('${escapeHtml(String(lot.lotId))}')">#${String(lot.lotId).slice(-6)}</a></td>
                 <td>${escapeHtml(lot.arome)}</td>
                 <td>${escapeHtml(lot.format)}</td>
                 <td>${lot.quantite}</td>
