@@ -1,0 +1,8 @@
+{
+  "appId": "ch.thecol.gestion",
+  "appName": "ThéCol Gestion",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

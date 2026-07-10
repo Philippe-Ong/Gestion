@@ -99,7 +99,8 @@ const getNextCommandeNumero = () => {
 };
 
 const getCommandeNumero = (commande) => {
-    return commande.numero || commande.id.slice(-5);
+    // (commande.id || '') : le total de la modale passe une commande temporaire sans id
+    return commande.numero || (commande.id || '').slice(-5);
 };
 
 const getCommandeStatutLabel = (statut) => ({
@@ -190,6 +191,113 @@ const displayUnit = (unit) => {
     return normalizeUnit(unit) || unit;
 };
 
+// Presets de tarifs clients — choisis dans la fiche client (champ tarifs)
+const TARIF_PRESETS = {
+    distributeur: { prix25cl: '2.25', prix50cl: '3.80', prix100cl: '6.00' },
+    prive:        { prix25cl: '3.00', prix50cl: '5.00', prix100cl: '8.50' }
+};
+
+const normalizeTarifKey = (raw) => {
+    if (!raw) return 'custom';
+    const s = String(raw).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    if (s.startsWith('distrib')) return 'distributeur';
+    if (s.startsWith('priv'))    return 'prive';
+    return 'custom';
+};
+
+const migrateClientTarifs = () => {
+    try {
+        const clients = DB.get('clients') || [];
+        let changedKey = 0, changedPrix = 0;
+        const isEmpty = (v) => v === undefined || v === null || String(v).trim() === '';
+        clients.forEach(c => {
+            const canonical = normalizeTarifKey(c.tarifs);
+            if (c.tarifs !== canonical) {
+                c.tarifs = canonical;
+                changedKey++;
+            }
+            const preset = TARIF_PRESETS[c.tarifs];
+            if (preset) {
+                if (isEmpty(c.prix25cl))  { c.prix25cl  = preset.prix25cl;  changedPrix++; }
+                if (isEmpty(c.prix50cl))  { c.prix50cl  = preset.prix50cl;  changedPrix++; }
+                if (isEmpty(c.prix100cl)) { c.prix100cl = preset.prix100cl; changedPrix++; }
+            }
+        });
+        if (changedKey + changedPrix > 0) {
+            DB.set('clients', clients);
+        }
+    } catch (e) {
+        console.warn('[migration] migrateClientTarifs failed:', e);
+    }
+};
+
+const applyTarifPresetIfEmpty = () => {
+    const form = document.getElementById('clientForm');
+    if (!form) return;
+    const cat = form.tarifs?.value;
+    const preset = TARIF_PRESETS[cat];
+    if (!preset) return;
+    const isEmpty = (v) => v === undefined || v === null || String(v).trim() === '';
+    if (isEmpty(form.prix25cl.value))  form.prix25cl.value  = preset.prix25cl;
+    if (isEmpty(form.prix50cl.value))  form.prix50cl.value  = preset.prix50cl;
+    if (isEmpty(form.prix100cl.value)) form.prix100cl.value = preset.prix100cl;
+};
+
+const getFormatPriceKey = (format) => {
+    if (!format) return null;
+    const cl = Number(format.contenanceCl);
+    if (cl === 25)  return 'prix25cl';
+    if (cl === 50)  return 'prix50cl';
+    if (cl === 100) return 'prix100cl';
+    const nom = String(format.nom || '').toLowerCase().replace(/\s+/g, '');
+    if (/^25cl$/.test(nom))                  return 'prix25cl';
+    if (/^50cl$/.test(nom))                  return 'prix50cl';
+    if (/^(100cl|1l|1000ml|1\.0l)$/.test(nom)) return 'prix100cl';
+    return null;
+};
+
+const applyTarifPreset = (selectEl) => {
+    const cat = selectEl.value;
+    const preset = TARIF_PRESETS[cat];
+    if (!preset) return;
+    const form = document.getElementById('clientForm');
+    if (!form) return;
+    form.prix25cl.value = preset.prix25cl;
+    form.prix50cl.value = preset.prix50cl;
+    form.prix100cl.value = preset.prix100cl;
+};
+
+const onPrixInputChange = () => {
+    const form = document.getElementById('clientForm');
+    if (!form) return;
+    const cat = form.tarifs?.value;
+    const preset = TARIF_PRESETS[cat];
+    if (!preset) return;
+    const matches = form.prix25cl.value === preset.prix25cl
+                 && form.prix50cl.value === preset.prix50cl
+                 && form.prix100cl.value === preset.prix100cl;
+    if (!matches) form.tarifs.value = 'custom';
+};
+
+const resolveCommandeFormat = (item, formats) => {
+    if (!item) return null;
+    let fmt = formats.find(f => f.id === item.formatId);
+    if (fmt) return { format: fmt, source: 'id' };
+    if (item.formatNom) {
+        fmt = formats.find(f => f.nom === item.formatNom);
+        if (fmt) return { format: fmt, source: 'formatNom' };
+    }
+    if (item.formatId) {
+        const norm = String(item.formatId).toLowerCase().replace(/\s+/g, '');
+        fmt = formats.find(f => String(f.nom || '').toLowerCase().replace(/\s+/g, '') === norm);
+        if (fmt) return { format: fmt, source: 'formatId-as-name' };
+    }
+    return null;
+};
+
+// Toutes les tables persistées
+const ALL_TABLES = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire', 'livraisons', 'history'];
+
 // Data Storage with Firebase sync
 const DB = {
     firebaseSynced: false,
@@ -228,9 +336,9 @@ const DB = {
     },
     
     syncToFirebase: async (key, data) => {
-        if (!window.firebaseReady || !window.firebaseDb) return;
+        if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
         try {
-            const { setDoc, doc } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+            const { setDoc, doc } = window.firebaseApi;
             await setDoc(doc(window.firebaseDb, 'data', key), { data: data, updatedAt: new Date().toISOString() });
         } catch(e) {
             console.error('Firebase sync error:', e);
@@ -239,7 +347,7 @@ const DB = {
     },
     
     loadFromFirebase: async (showNotification = true) => {
-        if (!window.firebaseReady || !window.firebaseDb) return;
+        if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
         try {
             // Backup before sync
             const backup = {};
@@ -251,15 +359,13 @@ const DB = {
             }
             localStorage.setItem('thecol_backup_pre_sync', JSON.stringify(backup));
 
-            const { getDocs, collection } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+            const { getDocs, collection } = window.firebaseApi;
             const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
-            let hasData = false;
+            const hasData = !snapshot.empty;
             snapshot.forEach(docSnap => {
-                const key = docSnap.id;
                 const cloudData = docSnap.data().data;
                 if (Array.isArray(cloudData)) {
-                    localStorage.setItem('thecol_' + key, JSON.stringify(cloudData));
-                    hasData = true;
+                    localStorage.setItem('thecol_' + docSnap.id, JSON.stringify(cloudData));
                 }
             });
             if (hasData) {
@@ -274,8 +380,7 @@ const DB = {
     },
     
     init: () => {
-        const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire'];
-        tables.forEach(table => {
+        ALL_TABLES.forEach(table => {
             if (!localStorage.getItem('thecol_' + table)) {
                 localStorage.setItem('thecol_' + table, '[]');
             }
@@ -400,6 +505,189 @@ const renderEmptyState = (message, actionHtml = '') => `
         ${actionHtml}
     </div>
 `;
+
+const formatChf = (n) => {
+    if (n === null || n === undefined || isNaN(n)) return 'CHF \u2014';
+    if (n === 0) return 'CHF 0.\u2013';
+    const abs = Math.abs(n);
+    const fixed = abs.toFixed(2);
+    const isWhole = fixed.endsWith('.00');
+    const integerPart = Math.floor(abs).toString().replace(/\B(?=(\d{3})+(?!\d))/g, "'");
+    const sign = n < 0 ? '-' : '';
+    return isWhole
+        ? `CHF ${sign}${integerPart}.\u2013`
+        : `CHF ${sign}${integerPart}.${fixed.split('.')[1]}`;
+};
+
+const diagnoseCommandeMontant = (commande, clients, formats) => {
+    const client = clients.find(c => c.id === commande.clientId);
+    const report = {
+        cmdId: commande.id,
+        cmdNumero: getCommandeNumero(commande),
+        clientId: commande.clientId,
+        clientFound: !!client,
+        clientLabel: client ? (client.societe || client.nom || '(sans nom)') : '(client introuvable)',
+        tarifsCategorie: client ? (client.tarifs || '(vide)') : null,
+        items: [],
+        total: 0,
+        hasPrice: false
+    };
+    if (!client) return report;
+    getItems(commande).forEach((item, idx) => {
+        const resolved = resolveCommandeFormat(item, formats);
+        const fmt = resolved?.format;
+        const key = fmt ? getFormatPriceKey(fmt) : null;
+        const rawClient = key ? client[key] : null;
+        let priceClient = parseFloat(String(rawClient || '').replace(',', '.'));
+        if (isNaN(priceClient)) priceClient = null;
+        let pricePreset = null;
+        if (key && TARIF_PRESETS[client.tarifs]) {
+            pricePreset = parseFloat(TARIF_PRESETS[client.tarifs][key]);
+            if (isNaN(pricePreset)) pricePreset = null;
+        }
+        const priceUsed = (priceClient && priceClient > 0)
+            ? priceClient
+            : (pricePreset && pricePreset > 0 ? pricePreset : null);
+        const ligneTotal = (priceUsed != null) ? priceUsed * (item.quantite || 0) : 0;
+        report.items.push({
+            idx,
+            aromeId: item.aromeId,
+            formatId: item.formatId,
+            formatFound: !!fmt,
+            formatSource: resolved?.source || null,
+            formatNom: fmt?.nom || null,
+            contenanceCl: fmt?.contenanceCl ?? null,
+            priceKey: key,
+            priceFromClient: priceClient,
+            priceFromPreset: pricePreset,
+            priceUsed,
+            quantite: item.quantite || 0,
+            ligneTotal
+        });
+        if (priceUsed && priceUsed > 0) {
+            report.total += ligneTotal;
+            report.hasPrice = true;
+        }
+    });
+    if (!report.hasPrice) report.total = null;
+    return report;
+};
+
+const getCommandeMontant = (commande, clients, formats) => {
+    const r = diagnoseCommandeMontant(commande, clients, formats);
+    return r.hasPrice ? r.total : null;
+};
+
+if (typeof window !== 'undefined') {
+    window.debugMontants = () => {
+        const cmds = (DB.get('commandes') || []).slice(0, 20);
+        const clients = DB.get('clients') || [];
+        const formats = DB.get('formats') || [];
+        const report = cmds.map(cmd => diagnoseCommandeMontant(cmd, clients, formats));
+        try {
+            console.table(report.map(r => ({
+                cmd: r.cmdNumero, client: r.clientLabel,
+                items: r.items.length, total: r.total, hasPrice: r.hasPrice
+            })));
+        } catch (_) {}
+        console.log('[debugMontants] formats in DB:', formats);
+        console.log('[debugMontants] full diag:', report);
+        return report;
+    };
+}
+
+const updateCommandeTotalModal = () => {
+    const form = document.getElementById('commandeForm');
+    if (!form) return;
+    const clientId = form.querySelector('select[name="clientId"]')?.value;
+    const clients = DB.get('clients') || [];
+    const formats = DB.get('formats') || [];
+
+    const items = [];
+    let totalBouteilles = 0;
+    form.querySelectorAll('.item-qty-input').forEach(input => {
+        const qty = parseInt(input.value, 10) || 0;
+        if (qty > 0) {
+            const match = input.name.match(/items\[([^\]]+)\]\[([^\]]+)\]/);
+            if (match) {
+                items.push({ aromeId: match[1], formatId: match[2], quantite: qty });
+                totalBouteilles += qty;
+            }
+        }
+    });
+    const tempCmd = { clientId, items };
+    const montant = getCommandeMontant(tempCmd, clients, formats);
+
+    const totalValueEl = document.getElementById('commandeTotalValue');
+    const totalSubEl = document.getElementById('commandeTotalSub');
+    if (totalValueEl) totalValueEl.textContent = formatChf(montant);
+    if (totalSubEl) totalSubEl.textContent = `${totalBouteilles} bouteille${totalBouteilles > 1 ? 's' : ''}`;
+};
+
+const showCommandeMontantDiagModal = (commandeId) => {
+    const commandes = DB.get('commandes') || [];
+    const clients = DB.get('clients') || [];
+    const formats = DB.get('formats') || [];
+    const aromes = DB.get('aromes') || [];
+    const commande = commandes.find(c => c.id === commandeId);
+    if (!commande) return;
+    const r = diagnoseCommandeMontant(commande, clients, formats);
+
+    const headerLine = (label, value, ok) => `
+        <div style="display:flex; justify-content:space-between; padding: 6px 0; border-bottom: 1px solid var(--border-light); font-size: 12px;">
+            <span style="color: var(--text-light);">${escapeHtml(label)}</span>
+            <span style="font-weight: 600; color: ${ok ? 'var(--success-light)' : 'var(--danger)'};">${escapeHtml(value)}</span>
+        </div>`;
+
+    const itemRows = r.items.map(it => {
+        const arome = aromes.find(a => a.id === it.aromeId);
+        const aromeNom = arome?.nom || '(arôme inconnu)';
+        const fmtLabel = it.formatFound
+            ? `<span style="color: var(--success-light);">\u2713 ${escapeHtml(it.formatNom || '')}${it.contenanceCl ? ' (' + it.contenanceCl + ' cl)' : ''}</span>`
+            : `<span style="color: var(--danger);">\u2717 format introuvable<br><small style="color: var(--text-light);">formatId: ${escapeHtml(String(it.formatId || ''))}</small></span>`;
+        const keyLabel = it.priceKey
+            ? `<span style="color: var(--success-light);">${escapeHtml(it.priceKey)}</span>`
+            : `<span style="color: var(--danger);">\u2014 (mapping inconnu)</span>`;
+        const priceSource = it.priceFromClient > 0 ? `${it.priceFromClient.toFixed(2)} CHF (client)`
+                          : it.priceFromPreset > 0 ? `${it.priceFromPreset.toFixed(2)} CHF (preset)`
+                          : '\u2014';
+        const lineColor = it.priceUsed > 0 ? 'var(--success-light)' : 'var(--danger)';
+        return `
+            <div style="background: var(--bg-secondary); border-radius: var(--radius-md); padding: 10px; margin-bottom: 8px;">
+                <div style="font-weight: 700; color: var(--text); margin-bottom: 6px;">${escapeHtml(aromeNom)} \u00d7 ${it.quantite} bt</div>
+                <div style="display:flex; justify-content:space-between; padding: 4px 0; font-size: 12px;"><span style="color: var(--text-light);">Format</span>${fmtLabel}</div>
+                <div style="display:flex; justify-content:space-between; padding: 4px 0; font-size: 12px;"><span style="color: var(--text-light);">Cl\u00e9 prix</span>${keyLabel}</div>
+                <div style="display:flex; justify-content:space-between; padding: 4px 0; font-size: 12px;"><span style="color: var(--text-light);">Prix utilis\u00e9</span><span style="color: ${lineColor}; font-weight: 600;">${escapeHtml(priceSource)}</span></div>
+                <div style="display:flex; justify-content:space-between; padding: 4px 0; font-size: 12px;"><span style="color: var(--text-light);">Total ligne</span><span style="font-weight: 700; color: ${lineColor};">${it.ligneTotal > 0 ? formatChf(it.ligneTotal) : '\u2014'}</span></div>
+            </div>`;
+    }).join('');
+
+    const recommendation = !r.clientFound
+        ? '<p style="color: var(--danger);">\u26a0 Client introuvable : <code>' + escapeHtml(String(r.clientId)) + '</code></p>'
+        : r.items.some(i => !i.formatFound)
+            ? '<p style="color: var(--warning);">\u26a0 Au moins un format de la commande n\'existe plus en DB (renomm\u00e9/supprim\u00e9). Ouvre la commande pour la modifier et res\u00e9lectionner les formats actuels.</p>'
+            : r.items.some(i => !i.priceKey)
+                ? '<p style="color: var(--warning);">\u26a0 Le format de cette commande n\'a pas de prix correspondant (contenance non standard : 25cl/50cl/1L attendus).</p>'
+                : r.hasPrice
+                    ? ''
+                    : '<p style="color: var(--warning);">\u26a0 Tous les prix sont vides. Configure les prix du client ou applique un preset (Distributeur/Priv\u00e9).</p>';
+
+    modal.show('Diagnostic Total CHF',
+        `<div style="font-size: 13px;">
+            <div style="background: var(--white); border-radius: var(--radius-lg); padding: 12px; margin-bottom: 12px; border: 1px solid var(--border-light);">
+                ${headerLine('Commande', '#' + r.cmdNumero, true)}
+                ${headerLine('Client trouv\u00e9', r.clientLabel, r.clientFound)}
+                ${headerLine('Cat\u00e9gorie tarif', r.tarifsCategorie || '\u2014', !!r.tarifsCategorie && r.tarifsCategorie !== 'custom')}
+                ${headerLine('Items', String(r.items.length), r.items.length > 0)}
+                ${headerLine('Total calculable', r.hasPrice ? 'Oui' : 'Non', r.hasPrice)}
+            </div>
+            <div style="margin-bottom: 12px;">${recommendation}</div>
+            <h4 style="margin-bottom: 8px; font-size: 15px;">D\u00e9tail par ligne</h4>
+            ${itemRows || '<p style="color: var(--text-light);">Aucun article.</p>'}
+        </div>`,
+        `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`
+    );
+};
 
 const renderSegmentedFilter = (name, currentValue, options, renderFnName) => `
     <div class="segmented-filter" role="group" aria-label="${escapeHtml(name)}">
@@ -626,6 +914,11 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+// State variables for pointage and weekly calendar
+let pointageSelectedEmployeId = null;
+let pointageClockInterval = null;
+let weekCalendarSelectedDate = '';
+
 // Navigation
 const router = () => {
     const hash = window.location.hash.slice(1) || 'dashboard';
@@ -634,8 +927,8 @@ const router = () => {
 };
 
 const navigateTo = (page) => {
-    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-    document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
+    document.querySelectorAll('.nav-item, .bottom-nav-item').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll(`[data-page="${page}"]`).forEach(el => el.classList.add('active'));
     
     const titles = {
         dashboard: 'Dashboard',
@@ -914,6 +1207,23 @@ const renderDashboard = () => {
     `);
 };
 
+// Toggles de filtres Stock
+const toggleStockAromeFilter = (aromeNom) => {
+    const current = DB.getFilter('stockArome') || '';
+    DB.setFilter('stockArome', current === aromeNom ? '' : aromeNom);
+    renderStock();
+};
+const toggleStockFormatFilter = (formatNom) => {
+    const current = DB.getFilter('stockFormat') || '';
+    DB.setFilter('stockFormat', current === formatNom ? '' : formatNom);
+    renderStock();
+};
+const toggleStockStatutFilter = (statut) => {
+    const current = DB.getFilter('stockStatut') || '';
+    DB.setFilter('stockStatut', current === statut ? '' : statut);
+    renderStock();
+};
+
 // Stock Management
 const renderStock = () => {
     const lots = DB.get('lots') || [];
@@ -922,6 +1232,9 @@ const renderStock = () => {
     const savedFilterArome = DB.getFilter('stock_arome');
     const savedFilterFormat = DB.getFilter('stock_format');
     const savedStockSearch = DB.getFilter('stock_search');
+    const savedFilterStockArome = DB.getFilter('stockArome') || '';
+    const savedFilterStockFormat = DB.getFilter('stockFormat') || '';
+    const savedFilterStockStatut = DB.getFilter('stockStatut') || '';
     
     const today = new Date();
     const oneMonthFromNow = new Date();
@@ -939,6 +1252,9 @@ const renderStock = () => {
         const searchText = `${lot.id || ''} ${lot.arome || ''} ${lot.format || ''} ${lot.dateProduction || ''} ${lot.dlv || ''} ${lot.dlc || ''}`;
         return (!savedFilterArome || lot.arome === savedFilterArome) &&
                (!savedFilterFormat || lot.format === savedFilterFormat) &&
+               (!savedFilterStockArome || lot.arome === savedFilterStockArome) &&
+               (!savedFilterStockFormat || lot.format === savedFilterStockFormat) &&
+               (!savedFilterStockStatut || getStatus(lot.dlc) === savedFilterStockStatut) &&
                includesText(searchText, savedStockSearch);
     });
     
@@ -1021,6 +1337,20 @@ const renderStock = () => {
                     ${formats.filter(f => f.actif).map(f => `<option value="${escapeHtml(f.nom)}" ${savedFilterFormat === f.nom ? 'selected' : ''}>${escapeHtml(f.nom)}</option>`).join('')}
                 </select>
                 ${(savedFilterArome || savedFilterFormat || savedStockSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('stock_arome', ''); DB.setFilter('stock_format', ''); DB.setFilter('stock_search', ''); renderStock()">Réinitialiser</button>` : ''}
+            </div>
+            
+            <div class="stock-pills-row" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">
+                <span style="font-size:12px;color:var(--text-light);">Format :</span>
+                <button type="button" class="status-pill ${!savedFilterStockFormat ? 'active' : ''}" onclick="toggleStockFormatFilter('')">Tous</button>
+                ${formats.filter(f => f.actif).map(f => `<button type="button" class="status-pill ${savedFilterStockFormat === f.nom ? 'active' : ''}" onclick="toggleStockFormatFilter('${escapeHtml(f.nom).replace(/'/g, '\\\'')}')">${escapeHtml(f.nom)}</button>`).join('')}
+            </div>
+            
+            <div class="stock-pills-row" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">
+                <span style="font-size:12px;color:var(--text-light);">DLC :</span>
+                <button type="button" class="status-pill ${!savedFilterStockStatut ? 'active' : ''}" onclick="toggleStockStatutFilter('')">Tous</button>
+                <button type="button" class="status-pill ${savedFilterStockStatut === 'ok' ? 'active' : ''}" onclick="toggleStockStatutFilter('ok')">OK</button>
+                <button type="button" class="status-pill ${savedFilterStockStatut === 'warning' ? 'active' : ''}" onclick="toggleStockStatutFilter('warning')">&lt; 1 mois</button>
+                <button type="button" class="status-pill ${savedFilterStockStatut === 'expired' ? 'active' : ''}" onclick="toggleStockStatutFilter('expired')">Expiré</button>
             </div>
             
             <div class="table-container">
@@ -1430,7 +1760,171 @@ const saveEditLot = (event, lotId) => {
     }
 };
 
-// Pointage
+// Pointage — helper functions
+const pointageSelectEmployee = (empId) => {
+    pointageSelectedEmployeId = empId;
+    renderPointage();
+};
+
+const pointageQuickArrivee = () => {
+    if (!pointageSelectedEmployeId) {
+        showToast('Sélectionne un employé', 'error');
+        return;
+    }
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const heureDebut = `${hh}:${mm}`;
+    const today = getLocalDateISOString();
+    const pointages = DB.get('pointages') || [];
+    const enCours = pointages.find(p => p.date === today && p.employeId === pointageSelectedEmployeId && !p.heureFin);
+    if (enCours) {
+        showToast('Pointage déjà en cours pour cet employé', 'error');
+        return;
+    }
+    pointages.push({
+        id: generateId(),
+        employeId: pointageSelectedEmployeId,
+        date: today,
+        heureDebut,
+        heureFin: '',
+        pause: 0
+    });
+    DB.set('pointages', pointages);
+    showToast(`Arrivée pointée à ${heureDebut}`);
+    renderPointage();
+};
+
+const pointageQuickDepart = () => {
+    if (!pointageSelectedEmployeId) {
+        showToast('Sélectionne un employé', 'error');
+        return;
+    }
+    const today = getLocalDateISOString();
+    const pointages = DB.get('pointages') || [];
+    const enCours = pointages.find(p => p.date === today && p.employeId === pointageSelectedEmployeId && !p.heureFin);
+    if (!enCours) {
+        showToast('Aucun pointage en cours pour cet employé', 'error');
+        return;
+    }
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    enCours.heureFin = `${hh}:${mm}`;
+    DB.set('pointages', pointages);
+    showToast(`Départ pointé à ${enCours.heureFin}`);
+    renderPointage();
+};
+
+const showPointageStatsModal = () => {
+    const pointages = DB.get('pointages') || [];
+    const employes = DB.get('employees') || [];
+    const employesActifs = employes.filter(e => e.actif);
+    const stats = getPointageStats(pointages, employes);
+    modal.show('Statistiques pointage',
+        `<div class="form-row" style="margin-bottom: 16px;">
+            <div class="form-group">
+                <label>Employé</label>
+                <select id="statsEmploye" onchange="refreshPointageStatsModal()">
+                    <option value="">Tous</option>
+                    ${employesActifs.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Période</label>
+                <select id="statsPeriod" onchange="refreshPointageStatsModal()">
+                    <option value="week">Semaine en cours</option>
+                    <option value="month">Mois en cours</option>
+                    <option value="year">Année en cours</option>
+                </select>
+            </div>
+        </div>
+        <div id="statsModalBody">
+            <div class="dash-kpi-grid">
+                <div class="dash-kpi-card"><div class="dash-kpi-label">Total heures</div><div class="dash-kpi-value">${stats.totalHours}h</div></div>
+                <div class="dash-kpi-card"><div class="dash-kpi-label">Jours travaillés</div><div class="dash-kpi-value">${stats.daysWorked}</div></div>
+            </div>
+            <div class="dash-kpi-card" style="margin-bottom: 16px;"><div class="dash-kpi-label">Moyenne / jour</div><div class="dash-kpi-value">${stats.avgHours}h</div></div>
+            ${stats.employeeStats.length > 0 ? `
+                <h4 style="margin: 12px 0 8px; font-size: 15px;">Répartition par employé</h4>
+                <div class="bar-chart">
+                    ${stats.employeeStats.map((emp, i) => `
+                        <div class="bar-row">
+                            <span class="bar-label">${escapeHtml(emp.name)}</span>
+                            <div class="bar-container">
+                                <div class="bar" style="width: ${emp.percent}%; background: hsl(${i * 40 + 100}, 35%, 45%);"></div>
+                            </div>
+                            <span class="bar-value">${emp.hours}h</span>
+                        </div>
+                    `).join('')}
+                </div>` : ''}
+        </div>`,
+        `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`
+    );
+};
+
+const refreshPointageStatsModal = () => {
+    const employes = DB.get('employees') || [];
+    const pointages = DB.get('pointages') || [];
+    const stats = getPointageStats(pointages, employes);
+    const body = document.getElementById('statsModalBody');
+    if (!body) return;
+    body.innerHTML = `
+        <div class="dash-kpi-grid">
+            <div class="dash-kpi-card"><div class="dash-kpi-label">Total heures</div><div class="dash-kpi-value">${stats.totalHours}h</div></div>
+            <div class="dash-kpi-card"><div class="dash-kpi-label">Jours travaillés</div><div class="dash-kpi-value">${stats.daysWorked}</div></div>
+        </div>
+        <div class="dash-kpi-card" style="margin-bottom: 16px;"><div class="dash-kpi-label">Moyenne / jour</div><div class="dash-kpi-value">${stats.avgHours}h</div></div>
+        ${stats.employeeStats.length > 0 ? `
+            <h4 style="margin: 12px 0 8px; font-size: 15px;">Répartition par employé</h4>
+            <div class="bar-chart">
+                ${stats.employeeStats.map((emp, i) => `
+                    <div class="bar-row">
+                        <span class="bar-label">${escapeHtml(emp.name)}</span>
+                        <div class="bar-container">
+                            <div class="bar" style="width: ${emp.percent}%; background: hsl(${i * 40 + 100}, 35%, 45%);"></div>
+                        </div>
+                        <span class="bar-value">${emp.hours}h</span>
+                    </div>
+                `).join('')}
+            </div>` : ''}
+    `;
+};
+
+const showPointageHistoriqueModal = () => {
+    const employes = DB.get('employees') || [];
+    const employesActifs = employes.filter(e => e.actif);
+    const pointages = DB.get('pointages') || [];
+    modal.show('Historique complet',
+        `<div class="filters" style="margin-bottom: 12px;">
+            <select id="filterEmploye" onchange="refreshPointageHistoriqueModal()">
+                <option value="">Tous les employés</option>
+                ${employesActifs.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
+            </select>
+            <input type="date" id="filterDateFrom" placeholder="Du" onchange="refreshPointageHistoriqueModal()">
+            <input type="date" id="filterDateTo" placeholder="Au" onchange="refreshPointageHistoriqueModal()">
+        </div>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr><th>Date</th><th>Employé</th><th>Début</th><th>Fin</th><th>Pause</th><th>Total</th><th></th></tr>
+                </thead>
+                <tbody id="historiqueModalBody">${renderHistoriqueTable(pointages, employes)}</tbody>
+            </table>
+        </div>`,
+        `<button class="btn btn-secondary" onclick="exportPointageExcel()">Exporter CSV</button>
+         <button class="btn btn-primary" onclick="modal.hide()">Fermer</button>`
+    );
+};
+
+const refreshPointageHistoriqueModal = () => {
+    const pointages = DB.get('pointages') || [];
+    const employes = DB.get('employees') || [];
+    const tbody = document.getElementById('historiqueModalBody');
+    if (tbody) tbody.innerHTML = renderHistoriqueTable(pointages, employes);
+};
+
+// Pointage view
 const renderPointage = (tab = 'pointage') => {
     const pointages = DB.get('pointages') || [];
     const employes = DB.get('employees') || [];
@@ -1448,7 +1942,23 @@ const renderPointage = (tab = 'pointage') => {
     `;
     
     if (tab === 'pointage') {
+        const employesActifs = employes.filter(e => e.actif);
+        // Auto-sélectionner le premier employé actif si rien n'est sélectionné ou que l'employé sélectionné n'existe plus
+        if (!pointageSelectedEmployeId || !employesActifs.some(e => e.id === pointageSelectedEmployeId)) {
+            pointageSelectedEmployeId = employesActifs[0]?.id || null;
+        }
         const todayPointages = pointages.filter(p => p.date === today);
+        const pointageEnCoursParEmp = {};
+        todayPointages.forEach(p => { if (!p.heureFin) pointageEnCoursParEmp[p.employeId] = p; });
+        const selectedEmpId = pointageSelectedEmployeId;
+        const pointageEnCours = selectedEmpId ? pointageEnCoursParEmp[selectedEmpId] : null;
+        const dejaArrive = !!pointageEnCours;
+        const initiales = (e) => {
+            if (!e) return '?';
+            const p = (e.prenom || '').trim();
+            const n = (e.nom || '').trim();
+            return ((p[0] || '') + (n[0] || '')).toUpperCase() || '?';
+        };
         const todayHeures = todayPointages.reduce((sum, p) => {
             const debutMin = parseHHMM(p.heureDebut);
             const finMin = parseHHMM(p.heureFin);
@@ -1460,6 +1970,32 @@ const renderPointage = (tab = 'pointage') => {
         const hour = new Date().getHours();
         const greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir';
         html += `
+            <div class="pointage-actions" style="display:flex; gap:8px; margin-bottom:12px;">
+                <button type="button" class="btn btn-arrivee" ${dejaArrive || !selectedEmpId ? 'disabled' : ''} onclick="pointageQuickArrivee()" style="flex:1;">▶ Arrivée</button>
+                <button type="button" class="btn btn-depart" ${!dejaArrive ? 'disabled' : ''} onclick="pointageQuickDepart()" style="flex:1;">⏹ Départ</button>
+            </div>
+
+            <div class="card" style="margin-bottom:12px;">
+                <div class="card-header" style="margin-bottom: 8px; padding-bottom: 0; border: none;">
+                    <h3 class="card-title">Qui pointe ?</h3>
+                </div>
+                ${employesActifs.length === 0 ? '<p style="color: var(--text-light);">Aucun employé actif. Ajoute-en depuis Paramètres.</p>' : `
+                    <div class="employee-grid">
+                        ${employesActifs.map(e => {
+                            const isSelected = e.id === selectedEmpId;
+                            const isLive = !!pointageEnCoursParEmp[e.id];
+                            return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" onclick="event.preventDefault(); pointageSelectEmployee('${e.id}'); return false;">
+                                <div class="avatar ${isLive ? 'avatar-live' : ''}">${escapeHtml(initiales(e))}</div>
+                                <div>
+                                    <div class="employee-name">${escapeHtml(e.prenom)} ${escapeHtml(e.nom || '')}</div>
+                                    <div class="employee-sub">${isLive ? '● en cours' : 'libre'}</div>
+                                </div>
+                            </a>`;
+                        }).join('')}
+                    </div>
+                `}
+            </div>
+
             <div class="pointage-clock">
                 <div style="font-size:13px;font-weight:500;opacity:0.85;margin-bottom:4px;">${greeting}</div>
                 <div class="current-time" id="liveClock">${currentTime}</div>
@@ -1701,10 +2237,17 @@ const renderPointage = (tab = 'pointage') => {
     
     // Update time every second if on pointage tab
     if (tab === 'pointage') {
-        setInterval(() => {
+        if (pointageClockInterval) {
+            clearInterval(pointageClockInterval);
+            pointageClockInterval = null;
+        }
+        pointageClockInterval = setInterval(() => {
             const timeEl = document.querySelector('.current-time');
             if (timeEl) {
                 timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
+            } else {
+                clearInterval(pointageClockInterval);
+                pointageClockInterval = null;
             }
         }, 1000);
     }
@@ -2137,6 +2680,89 @@ const deletePointage = (id) => {
     });
 };
 
+// Step tracker and week calendar for commandes
+const renderStepTracker = (statut) => {
+    if (statut === 'annulee') return '';
+    const steps = [
+        { key: 'creee',    label: 'Créée' },
+        { key: 'produite', label: 'Produite' },
+        { key: 'livree',   label: 'Livrée' }
+    ];
+    const currentIdx = statut === 'en_attente' ? 0
+                     : statut === 'produite'   ? 1
+                     : statut === 'livrée'      ? 2 : 0;
+    const treatAsDone = statut === 'livrée';
+    return `<div class="step-tracker">
+        ${steps.map((s, i) => {
+            const state = treatAsDone
+                ? 'done'
+                : (i < currentIdx ? 'done' : i === currentIdx ? 'current' : 'pending');
+            const connector = i < steps.length - 1
+                ? `<div class="step-connector ${(treatAsDone || i < currentIdx) ? 'done' : ''}"></div>`
+                : '';
+            return `<div class="step ${state}">
+                <div class="step-dot">${state === 'done' ? '✓' : i + 1}</div>
+                <div class="step-label">${s.label}</div>
+            </div>${connector}`;
+        }).join('')}
+    </div>`;
+};
+
+let weekCalendarOffset = 0;
+
+const renderWeekCalendar = (commandesByDate) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const monday = new Date(today);
+    const day = (monday.getDay() + 6) % 7;
+    monday.setDate(monday.getDate() - day + (weekCalendarOffset * 7));
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i);
+        days.push(d);
+    }
+    const iso = (d) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day2 = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day2}`;
+    };
+    const todayIso = iso(today);
+    const monthLabel = monday.toLocaleDateString('fr-CH', { month: 'long', year: 'numeric' });
+    return `<div class="week-calendar-wrap">
+        <div class="week-calendar-header">
+            <button type="button" class="btn-bare" onclick="changeWeekCalendar(-1)" aria-label="Semaine précédente">‹</button>
+            <span class="week-month">${escapeHtml(monthLabel)}</span>
+            <button type="button" class="btn-bare" onclick="changeWeekCalendar(1)" aria-label="Semaine suivante">›</button>
+        </div>
+        <div class="week-calendar">
+            ${days.map(d => {
+                const dStr = iso(d);
+                const isToday = dStr === todayIso;
+                const isSelected = dStr === weekCalendarSelectedDate;
+                const hasOrders = (commandesByDate[dStr] || 0) > 0;
+                const dayLetter = ['L', 'M', 'M', 'J', 'V', 'S', 'D'][(d.getDay() + 6) % 7];
+                return `<button type="button" class="week-day ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}"
+                    onclick="selectWeekDay('${dStr}')">
+                    <span class="week-day-name">${dayLetter}</span>
+                    <span class="week-day-num">${d.getDate()}</span>
+                    ${hasOrders ? '<span class="week-day-dot"></span>' : ''}
+                </button>`;
+            }).join('')}
+        </div>
+    </div>`;
+};
+
+const changeWeekCalendar = (delta) => {
+    weekCalendarOffset += delta;
+    renderCommandes();
+};
+const selectWeekDay = (dateStr) => {
+    weekCalendarSelectedDate = (weekCalendarSelectedDate === dateStr) ? '' : dateStr;
+    renderCommandes();
+};
+
 // Commandes
 const renderCommandes = () => {
     const savedFilterClient = DB.getFilter('client');
@@ -2151,18 +2777,22 @@ const renderCommandes = () => {
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    const statusOptions = [
-        { value: '', label: 'Tous' },
-        { value: 'en_attente', label: 'En attente' },
-        { value: 'produite', label: 'Produites' },
-        { value: 'annulee', label: 'Annulées' }
-    ];
+    const countByStatut = { en_attente: 0, produite: 0, 'livrée': 0, annulee: 0 };
+    commandes.forEach(c => { if (countByStatut[c.statut] !== undefined) countByStatut[c.statut]++; });
+    const commandesByDate = {};
+    commandes.forEach(c => {
+        if (c.dateLivraison) {
+            const k = String(c.dateLivraison).slice(0, 10);
+            commandesByDate[k] = (commandesByDate[k] || 0) + 1;
+        }
+    });
     const filteredCommandes = commandes
         .filter(c => {
             const client = clients.find(cl => cl.id === c.clientId);
             const searchText = `${getCommandeNumero(c)} ${getClientLabel(client)} ${c.dateCommande || ''} ${c.dateLivraison || ''} ${c.statut || ''}`;
             return (!savedFilterClient || c.clientId === savedFilterClient) &&
                    (!savedFilterStatut || c.statut === savedFilterStatut) &&
+                   (!showArchives && weekCalendarSelectedDate ? String(c.dateLivraison || '').slice(0,10) === weekCalendarSelectedDate : true) &&
                    includesText(searchText, savedSearch);
         })
         .sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
@@ -2231,9 +2861,15 @@ const renderCommandes = () => {
                 </div>
             </div>
             
-            ${!showArchives ? `
+            ${!showArchives ? `${renderWeekCalendar(commandesByDate)}
+            <div class="status-pills">
+                <button type="button" class="status-pill ${!savedFilterStatut ? 'active' : ''}" onclick="togglePillStatut('')">Toutes <span class="pill-count">${commandes.length}</span></button>
+                <button type="button" class="status-pill ${savedFilterStatut === 'en_attente' ? 'active' : ''}" onclick="togglePillStatut('en_attente')">En attente <span class="pill-count">${countByStatut.en_attente}</span></button>
+                <button type="button" class="status-pill ${savedFilterStatut === 'produite' ? 'active' : ''}" onclick="togglePillStatut('produite')">Produite <span class="pill-count">${countByStatut.produite}</span></button>
+                <button type="button" class="status-pill ${savedFilterStatut === 'annulee' ? 'active' : ''}" onclick="togglePillStatut('annulee')">Annulée <span class="pill-count">${countByStatut.annulee}</span></button>
+            </div>
+            ${weekCalendarSelectedDate ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);margin-bottom:12px;font-size:12px;"><span>🗓 Filtre : livraisons du ${formatDate(weekCalendarSelectedDate)}</span><button type="button" class="btn-bare" style="color:var(--primary);font-size:12px;padding:0;" onclick="selectWeekDay('${weekCalendarSelectedDate}')">Effacer ✕</button></div>` : ''}
             <div class="filters">
-                ${renderSegmentedFilter('statut', savedFilterStatut, statusOptions, 'renderCommandes')}
                 <input type="search" id="filterCommandeSearch" placeholder="Rechercher n°, client, date..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('commande_search', this.value); window.__focusCommandeSearch = true; renderCommandes()">
                 <select id="filterClient" onchange="DB.setFilter('client', this.value); renderCommandes()">
                     <option value="">Tous les clients</option>
@@ -2253,6 +2889,7 @@ const renderCommandes = () => {
                             <th>Date livraison</th>
                             <th>Articles</th>
                             <th>Statut</th>
+                            <th>Montant</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -2271,6 +2908,9 @@ const renderCommandes = () => {
                                 const badgeClass = cmd.statut === 'en_attente' ? 'badge-warning' :
                                                   cmd.statut === 'produite' ? 'badge-info' :
                                                   cmd.statut === 'livrée' ? 'badge-success' : 'badge-danger';
+                                const montant = getCommandeMontant(cmd, clients, formats);
+                                const isAnnulee = cmd.statut === 'annulee';
+                                const isLivree = cmd.statut === 'livrée';
 
                                 return `
                                     <tr>
@@ -2288,12 +2928,15 @@ const renderCommandes = () => {
                                                 <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'annulee')">Annulée</button>
                                             </div>
                                         </td>
+                                        <td style="white-space: nowrap;">${formatChf(montant)}</td>
                                         <td class="actions-cell">
                                             ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="showLivraisonBouteillesModal('${cmd.id}')">Livrer</button>` : ''}
                                             <button class="btn btn-sm btn-primary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
                                             ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="restaurerCommande('${cmd.id}')">Restaurer</button>` : ''}
-                                            ${cmd.statut !== 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
-                                            <button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>
+                                            ${!isAnnulee && !isLivree ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
+                                            ${!isAnnulee && !isLivree ? `<button class="btn btn-sm btn-ghost" onclick="duplicateCommande('${cmd.id}')">⎘ Dupliquer</button>` : ''}
+                                            ${!isAnnulee && !isLivree ? `<button class="btn btn-sm" style="background: var(--bg-danger); color: var(--danger); font-weight: 700;" onclick="confirmAnnulerCommande('${cmd.id}')">Annuler</button>` : ''}
+                                            ${isAnnulee || isLivree ? `<button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>` : ''}
                                         </td>
                                     </tr>
                                 `;
@@ -2314,6 +2957,15 @@ const renderCommandes = () => {
         }
         window.__focusCommandeSearch = false;
     }
+};
+
+const onMatrixCellInput = (input) => {
+    const cell = input.closest('td');
+    if (cell) {
+        const val = parseInt(input.value, 10) || 0;
+        cell.classList.toggle('filled', val > 0);
+    }
+    updateCommandeTotalModal();
 };
 
 const showCommandeModal = (id = null) => {
@@ -2337,7 +2989,7 @@ const showCommandeModal = (id = null) => {
             <div class="form-row">
                 <div class="form-group">
                     <label>Client</label>
-                    <select name="clientId" required>
+                    <select name="clientId" required onchange="updateCommandeTotalModal()">
                         ${clients.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                     </select>
                 </div>
@@ -2363,7 +3015,7 @@ const showCommandeModal = (id = null) => {
                                     ${formats.map(f => {
                                         const item = commande?.items?.find(i => i.aromeId === a.id && i.formatId === f.id);
                                         const qty = item ? item.quantite : '';
-                                        return `<td><input type="number" name="items[${a.id}][${f.id}]" value="${qty}" min="0" placeholder="0" class="item-qty-input"></td>`;
+                                        return `<td><input type="number" name="items[${a.id}][${f.id}]" value="${qty}" min="0" placeholder="0" class="item-qty-input" oninput="onMatrixCellInput(this)"></td>`;
                                     }).join('')}
                                 </tr>
                             `).join('')}
@@ -2371,6 +3023,15 @@ const showCommandeModal = (id = null) => {
                     </table>
                 </div>
             </div>
+
+            <div class="commande-total" id="commandeTotalRow">
+                <div>
+                    <div class="commande-total-label">Total</div>
+                    <div class="commande-total-sub" id="commandeTotalSub">— bouteilles</div>
+                </div>
+                <div class="commande-total-value" id="commandeTotalValue">CHF —</div>
+            </div>
+
             <div class="form-group">
                 <label>Statut</label>
                 <select name="statut">
@@ -2385,6 +3046,9 @@ const showCommandeModal = (id = null) => {
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
         <button class="btn btn-primary" onclick="saveCommande(event, '${id || ''}')">Enregistrer</button>
     `);
+
+    // Recalcul initial du total
+    updateCommandeTotalModal();
 };
 
 const saveCommande = (event, id) => {
@@ -2919,6 +3583,7 @@ const showCommandeDetails = (id) => {
             <p><strong>Date commande:</strong> ${formatDate(commande.dateCommande)}</p>
             <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
             <p><strong>Statut:</strong> ${escapeHtml(getCommandeStatutLabel(commande.statut))}</p>
+            ${renderStepTracker(commande.statut)}
             <p><strong>Total:</strong> ${totalItems} articles</p>
             <table class="details-table">
                 <thead>
@@ -2962,6 +3627,40 @@ const deleteCommande = (id) => {
         showToast('Commande supprimée');
         renderCommandes();
     });
+};
+
+const togglePillStatut = (statut) => {
+    const current = DB.getFilter('statut') || '';
+    DB.setFilter('statut', current === statut ? '' : statut);
+    renderCommandes();
+};
+
+const confirmAnnulerCommande = (id) => {
+    confirmDialog('Annuler définitivement cette commande ?', { danger: true, confirmLabel: 'Annuler la commande' }).then(ok => {
+        if (!ok) return;
+        updateCommandeStatut(id, 'annulee');
+        modal.hide();
+    });
+};
+
+const duplicateCommande = (id) => {
+    const commandes = DB.get('commandes') || [];
+    const original = commandes.find(c => c.id === id);
+    if (!original) return;
+    const copy = {
+        id: generateId(),
+        numero: getNextCommandeNumero(),
+        clientId: original.clientId,
+        dateCommande: getLocalDateISOString(),
+        dateLivraison: '',
+        statut: 'en_attente',
+        items: (original.items || []).map(i => ({ ...i }))
+    };
+    commandes.push(copy);
+    DB.set('commandes', commandes);
+    modal.hide();
+    showToast(`Commande dupliquée → #${copy.numero}`);
+    showCommandeModal(copy.id);
 };
 
 const toggleArchives = () => {
@@ -3092,6 +3791,13 @@ const exportArchivesExcel = () => {
     }
 };
 
+const resetLivraisonFilters = () => {
+    DB.setFilter('livraison_year', '');
+    DB.setFilter('livraison_client', '');
+    DB.setFilter('livraison_search', '');
+    renderLivraisons();
+};
+
 // Livraisons / Bulletins de Livraison
 const renderLivraisons = () => {
     const livraisons = DB.get('livraisons') || [];
@@ -3140,7 +3846,7 @@ const renderLivraisons = () => {
                     <option value="">Tous les clients</option>
                     ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
-                ${(savedFilterYear || savedFilterClient || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('livraison_year', ''); DB.setFilter('livraison_client', ''); DB.setFilter('livraison_search', ''); renderLivraisons()">Réinitialiser</button>` : ''}
+                ${(savedFilterYear || savedFilterClient || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="resetLivraisonFilters()">Réinitialiser</button>` : ''}
             </div>
             
             <div class="table-container" id="livraisonsTableContainer">
@@ -5793,22 +6499,30 @@ const showClientModal = (id = null) => {
                     <input type="text" name="npa" value="${escapeHtml(client?.npa || '')}">
                 </div>
                 <div class="form-group">
-                    <label>Tarifs</label>
-                    <input type="text" name="tarifs" value="${escapeHtml(client?.tarifs || '')}">
+                    <label>Catégorie tarif</label>
+                    <select name="tarifs" onchange="applyTarifPreset(this)">
+                        ${(() => {
+                            const cat = normalizeTarifKey(client?.tarifs);
+                            return `
+                            <option value="custom" ${cat === 'custom' ? 'selected' : ''}>Personnalisé</option>
+                            <option value="distributeur" ${cat === 'distributeur' ? 'selected' : ''}>Distributeur (2.25 / 3.80 / 6.–)</option>
+                            <option value="prive" ${cat === 'prive' ? 'selected' : ''}>Privé (3.– / 5.– / 8.50)</option>`;
+                        })()}
+                    </select>
                 </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>Prix 25cl</label>
-                    <input type="text" name="prix25cl" value="${escapeHtml(client?.prix25cl || '')}">
+                    <input type="text" name="prix25cl" value="${escapeHtml(client?.prix25cl || '')}" oninput="onPrixInputChange()">
                 </div>
                 <div class="form-group">
                     <label>Prix 50cl</label>
-                    <input type="text" name="prix50cl" value="${escapeHtml(client?.prix50cl || '')}">
+                    <input type="text" name="prix50cl" value="${escapeHtml(client?.prix50cl || '')}" oninput="onPrixInputChange()">
                 </div>
                 <div class="form-group">
                     <label>Prix 100cl</label>
-                    <input type="text" name="prix100cl" value="${escapeHtml(client?.prix100cl || '')}">
+                    <input type="text" name="prix100cl" value="${escapeHtml(client?.prix100cl || '')}" oninput="onPrixInputChange()">
                 </div>
             </div>
             <div class="form-row">
@@ -6020,9 +6734,8 @@ const resetClients = () => {
 
 // Export all data to JSON
 const exportAllData = () => {
-    const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire'];
     const data = {};
-    tables.forEach(table => {
+    ALL_TABLES.forEach(table => {
         data[table] = DB.get(table) || [];
     });
     const json = JSON.stringify(data, null, 2);
@@ -6045,9 +6758,8 @@ const importAllData = (event) => {
     reader.onload = (e) => {
         try {
             const data = JSON.parse(e.target.result);
-            const tables = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire'];
             let count = 0;
-            tables.forEach(table => {
+            ALL_TABLES.forEach(table => {
                 if (data[table] && Array.isArray(data[table])) {
                     DB.set(table, data[table]);
                     count++;
@@ -6067,12 +6779,15 @@ const importAllData = (event) => {
 document.addEventListener('DOMContentLoaded', async () => {
     DB.init();
     initGlobalSearch();
-    const waitForFirebase = (timeoutMs = 3000) => new Promise(resolve => {
-        const startedAt = Date.now();
+    // Hors-ligne, le module Firebase du CDN ne se charge pas et firebaseReady reste
+    // undefined : sans borne, l'attente ne rend jamais la main et router() n'est
+    // jamais appelé (écran blanc). Ne rejette jamais.
+    const waitForFirebase = (timeoutMs = 4000) => new Promise(resolve => {
+        const deadline = Date.now() + timeoutMs;
         const check = () => {
-            if (window.firebaseReady) return resolve(true);
-            if (window.firebaseReady === false && Date.now() - startedAt >= timeoutMs) return resolve(false);
-            if (Date.now() - startedAt >= timeoutMs) return resolve(false);
+            if (window.firebaseReady === true) return resolve(true);
+            if (window.firebaseReady === false) return resolve(false);
+            if (Date.now() >= deadline) return resolve(false);
             setTimeout(check, 100);
         };
         check();
@@ -6080,6 +6795,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const firebaseAvailable = await waitForFirebase();
     if (firebaseAvailable) {
         await DB.loadFromFirebase(false);
+    } else {
+        console.warn('Firebase indisponible — démarrage sur les données locales');
     }
+    // Migration silencieuse (post-sync Firebase) : normalise les valeurs legacy de client.tarifs
+    migrateClientTarifs();
     router();
 });

@@ -10,6 +10,10 @@
 
 ## 2. Structure des données
 
+### Tables synchronisées (ALL_TABLES)
+Les 11 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
+`employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`.
+
 ### Employés
 ```json
 {
@@ -123,6 +127,19 @@
   "heureFin": "time",
   "pause": "number (minutes)",
   "notes": "string"
+}
+```
+
+### Historique de production
+```json
+{
+  "id": "string (PROD-{timestamp}-{random})",
+  "lotId": "string (uuid or numeric)",
+  "arome": "string",
+  "format": "string",
+  "quantity": "number",
+  "productionDate": "date",
+  "dateAdded": "datetime (ISO string)"
 }
 ```
 

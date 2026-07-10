@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v9.3**
+**v9.4**
 
 ## Adresse
 
@@ -98,6 +98,14 @@ Application de gestion pour votre entreprise de thé froid.
 - Bouton "Sync" pour synchroniser manuellement
 - Sauvegarde automatique des données non-vides
 
+### Build mobile (Android / iOS)
+
+L'appli web est emballée via **Capacitor 8**. Le code source reste à la racine — `www/` est généré par `npm run sync`.
+
+- **APK debug** : `npm run sync && cd android && .\gradlew.bat assembleDebug`
+- **App ID** : `ch.thecol.gestion`
+- Voir `MOBILE.md` pour les instructions complètes (prérequis, release, iOS).
+
 ## Structure du projet
 
 | Fichier | Rôle |
@@ -107,6 +115,11 @@ Application de gestion pour votre entreprise de thé froid.
 | `styles.css` | Styles CSS, variables de thème, responsive |
 | `SPEC.md` | Schémas de données et spécifications |
 | `templates/bl_template.xlsx` | Template Excel pour export Bulletin de Livraison (BL) |
+| `capacitor.config.json` | Configuration Capacitor (appId, webDir) |
+| `scripts/copy-web.js` | Copie les fichiers racine vers `www/` |
+| `android/` `ios/` | Scaffolds natifs Capacitor 8 |
+| `www/` | Généré par `npm run sync` (gitignoré) |
+| `MOBILE.md` | Instructions de build mobile |
 
 ## Technologies
 

@@ -2,7 +2,6 @@
 
 # Local dependencies and generated artifacts
 node_modules/
-package.json
 package-lock.json
 .opencode/
 fix_*.py
@@ -11,3 +10,29 @@ test_*.js
 test_*.xlsx
 ui_v9_gestion/
 templates/Bulletin de livraison.xlsx
+
+# Capacitor — webDir généré, ne pas commiter
+www/
+
+# Android build artifacts
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+android/*.iml
+android/app/release/
+*.keystore
+!debug.keystore
+
+# iOS
+ios/App/Pods/
+ios/App/build/
+ios/DerivedData/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+
+# Misc
+.DS_Store
+*.log

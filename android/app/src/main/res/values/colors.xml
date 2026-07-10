@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Couleurs ThéCol — alignées sur Gestion/design_handoff_thecol_app/DESIGN_SYSTEM.md -->
+    <color name="colorPrimary">#5D7B3E</color>
+    <color name="colorPrimaryDark">#2C4A2E</color>
+    <color name="colorAccent">#5D7B3E</color>
+
+    <!-- Surfaces -->
+    <color name="colorBackground">#F5F5F0</color>
+    <color name="colorSurface">#FFFFFF</color>
+
+    <!-- Splash : fond mint du logo (#C8F0C0) — distinct du vert UI -->
+    <color name="splashBackground">#C8F0C0</color>
+
+    <!-- Logo (références couleur — ne pas mélanger avec le vert UI) -->
+    <color name="logoGreen">#3CB043</color>
+    <color name="logoMint">#C8F0C0</color>
+</resources>

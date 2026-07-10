@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=9.3">
+    <link rel="stylesheet" href="styles.css?v=9.4">
 </head>
 <body>
     <aside class="sidebar">
@@ -69,7 +69,7 @@
                 <div class="global-search-results" id="globalSearchResults" role="listbox"></div>
             </div>
             <div class="header-actions" id="headerActions">
-                <span style="font-size: 11px; color: var(--text-lighter);">v9.3</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v9.4</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -80,6 +80,30 @@
             <!-- Dynamic content will be loaded here -->
         </div>
     </main>
+
+    <!-- Bottom Navigation (mobile only, shown via @media) -->
+    <nav class="bottom-nav" aria-label="Navigation mobile">
+        <a href="#dashboard" class="bottom-nav-item" data-page="dashboard">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            <span>Accueil</span>
+        </a>
+        <a href="#commandes" class="bottom-nav-item" data-page="commandes">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+            <span>Commandes</span>
+        </a>
+        <a href="#pointage" class="bottom-nav-item" data-page="pointage">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span>Pointage</span>
+        </a>
+        <a href="#stock" class="bottom-nav-item" data-page="stock">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+            <span>Stock</span>
+        </a>
+        <a href="#parametres" class="bottom-nav-item" data-page="parametres">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+            <span>Plus</span>
+        </a>
+    </nav>
 
     <!-- Modal Container -->
     <div class="modal-overlay" id="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-hidden="true">
@@ -122,8 +146,11 @@
         try {
             app = initializeApp(firebaseConfig);
             db = getFirestore(app);
-            window.firebaseReady = true;
+            // Expose une seule fois : app.js ne doit jamais ré-importer le SDK au runtime
+            // (un import dynamique échoue hors-ligne).
+            window.firebaseApi = { doc, setDoc, getDoc, getDocs, collection };
             window.firebaseDb = db;
+            window.firebaseReady = true;
             console.log('Firebase connected');
             window.showSyncButton = () => {
                 const btn = document.getElementById('syncBtn');
@@ -135,13 +162,13 @@
             window.firebaseReady = false;
         }
     </script>
-    <script src="app.js?v=9.3"></script>
+    <script src="app.js?v=9.4"></script>
     <script>
         (() => {
             const isLocalDev = ['localhost', '127.0.0.1', ''].includes(window.location.hostname);
             if (!isLocalDev) return;
             const script = document.createElement('script');
-            script.src = 'stress-test.js?v=9.3';
+            script.src = 'stress-test.js?v=9.4';
             document.body.appendChild(script);
         })();
     </script>
