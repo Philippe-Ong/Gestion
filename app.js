@@ -615,8 +615,15 @@ const updateCommandeTotalModal = () => {
             }
         }
     });
+    // Client ponctuel : client temporaire avec la catégorie tarif choisie
+    let effectiveClients = clients;
+    if (clientId === '__ponctuel__') {
+        const tarif = form.querySelector('select[name="ponctuelTarif"]')?.value || 'prive';
+        effectiveClients = clients.concat({ id: '__ponctuel__', tarifs: tarif });
+    }
+
     const tempCmd = { clientId, items };
-    const montant = getCommandeMontant(tempCmd, clients, formats);
+    const montant = getCommandeMontant(tempCmd, effectiveClients, formats);
 
     const totalValueEl = document.getElementById('commandeTotalValue');
     const totalSubEl = document.getElementById('commandeTotalSub');
@@ -2667,6 +2674,12 @@ const onMatrixCellInput = (input) => {
     updateCommandeTotalModal();
 };
 
+const onCommandeClientChange = (select) => {
+    const fields = document.getElementById('ponctuelFields');
+    if (fields) fields.style.display = select.value === '__ponctuel__' ? '' : 'none';
+    updateCommandeTotalModal();
+};
+
 const showCommandeModal = (id = null) => {
     const clients = getActive('clients');
     const aromes = getActive('aromes');
@@ -2678,23 +2691,50 @@ const showCommandeModal = (id = null) => {
         commande = commandes.find(c => c.id === id);
     }
     
-    if (clients.length === 0 || aromes.length === 0 || formats.length === 0) {
-        showToast('Veuillez d\'abord configurer clients, aromes et formats', 'error');
+    if (aromes.length === 0 || formats.length === 0) {
+        showToast('Veuillez d\'abord configurer aromes et formats', 'error');
         return;
     }
-    
+
+    // Inclure le client de la commande même s'il est inactif (ex: client ponctuel)
+    const clientOptions = [...clients];
+    if (commande?.clientId && !clientOptions.some(c => c.id === commande.clientId)) {
+        const existing = DB.get('clients').find(c => c.id === commande.clientId);
+        if (existing) clientOptions.push(existing);
+    }
+
     modal.show(id ? 'Modifier commande' : 'Nouvelle commande', `
         <form id="commandeForm">
             <div class="form-row">
                 <div class="form-group">
                     <label>Client</label>
-                    <select name="clientId" required onchange="updateCommandeTotalModal()">
-                        ${clients.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
+                    <select name="clientId" required onchange="onCommandeClientChange(this)">
+                        ${clientOptions.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
+                        <option value="__ponctuel__">➕ Client ponctuel (non récurrent)</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Date de livraison</label>
                     <input type="date" name="dateLivraison" value="${commande?.dateLivraison || ''}" required>
+                </div>
+            </div>
+            <div id="ponctuelFields" style="display: none;">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Nom du client ponctuel</label>
+                        <input type="text" name="ponctuelNom" placeholder="Nom ou société">
+                    </div>
+                    <div class="form-group">
+                        <label>Catégorie tarif</label>
+                        <select name="ponctuelTarif" onchange="updateCommandeTotalModal()">
+                            <option value="prive">Privé (3.– / 5.– / 8.50)</option>
+                            <option value="distributeur">Distributeur (2.25 / 3.80 / 6.–)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Adresse (optionnel)</label>
+                    <input type="text" name="ponctuelAdresse" placeholder="Adresse, NPA, localité">
                 </div>
             </div>
             <div class="form-group">
@@ -2746,8 +2786,13 @@ const showCommandeModal = (id = null) => {
         <button class="btn btn-primary" onclick="saveCommande(event, '${id || ''}')">Enregistrer</button>
     `);
 
-    // Recalcul initial du total
-    updateCommandeTotalModal();
+    // Visibilité des champs ponctuels + recalcul initial du total
+    const clientSelect = document.querySelector('#commandeForm select[name="clientId"]');
+    if (clientSelect) {
+        onCommandeClientChange(clientSelect);
+    } else {
+        updateCommandeTotalModal();
+    }
 };
 
 const saveCommande = (event, id) => {
@@ -2775,10 +2820,38 @@ const saveCommande = (event, id) => {
             return;
         }
         
-        const clientId = formData.get('clientId');
+        let clientId = formData.get('clientId');
         if (!clientId) {
             showToast('Veuillez sélectionner un client', 'error');
             return;
+        }
+
+        if (clientId === '__ponctuel__') {
+            const nom = String(formData.get('ponctuelNom') || '').trim();
+            if (!nom) {
+                showToast('Veuillez saisir le nom du client ponctuel', 'error');
+                return;
+            }
+            // actif: false → n'apparaît pas dans les prochaines commandes ni les filtres
+            const nouveauClient = {
+                id: generateId(),
+                societe: '',
+                nom,
+                adresse: String(formData.get('ponctuelAdresse') || '').trim(),
+                npa: '',
+                tarifs: formData.get('ponctuelTarif') || 'prive',
+                prix25cl: '',
+                prix50cl: '',
+                prix100cl: '',
+                modeFact: '',
+                coord: '',
+                actif: false,
+                ponctuel: true
+            };
+            const clientsDb = DB.get('clients');
+            clientsDb.push(nouveauClient);
+            DB.set('clients', clientsDb);
+            clientId = nouveauClient.id;
         }
 
         const dateLivraison = formData.get('dateLivraison');
@@ -2819,6 +2892,8 @@ const saveCommande = (event, id) => {
     } catch (e) {
         console.error('Error saving commande:', e);
         showToast('Erreur lors de l\'enregistrement de la commande', 'error');
+    } finally {
+        if (reenable) reenable();
     }
 };
 
@@ -5720,7 +5795,7 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <div><strong>${escapeHtml(c.societe || '')}</strong> ${escapeHtml(c.nom || '')}</div>
                                 <div class="text-muted" style="font-size:12px;">${escapeHtml(c.adresse || '')} ${escapeHtml(c.npa || '')}</div>
-                                <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : 'Inactif'}</span>
+                                <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : (c.ponctuel ? 'Ponctuel' : 'Inactif')}</span>
                             </div>
                             <div class="settings-item-actions">
                                 <button class="btn btn-sm btn-secondary" onclick="showClientModal('${c.id}')">Modifier</button>
