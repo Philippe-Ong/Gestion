@@ -2826,7 +2826,8 @@ const renderCommandes = () => {
                 </button>
                 ${showArchives
                     ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
-                    : `<button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
+                    : `<button class="btn btn-ghost btn-sm" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock actuel">✓ Stock</button>
+                       <button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
             </div>
         </div>
 
@@ -3143,6 +3144,12 @@ const updateCommandeStatut = (id, statut) => {
         closeStatusDropdowns();
         renderCommandes();
     }
+};
+
+const marquerCommandeProduite = (id) => {
+    updateCommandeStatut(id, 'produite');
+    modal.hide();
+    showToast('Commande marquée comme produite');
 };
 
 const livrerCommande = (id) => {
@@ -3592,8 +3599,12 @@ const showCommandeDetails = (id) => {
     `;
     
     let actionsHtml = `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`;
-    if (commande.statut === 'en_attente' || commande.statut === 'produite') {
-        actionsHtml = `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
+    if (commande.statut === 'en_attente') {
+        actionsHtml = `<button class="btn btn-success" onclick="marquerCommandeProduite('${id}')">Marquer produite</button>`
+            + `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
+    } else if (commande.statut === 'produite') {
+        actionsHtml = `<button class="btn btn-success" onclick="showLivraisonBouteillesModal('${id}')">Livrer</button>`
+            + `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
     } else if (commande.statut === 'livrée') {
         actionsHtml = `<button class="btn btn-primary" onclick="archiverCommande('${id}')">Archiver</button>` + actionsHtml;
     } else if (commande.statut === 'annulee') {
