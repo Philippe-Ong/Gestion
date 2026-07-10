@@ -842,6 +842,26 @@ select {
     padding-right: 32px;
 }
 
+/* Ligne d'ingrédient (modal recette) : nom / qté / unité / supprimer */
+.ingredient-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ingredient-row input {
+    min-width: 0;
+    flex: 1;
+}
+
+.ingredient-row input:first-child {
+    flex: 2;
+}
+
+.ingredient-row .btn {
+    flex-shrink: 0;
+}
+
 input[type="checkbox"] {
     width: 16px;
     height: 16px;

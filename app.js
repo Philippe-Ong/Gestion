@@ -195,7 +195,8 @@ const displayUnit = (unit) => {
 // Presets de tarifs clients — choisis dans la fiche client (champ tarifs)
 const TARIF_PRESETS = {
     distributeur: { prix25cl: '2.25', prix50cl: '3.80', prix100cl: '6.00' },
-    prive:        { prix25cl: '3.00', prix50cl: '5.00', prix100cl: '8.50' }
+    prive:        { prix25cl: '3.00', prix50cl: '5.00', prix100cl: '8.50' },
+    restaurant:   { prix25cl: '',     prix50cl: '',     prix100cl: '4.00' }
 };
 
 const normalizeTarifKey = (raw) => {
@@ -203,6 +204,7 @@ const normalizeTarifKey = (raw) => {
     const s = String(raw).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
     if (s.startsWith('distrib')) return 'distributeur';
     if (s.startsWith('priv'))    return 'prive';
+    if (s.startsWith('rest'))    return 'restaurant';
     return 'custom';
 };
 
@@ -219,9 +221,9 @@ const migrateClientTarifs = () => {
             }
             const preset = TARIF_PRESETS[c.tarifs];
             if (preset) {
-                if (isEmpty(c.prix25cl))  { c.prix25cl  = preset.prix25cl;  changedPrix++; }
-                if (isEmpty(c.prix50cl))  { c.prix50cl  = preset.prix50cl;  changedPrix++; }
-                if (isEmpty(c.prix100cl)) { c.prix100cl = preset.prix100cl; changedPrix++; }
+                if (isEmpty(c.prix25cl)  && !isEmpty(preset.prix25cl))  { c.prix25cl  = preset.prix25cl;  changedPrix++; }
+                if (isEmpty(c.prix50cl)  && !isEmpty(preset.prix50cl))  { c.prix50cl  = preset.prix50cl;  changedPrix++; }
+                if (isEmpty(c.prix100cl) && !isEmpty(preset.prix100cl)) { c.prix100cl = preset.prix100cl; changedPrix++; }
             }
         });
         if (changedKey + changedPrix > 0) {
@@ -2730,6 +2732,7 @@ const showCommandeModal = (id = null) => {
                         <select name="ponctuelTarif" onchange="updateCommandeTotalModal()">
                             <option value="prive">Privé (3.– / 5.– / 8.50)</option>
                             <option value="distributeur">Distributeur (2.25 / 3.80 / 6.–)</option>
+                            <option value="restaurant">Restaurant (litre 4.–)</option>
                         </select>
                     </div>
                 </div>
@@ -6183,12 +6186,10 @@ const addIngredient = () => {
 
     const div = document.createElement('div');
     div.className = 'ingredient-row';
-    div.style.display = 'flex';
-    div.style.gap = '8px';
     div.innerHTML = `
-        <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" list="ingredientSuggestions" required style="flex: 2;">
-        <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" required style="flex: 1;">
-        <input type="text" name="ingredients[${index}][unite]" placeholder="Unité" required style="flex: 1;">
+        <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" list="ingredientSuggestions" required>
+        <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" required>
+        <input type="text" name="ingredients[${index}][unite]" placeholder="Unité" required>
         <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
     `;
     container.appendChild(div);
@@ -6348,7 +6349,8 @@ const showClientModal = (id = null) => {
                             return `
                             <option value="custom" ${cat === 'custom' ? 'selected' : ''}>Personnalisé</option>
                             <option value="distributeur" ${cat === 'distributeur' ? 'selected' : ''}>Distributeur (2.25 / 3.80 / 6.–)</option>
-                            <option value="prive" ${cat === 'prive' ? 'selected' : ''}>Privé (3.– / 5.– / 8.50)</option>`;
+                            <option value="prive" ${cat === 'prive' ? 'selected' : ''}>Privé (3.– / 5.– / 8.50)</option>
+                            <option value="restaurant" ${cat === 'restaurant' ? 'selected' : ''}>Restaurant (litre 4.–)</option>`;
                         })()}
                     </select>
                 </div>
