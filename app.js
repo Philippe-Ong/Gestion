@@ -1000,13 +1000,18 @@ const renderDashboard = () => {
     const employes = DB.get('employees') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    
+
     const today = new Date();
     const todayStr = getLocalDateISOString();
     const oneMonthFromNow = new Date();
     oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
-    
-    const totalBouteilles = lots.reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const inSevenDays = new Date();
+    inSevenDays.setDate(inSevenDays.getDate() + 7);
+    const inThreeDays = new Date();
+    inThreeDays.setDate(inThreeDays.getDate() + 3);
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
     const expiries = lots.filter(lot => lot.dlc && new Date(lot.dlc) < today).length;
     const moinsUnMois = lots.filter(lot => {
         if (!lot.dlc) return false;
@@ -1014,14 +1019,16 @@ const renderDashboard = () => {
         return dlc >= today && dlc <= oneMonthFromNow;
     }).length;
     const sellableBottles = lots.filter(lot => lot.dlc && new Date(lot.dlc) >= today).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
-    const inventaire = DB.get('inventaire') || [];
-    const stockBas = inventaire.filter(item => item.seuilAlerte && (item.quantite || 0) <= item.seuilAlerte).length;
-    
-    const commandesEnAttente = commandes.filter(c => c.statut === 'en_attente').length;
-    const commandesProduites = commandes.filter(c => c.statut === 'produite').length;
+
+    // Stock produit ces 7 derniers jours
+    const stockLast7Days = lots
+        .filter(lot => lot.dateProduction && new Date(lot.dateProduction) >= sevenDaysAgo)
+        .reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+
+    const commandesEnAttente = commandes.filter(c => c.statut === 'en_attente');
+    const commandesUrgentes = commandesEnAttente.filter(c => c.dateLivraison && new Date(c.dateLivraison) <= inThreeDays).length;
 
     const commandesPeriode = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
-
     const stockDisponible = calculateAvailableStock(lots, today);
 
     const besoins = {};
@@ -1050,159 +1057,145 @@ const renderDashboard = () => {
     }).filter(b => b.aProduire > 0).sort((a, b) => b.aProduire - a.aProduire);
 
     const totalBouteillesAProduire = bouteillesAProduire.reduce((sum, b) => sum + b.aProduire, 0);
-    const actionsPrioritaires = [
-        commandesProduites > 0 ? {
-            label: `${commandesProduites} commande(s) prête(s) à livrer`,
-            meta: 'Ouvrir les commandes produites',
+
+    // Pointage du jour : a-t-on déjà pointé ? (premier pointage du patron / actif)
+    const pointagesAujourdhui = pointages.filter(p => p.date === todayStr);
+    const heuresAujourdhui = pointagesAujourdhui.reduce((sum, p) => {
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = parseHHMM(p.heureFin);
+        if (debutMin === null || finMin === null) return sum;
+        const pause = parseInt(p.pause, 10) || 0;
+        const minutes = (finMin - debutMin) - pause;
+        return sum + (minutes > 0 ? minutes / 60 : 0);
+    }, 0);
+
+    // Card hero pointage : on affiche l'heure actuelle + statut
+    const currentTime = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
+    const pointageSubtext = pointagesAujourdhui.length === 0
+        ? 'Pas encore pointé aujourd\'hui'
+        : `${pointagesAujourdhui.length} pointage${pointagesAujourdhui.length > 1 ? 's' : ''} • ${heuresAujourdhui.toFixed(1)}h`;
+
+    // 3 todos dynamiques selon l'état des données
+    const todos = [];
+    if (commandesUrgentes > 0) {
+        todos.push({
+            label: `${commandesUrgentes} commande${commandesUrgentes > 1 ? 's' : ''} urgente${commandesUrgentes > 1 ? 's' : ''} (≤ 3 jours)`,
             href: '#commandes',
-            onclick: "DB.setFilter('statut', 'produite')"
-        } : null,
-        commandesEnAttente > 0 ? {
-            label: `${commandesEnAttente} commande(s) en attente`,
-            meta: 'Vérifier le stock et produire',
-            href: '#commandes',
-            onclick: "DB.setFilter('statut', 'en_attente')"
-        } : null,
-        totalBouteillesAProduire > 0 ? {
-            label: `${totalBouteillesAProduire} bouteille(s) à produire`,
-            meta: 'Ouvrir le planificateur',
-            href: '#production'
-        } : null,
-        moinsUnMois > 0 ? {
-            label: `${moinsUnMois} lot(s) bientôt en DLC`,
-            meta: 'Consulter le stock',
-            href: '#stock'
-        } : null,
-        stockBas > 0 ? {
-            label: `${stockBas} item(s) d'inventaire en alerte`,
-            meta: 'Réapprovisionner',
-            href: '#inventaire',
-            onclick: "DB.setFilter('inventaire_type', 'alerte')"
-        } : null
-    ].filter(Boolean).slice(0, 5);
-    
-    const heuresAujourdhui = pointages
-        .filter(p => p.date === todayStr)
-        .reduce((sum, p) => {
-            const debutMin = parseHHMM(p.heureDebut);
-            const finMin = parseHHMM(p.heureFin);
-            if (debutMin === null || finMin === null) return sum;
-            const pause = parseInt(p.pause, 10) || 0;
-            const minutes = (finMin - debutMin) - pause;
-            return sum + (minutes > 0 ? minutes / 60 : 0);
-        }, 0);
+            done: false
+        });
+    }
+    if (expiries > 0) {
+        todos.push({
+            label: `${expiries} lot${expiries > 1 ? 's' : ''} expiré${expiries > 1 ? 's' : ''} à retirer`,
+            href: '#stock',
+            done: false
+        });
+    }
+    if (pointagesAujourdhui.length === 0) {
+        todos.push({ label: 'Pointer ton arrivée', href: '#pointage', done: false });
+    } else {
+        todos.push({ label: 'Pointage du jour enregistré', href: '#pointage', done: true });
+    }
+    if (totalBouteillesAProduire > 0 && todos.length < 3) {
+        todos.push({
+            label: `Planifier ${totalBouteillesAProduire} bouteille${totalBouteillesAProduire > 1 ? 's' : ''} à produire`,
+            href: '#production',
+            done: false
+        });
+    }
+    if (moinsUnMois > 0 && todos.length < 3) {
+        todos.push({
+            label: `${moinsUnMois} lot${moinsUnMois > 1 ? 's' : ''} DLC < 1 mois`,
+            href: '#stock',
+            done: false
+        });
+    }
+    while (todos.length < 3) {
+        todos.push({ label: 'Tout est en ordre 👌', href: '#dashboard', done: true });
+    }
+    const top3Todos = todos.slice(0, 3);
+
+    const showAlert = expiries > 0 || moinsUnMois > 0;
 
     safeRender(`
-        <div class="dashboard-hero">
-            <div class="dashboard-hero-label">${today.toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</div>
-            <h2 class="dashboard-hero-title">${today.getHours() < 12 ? 'Bonjour' : today.getHours() < 18 ? 'Bon après-midi' : 'Bonsoir'}</h2>
-            <div class="dashboard-hero-sub">
-                ${commandesEnAttente > 0 ? `${commandesEnAttente} commande${commandesEnAttente > 1 ? 's' : ''} en attente` : 'Aucune commande en attente'}
-                ${totalBouteillesAProduire > 0 ? ` - ${totalBouteillesAProduire} bouteille${totalBouteillesAProduire > 1 ? 's' : ''} à produire` : ''}
-                ${heuresAujourdhui > 0 ? ` - ${heuresAujourdhui.toFixed(1)}h pointées` : ''}
-            </div>
-            <div class="dashboard-hero-actions">
-                <button type="button" class="btn" onclick="showCommandeModal()">Nouvelle commande</button>
-                <a href="#pointage" class="btn btn-ghost">Pointer</a>
-                <button type="button" class="btn btn-ghost" onclick="showNouveauLotModal()">Nouveau lot</button>
-            </div>
+        <div class="page-header-big">
+            <h1>Aujourd'hui</h1>
+            <div class="header-subtext">${formatDate(today)}</div>
         </div>
 
-        <div class="stats-grid">
-            <a href="#stock" class="stat-card stat-link">
-                <div class="stat-icon green">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                </div>
-                <div class="stat-content">
-                    <h3>${sellableBottles}</h3>
-                    <p>Bouteilles vendables</p>
-                </div>
-            </a>
-            <a href="#stock" class="stat-card stat-link">
-                <div class="stat-icon orange">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                </div>
-                <div class="stat-content">
-                    <h3>${totalBouteilles}</h3>
-                    <p>Total bouteilles</p>
-                </div>
-            </a>
-            <a href="#stock" class="stat-card stat-link">
-                <div class="stat-icon red">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-                </div>
-                <div class="stat-content">
-                    <h3>${expiries}</h3>
-                    <p>Expirés (DLC)</p>
-                </div>
-            </a>
-            <a href="#commandes" class="stat-card stat-link" onclick="DB.setFilter('statut', 'en_attente')">
-                <div class="stat-icon blue">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/></svg>
-                </div>
-                <div class="stat-content">
-                    <h3>${commandesEnAttente}</h3>
-                    <p>Commandes en attente</p>
-                </div>
+        <div class="card card--hero-dark dash-hero-pointage" style="margin-bottom: 16px;">
+            <div class="section-label">POINTAGE</div>
+            <div class="dash-hero-time">${currentTime}</div>
+            <div class="dash-hero-subtext">${pointageSubtext}</div>
+            <a href="#pointage" class="dash-hero-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                ${pointagesAujourdhui.length === 0 ? 'Pointer mon arrivée' : 'Voir mes pointages'}
             </a>
         </div>
 
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">À traiter maintenant</h3>
+        <div class="card" style="margin-bottom: 16px;">
+            <div class="card-header" style="margin-bottom: 8px; padding-bottom: 0; border: none;">
+                <h3 class="card-title">3 choses à faire</h3>
             </div>
-            ${actionsPrioritaires.length === 0 ? renderEmptyState('Aucune action urgente pour le moment.', '<a href="#commandes" class="btn btn-primary">Créer une commande</a>') : `
-                <div class="priority-list">
-                    ${actionsPrioritaires.map(action => `
-                        <a class="priority-item" href="${action.href}" ${action.onclick ? `onclick="${action.onclick}"` : ''}>
-                            <strong>${escapeHtml(action.label)}</strong>
-                            <span>${escapeHtml(action.meta)}</span>
-                        </a>
-                    `).join('')}
-                </div>
-            `}
+            <div class="dash-todo-list">
+                ${top3Todos.map(t => `
+                    <a href="${t.href}" class="dash-todo-item ${t.done ? 'done' : ''}">
+                        <span class="dash-todo-check"></span>
+                        <span class="dash-todo-label">${escapeHtml(t.label)}</span>
+                        <span class="dash-todo-arrow">›</span>
+                    </a>
+                `).join('')}
+            </div>
         </div>
+
+        <div class="dash-kpi-grid">
+            <a href="#stock" class="dash-kpi-card">
+                <div class="dash-kpi-label">Stock vendable</div>
+                <div class="dash-kpi-value">${sellableBottles}</div>
+                <div class="dash-kpi-sub">${stockLast7Days > 0 ? `↑ +${stockLast7Days} cette semaine` : 'aucune prod cette semaine'}</div>
+            </a>
+            <a href="#commandes" class="dash-kpi-card">
+                <div class="dash-kpi-label">Commandes</div>
+                <div class="dash-kpi-value">${commandesEnAttente.length}</div>
+                <div class="dash-kpi-sub ${commandesUrgentes > 0 ? 'urgent' : ''}">${commandesUrgentes > 0 ? `${commandesUrgentes} urgente${commandesUrgentes > 1 ? 's' : ''}` : 'en attente'}</div>
+            </a>
+        </div>
+
+        ${showAlert ? `
+            <a href="#stock" class="dash-alert">
+                <span class="dash-alert-icon">⚠️</span>
+                <div class="dash-alert-text">
+                    <strong>Stock à vérifier</strong>
+                    ${expiries > 0 ? `${expiries} expiré${expiries > 1 ? 's' : ''}` : ''}${expiries > 0 && moinsUnMois > 0 ? ' • ' : ''}${moinsUnMois > 0 ? `${moinsUnMois} DLC < 1 mois` : ''}
+                </div>
+                <span class="dash-todo-arrow">›</span>
+            </a>
+        ` : ''}
 
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Bouteilles à produire</h3>
+                ${totalBouteillesAProduire > 0 ? `<a href="#production" class="btn btn-sm btn-ghost">Voir tout</a>` : ''}
             </div>
-            ${bouteillesAProduire.length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : `
-                ${bouteillesAProduire.map((b, index) => {
+            ${bouteillesAProduire.length === 0 ? '<p style="color: var(--text-light); font-size: 13px;">Tout le stock est disponible ✓</p>' : `
+                ${bouteillesAProduire.slice(0, 5).map((b, index, arr) => {
                     const arome = aromes.find(a => a.id === b.aromeId);
                     const format = formats.find(f => f.id === b.formatId);
                     const formatLitres = format?.contenanceCl ? `${(format.contenanceCl / 100).toFixed(2).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')}l` : b.formatNom;
-                    return `<div class="flex-between" style="padding: 12px 0; ${index < bouteillesAProduire.length - 1 ? 'border-bottom: 1px solid var(--border-light);' : ''}">
-                        <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${b.aromeNom} ${formatLitres}</span>
+                    return `<div class="flex-between" style="padding: 10px 0; ${index < arr.length - 1 ? 'border-bottom: 1px solid var(--border-light);' : ''}">
+                        <span style="display: inline-flex; align-items: center; gap: 8px;"><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}; width: 10px; height: 10px; border-radius: 50%; display: inline-block;"></span>${escapeHtml(b.aromeNom)} ${escapeHtml(formatLitres)}</span>
                         <div style="text-align: right;">
-                            <div style="font-size: 12px; color: var(--text-muted);">Stock: ${b.disponible} bt</div>
-                            <strong>À produire: ${b.aProduire} bt</strong>
+                            <div style="font-size: 12px; color: var(--text-light);">Stock : ${b.disponible}</div>
+                            <strong style="color: var(--primary);">À produire : ${b.aProduire}</strong>
                         </div>
                     </div>`;
                 }).join('')}
+                ${bouteillesAProduire.length > 5 ? `<div style="text-align: center; padding-top: 10px;"><a href="#production" style="color: var(--primary); font-size: 12px; text-decoration: none;">+ ${bouteillesAProduire.length - 5} autres</a></div>` : ''}
                 <div class="flex-between" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-light);">
-                    <strong>Total: ${totalBouteillesAProduire} bt</strong>
-                    <a href="#production" class="btn btn-sm btn-secondary">Voir la production</a>
+                    <strong>Total : ${totalBouteillesAProduire} bt</strong>
+                    <a href="#production" class="btn btn-sm btn-primary">Planifier</a>
                 </div>
             `}
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Actions rapides</h3>
-            </div>
-            <div class="flex gap-4">
-                <button type="button" class="btn btn-primary" onclick="showNouveauLotModal()">Nouveau lot</button>
-                <a href="#pointage" class="btn btn-secondary">Pointer</a>
-                <button type="button" class="btn btn-secondary" onclick="showCommandeModal()">Nouvelle commande</button>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Heures aujourd'hui</h3>
-            </div>
-            <p>Total: <strong>${heuresAujourdhui.toFixed(1)}h</strong></p>
         </div>
     `);
 };
@@ -1229,73 +1222,141 @@ const renderStock = () => {
     const lots = DB.get('lots') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    const savedFilterArome = DB.getFilter('stock_arome');
-    const savedFilterFormat = DB.getFilter('stock_format');
-    const savedStockSearch = DB.getFilter('stock_search');
-    const savedFilterStockArome = DB.getFilter('stockArome') || '';
-    const savedFilterStockFormat = DB.getFilter('stockFormat') || '';
-    const savedFilterStockStatut = DB.getFilter('stockStatut') || '';
-    
+
     const today = new Date();
-    const oneMonthFromNow = new Date();
-    oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
-    
-    const totalBouteilles = lots.reduce((sum, lot) => sum + (lot.quantite || 0), 0);
-    const expiries = lots.filter(lot => lot.dlc && new Date(lot.dlc) < today).length;
-    const moinsUnMois = lots.filter(lot => {
-        if (!lot.dlc) return false;
-        const dlc = new Date(lot.dlc);
-        return dlc >= today && dlc <= oneMonthFromNow;
-    }).length;
-    const sellableBottles = lots.filter(lot => lot.dlc && new Date(lot.dlc) >= today).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
-    const filteredLots = lots.filter(lot => {
-        const searchText = `${lot.id || ''} ${lot.arome || ''} ${lot.format || ''} ${lot.dateProduction || ''} ${lot.dlv || ''} ${lot.dlc || ''}`;
-        return (!savedFilterArome || lot.arome === savedFilterArome) &&
-               (!savedFilterFormat || lot.format === savedFilterFormat) &&
-               (!savedFilterStockArome || lot.arome === savedFilterStockArome) &&
-               (!savedFilterStockFormat || lot.format === savedFilterStockFormat) &&
-               (!savedFilterStockStatut || getStatus(lot.dlc) === savedFilterStockStatut) &&
-               includesText(searchText, savedStockSearch);
+
+    const savedQuery  = (DB.getFilter('stockQuery')  || '').toString().toLowerCase().trim();
+    const savedArome  = DB.getFilter('stockArome')  || '';
+    const savedFormat = DB.getFilter('stockFormat') || '';
+    const savedStatut = DB.getFilter('stockStatut') || '';
+
+    const sellableBottles = lots
+        .filter(lot => lot.dlc && new Date(lot.dlc) >= today)
+        .reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+
+    const sellableByAroma = {};
+    aromes.filter(a => a.actif).forEach(a => { sellableByAroma[a.nom] = 0; });
+    lots.forEach(lot => {
+        if (!lot.dlc || new Date(lot.dlc) < today) return;
+        if (sellableByAroma[lot.arome] !== undefined) {
+            sellableByAroma[lot.arome] += (lot.quantite || 0);
+        }
     });
-    
-    let html = `
-        <div class="stats-grid" style="margin-bottom: 24px;">
-            <div class="stat-card">
-                <div class="stat-icon green">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+
+    const filteredLots = lots.filter(lot => {
+        if (savedArome  && lot.arome  !== savedArome)  return false;
+        if (savedFormat && lot.format !== savedFormat) return false;
+        if (savedStatut) {
+            const st = getStatus(lot.dlc);
+            if (st !== savedStatut) return false;
+        }
+        if (savedQuery) {
+            const hay = `${lot.id || ''} ${lot.arome || ''} ${lot.format || ''} ${lot.quantite || ''}`.toLowerCase();
+            if (!hay.includes(savedQuery)) return false;
+        }
+        return true;
+    }).sort((a, b) => new Date(b.dateProduction || 0) - new Date(a.dateProduction || 0));
+
+    const tileAromas = aromes.filter(a => a.actif);
+    const formatsActifs = formats.filter(f => f.actif);
+
+    const aromaTilesHtml = `
+        <a href="#stock" class="aroma-tile aroma-all ${!savedArome ? 'active' : ''}" onclick="event.preventDefault(); toggleStockAromeFilter(''); return false;">
+            <div class="aroma-tile-header"><span class="aroma-tile-dot"></span><span class="aroma-tile-name">Tous</span></div>
+            <div class="aroma-tile-value">${sellableBottles}</div>
+            <div class="aroma-tile-sub">btl vendables</div>
+        </a>
+        ${tileAromas.map(a => `
+            <a href="#stock" class="aroma-tile ${savedArome === a.nom ? 'active' : ''}"
+               onclick="event.preventDefault(); toggleStockAromeFilter('${escapeHtml(a.nom).replace(/'/g, '\\\'')}'); return false;">
+                <div class="aroma-tile-header">
+                    <span class="aroma-tile-dot" style="background:${escapeHtml(a.couleur || '#ccc')}"></span>
+                    <span class="aroma-tile-name">${escapeHtml(a.nom)}</span>
                 </div>
-                <div class="stat-content">
-                    <h3>${sellableBottles}</h3>
-                    <p>Bouteilles vendables</p>
+                <div class="aroma-tile-value">${sellableByAroma[a.nom] || 0}</div>
+                <div class="aroma-tile-sub">btl vendables</div>
+            </a>
+        `).join('')}
+    `;
+
+    const fmtPill = (val, label) => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" onclick="toggleStockFormatFilter('${escapeHtml(val).replace(/'/g, '\\\'')}')">${escapeHtml(label)}</button>`;
+    const statPill = (val, label) => `<button type="button" class="status-pill ${savedStatut === val ? 'active' : ''}" onclick="toggleStockStatutFilter('${val}')">${escapeHtml(label)}</button>`;
+
+    const lotCardsHtml = filteredLots.length === 0
+        ? '<div class="commande-empty">Aucun lot ne correspond aux filtres</div>'
+        : filteredLots.map(lot => {
+            const arome = aromes.find(a => a.nom === lot.arome);
+            const status = getStatus(lot.dlc);
+            const badgeClass = status === 'expired' ? 'badge-expire' : status === 'warning' ? 'badge-bientot' : 'badge-ok';
+            const statusLabel = status === 'expired' ? 'Expiré' : status === 'warning' ? '< 1 mois' : 'OK';
+            return `<div class="lot-card lot-status-${status}">
+                <div class="lot-card-header">
+                    <span class="lot-card-numero">#${escapeHtml(String(lot.id).padStart(6, '0'))}</span>
+                    <span class="badge ${badgeClass}">${statusLabel}</span>
                 </div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon orange">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <div class="lot-card-aroma">
+                    <span class="aroma-tile-dot" style="background:${escapeHtml(arome?.couleur || '#ccc')}"></span>
+                    <span class="lot-card-aroma-name">${escapeHtml(lot.arome || '?')}</span>
+                    <span class="lot-card-aroma-format">• ${escapeHtml(lot.format || '?')}</span>
                 </div>
-                <div class="stat-content">
-                    <h3>${totalBouteilles}</h3>
-                    <p>Total bouteilles</p>
+                <div class="lot-card-meta">
+                    <span><strong class="lot-card-qty">${lot.quantite}</strong> bt</span>
+                    <span>Prod. <strong>${formatDate(lot.dateProduction)}</strong></span>
+                    <span>DLC <strong>${formatDate(lot.dlc)}</strong></span>
                 </div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon red">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+                <div class="lot-card-actions">
+                    ${status !== 'expired' ? `<button class="btn btn-sm btn-success" onclick="showVendreModal('${lot.id}')">Vendre</button>` : ''}
+                    <button class="btn btn-sm btn-ghost" onclick="showEditLotModal('${lot.id}')">Modifier</button>
+                    <button class="btn btn-sm btn-ghost" style="color: var(--danger);" onclick="deleteLot('${lot.id}')">Supprimer</button>
                 </div>
-                <div class="stat-content">
-                    <h3>${expiries}</h3>
-                    <p>Expirés (DLC)</p>
-                </div>
-            </div>
+            </div>`;
+        }).join('');
+
+    const html = `
+        <div class="commandes-toolbar">
+            <h1>Stock</h1>
+            <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
         </div>
-        
-        ${renderSellableSummary(lots, aromes, formats, today)}
-        
-        <div class="card" style="margin-bottom: 24px;">
-            <button type="button" class="btn-bare" onclick="toggleHistory()" aria-expanded="false" aria-controls="historyContent">
-                <span id="historyArrow" style="font-size:12px;">▶</span> Historique de production
+
+        <div class="stock-search">
+            <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="search"
+                   placeholder="Rechercher un lot, arôme, format…"
+                   value="${escapeHtml(savedQuery)}"
+                   oninput="DB.setFilter('stockQuery', this.value); renderStock(); document.querySelector('.stock-search input')?.focus();">
+        </div>
+
+        <div class="aroma-tile-grid">
+            ${aromaTilesHtml}
+        </div>
+
+        ${formatsActifs.length > 0 ? `
+            <div class="stock-pills-row">
+                <span class="stock-pills-label">Format :</span>
+                <button type="button" class="status-pill ${!savedFormat ? 'active' : ''}" onclick="toggleStockFormatFilter('')">Tous</button>
+                ${formatsActifs.map(f => fmtPill(f.nom, f.nom)).join('')}
+            </div>
+        ` : ''}
+
+        <div class="stock-pills-row">
+            <span class="stock-pills-label">DLC :</span>
+            <button type="button" class="status-pill ${!savedStatut ? 'active' : ''}" onclick="toggleStockStatutFilter('')">Tous</button>
+            ${statPill('ok', 'OK')}
+            ${statPill('warning', '< 1 mois')}
+            ${statPill('expired', 'Expiré')}
+        </div>
+
+        <div class="commande-section" style="padding: 0; background: transparent; border: none; box-shadow: none;">
+            <div class="commande-section-title" style="padding: 0 4px;">Lots récents</div>
+            ${lotCardsHtml}
+        </div>
+
+        <div class="card" style="margin-top: 16px;">
+            <button type="button" class="btn-bare" onclick="toggleHistory()" aria-expanded="false" aria-controls="historyContent" style="width:100%; text-align:left; display:flex; justify-content:space-between; align-items:center;">
+                <span><span id="historyArrow" style="font-size:12px;">▶</span> Historique de production</span>
+                <span style="font-size: 12px; color: var(--text-light);">${lots.length} lots</span>
             </button>
-            <div id="historyContent" style="display:none;margin-top:16px;">
+            <div id="historyContent" style="display:none;margin-top:12px;">
                 <div class="table-container" style="max-height:300px;overflow-y:auto;">
                     <table>
                         <thead>
@@ -1316,100 +1377,9 @@ const renderStock = () => {
                 </div>
             </div>
         </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Stock</h3>
-                <button class="btn btn-primary" onclick="showNouveauLotModal()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                    Nouveau lot
-                </button>
-            </div>
-            
-            <div class="filters">
-                <input type="search" id="filterStockSearch" placeholder="Rechercher lot, arôme, DLC..." value="${escapeHtml(savedStockSearch)}" oninput="DB.setFilter('stock_search', this.value); window.__focusStockSearch = true; renderStock()">
-                <select id="filterArome" onchange="DB.setFilter('stock_arome', this.value); renderStock()">
-                    <option value="">Tous les arômes</option>
-                    ${aromes.filter(a => a.actif).map(a => `<option value="${escapeHtml(a.nom)}" ${savedFilterArome === a.nom ? 'selected' : ''}>${escapeHtml(a.nom)}</option>`).join('')}
-                </select>
-                <select id="filterFormat" onchange="DB.setFilter('stock_format', this.value); renderStock()">
-                    <option value="">Tous les formats</option>
-                    ${formats.filter(f => f.actif).map(f => `<option value="${escapeHtml(f.nom)}" ${savedFilterFormat === f.nom ? 'selected' : ''}>${escapeHtml(f.nom)}</option>`).join('')}
-                </select>
-                ${(savedFilterArome || savedFilterFormat || savedStockSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('stock_arome', ''); DB.setFilter('stock_format', ''); DB.setFilter('stock_search', ''); renderStock()">Réinitialiser</button>` : ''}
-            </div>
-            
-            <div class="stock-pills-row" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">
-                <span style="font-size:12px;color:var(--text-light);">Format :</span>
-                <button type="button" class="status-pill ${!savedFilterStockFormat ? 'active' : ''}" onclick="toggleStockFormatFilter('')">Tous</button>
-                ${formats.filter(f => f.actif).map(f => `<button type="button" class="status-pill ${savedFilterStockFormat === f.nom ? 'active' : ''}" onclick="toggleStockFormatFilter('${escapeHtml(f.nom).replace(/'/g, '\\\'')}')">${escapeHtml(f.nom)}</button>`).join('')}
-            </div>
-            
-            <div class="stock-pills-row" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">
-                <span style="font-size:12px;color:var(--text-light);">DLC :</span>
-                <button type="button" class="status-pill ${!savedFilterStockStatut ? 'active' : ''}" onclick="toggleStockStatutFilter('')">Tous</button>
-                <button type="button" class="status-pill ${savedFilterStockStatut === 'ok' ? 'active' : ''}" onclick="toggleStockStatutFilter('ok')">OK</button>
-                <button type="button" class="status-pill ${savedFilterStockStatut === 'warning' ? 'active' : ''}" onclick="toggleStockStatutFilter('warning')">&lt; 1 mois</button>
-                <button type="button" class="status-pill ${savedFilterStockStatut === 'expired' ? 'active' : ''}" onclick="toggleStockStatutFilter('expired')">Expiré</button>
-            </div>
-            
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Lot</th>
-                            <th>Arôme</th>
-                            <th>Format</th>
-                            <th>Qté</th>
-                            <th>Prod.</th>
-                            <th>DLV</th>
-                            <th>DLC</th>
-                            <th>Statut</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${filteredLots.length === 0 ? `<tr><td colspan="9">${renderEmptyState('Aucun lot trouvé.', '<button class="btn btn-primary" onclick="showNouveauLotModal()">Créer un lot</button>')}</td></tr>` :
-                          filteredLots.map(lot => {
-                              const arome = aromes.find(a => a.nom === lot.arome);
-                              const status = getStatus(lot.dlc);
-                              const statusBadge = status === 'expired' ? '<span class="badge badge-danger">Expiré</span>' : 
-                                                  status === 'warning' ? '<span class="badge badge-warning">&lt; 1 mois</span>' : 
-                                                  '<span class="badge badge-success">OK</span>';
-                              
-                              return `
-                                <tr>
-                                    <td>#${String(lot.id).padStart(6, '0')}</td>
-                                    <td><span class="color-dot" style="background: ${escapeHtml(arome?.couleur || '#ccc')}"></span>${escapeHtml(lot.arome)}</td>
-                                    <td>${escapeHtml(lot.format)}</td>
-                                    <td><span id="qty-${lot.id}">${lot.quantite}</span></td>
-                                    <td>${formatDate(lot.dateProduction)}</td>
-                                    <td>${formatDate(lot.dlv)}</td>
-                                    <td>${formatDate(lot.dlc)}</td>
-                                    <td>${statusBadge}</td>
-                                    <td class="table-actions">
-                                        <button class="btn btn-sm btn-success" onclick="showVendreModal('${lot.id}')">Vendre</button>
-                                        <button class="btn btn-sm btn-secondary" onclick="showEditLotModal('${lot.id}')">Modifier</button>
-                                        <button class="btn btn-sm btn-danger" onclick="deleteLot('${lot.id}')">Supprimer</button>
-                                    </td>
-                                </tr>
-                              `;
-                          }).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>
     `;
-    
+
     safeRender(html);
-    if (window.__focusStockSearch) {
-        const input = document.getElementById('filterStockSearch');
-        if (input) {
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-        }
-        window.__focusStockSearch = false;
-    }
 };
 
 const showNouveauLotModal = () => {
@@ -1925,332 +1895,179 @@ const refreshPointageHistoriqueModal = () => {
 };
 
 // Pointage view
-const renderPointage = (tab = 'pointage') => {
+const renderPointage = (_tabIgnored) => {
+    // Backward-compat : si renderPointage est appelé avec 'historique'/'stats'/'employes' (anciens onglets),
+    // on ignore et on affiche la single-page. Les anciennes fonctionnalités sont accessibles via les modals.
     const pointages = DB.get('pointages') || [];
     const employes = DB.get('employees') || [];
     const today = getLocalDateISOString();
-    
+
+    // Nettoyer l'ancien interval pour ne pas en accumuler
+    if (pointageClockInterval) {
+        clearInterval(pointageClockInterval);
+        pointageClockInterval = null;
+    }
+
     const currentTime = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
-    
-    let html = `
-        <div class="tabs">
-            <button class="tab ${tab === 'pointage' ? 'active' : ''}" onclick="renderPointage('pointage')">Pointage</button>
-            <button class="tab ${tab === 'historique' ? 'active' : ''}" onclick="renderPointage('historique')">Historique</button>
-            <button class="tab ${tab === 'stats' ? 'active' : ''}" onclick="renderPointage('stats')">Stats</button>
-            <button class="tab ${tab === 'employes' ? 'active' : ''}" onclick="renderPointage('employes')">Employés</button>
+    const dateTxt = new Date().toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long' });
+
+    const employesActifs = employes.filter(e => e.actif);
+
+    // Auto-sélectionner le premier employé actif si rien n'est sélectionné ou que l'employé sélectionné n'existe plus
+    if (!pointageSelectedEmployeId || !employesActifs.some(e => e.id === pointageSelectedEmployeId)) {
+        pointageSelectedEmployeId = employesActifs[0]?.id || null;
+    }
+
+    // Pointages du jour, indexés par employé pour détecter le "live" (pas de heureFin) ou état du jour
+    const pointagesAujourdhui = pointages.filter(p => p.date === today);
+    const pointageEnCoursParEmp = {};
+    pointagesAujourdhui.forEach(p => {
+        if (!p.heureFin) pointageEnCoursParEmp[p.employeId] = p;
+    });
+
+    const selectedEmpId = pointageSelectedEmployeId;
+    const selectedEmp = employesActifs.find(e => e.id === selectedEmpId);
+    const pointageEnCours = selectedEmpId ? pointageEnCoursParEmp[selectedEmpId] : null;
+    const dejaArrive = !!pointageEnCours;
+
+    const initiales = (e) => {
+        if (!e) return '?';
+        const p = (e.prenom || '').trim();
+        const n = (e.nom || '').trim();
+        return ((p[0] || '') + (n[0] || '')).toUpperCase() || '?';
+    };
+
+    // Historique du jour : pointages déjà terminés (avec heureFin), triés par heure de début
+    const historiqueJour = pointagesAujourdhui
+        .slice()
+        .sort((a, b) => (a.heureDebut || '').localeCompare(b.heureDebut || ''));
+
+    safeRender(`
+        <div class="page-header-big">
+            <h1>Pointage</h1>
         </div>
-    `;
-    
-    if (tab === 'pointage') {
-        const employesActifs = employes.filter(e => e.actif);
-        // Auto-sélectionner le premier employé actif si rien n'est sélectionné ou que l'employé sélectionné n'existe plus
-        if (!pointageSelectedEmployeId || !employesActifs.some(e => e.id === pointageSelectedEmployeId)) {
-            pointageSelectedEmployeId = employesActifs[0]?.id || null;
-        }
-        const todayPointages = pointages.filter(p => p.date === today);
-        const pointageEnCoursParEmp = {};
-        todayPointages.forEach(p => { if (!p.heureFin) pointageEnCoursParEmp[p.employeId] = p; });
-        const selectedEmpId = pointageSelectedEmployeId;
-        const pointageEnCours = selectedEmpId ? pointageEnCoursParEmp[selectedEmpId] : null;
-        const dejaArrive = !!pointageEnCours;
-        const initiales = (e) => {
-            if (!e) return '?';
-            const p = (e.prenom || '').trim();
-            const n = (e.nom || '').trim();
-            return ((p[0] || '') + (n[0] || '')).toUpperCase() || '?';
-        };
-        const todayHeures = todayPointages.reduce((sum, p) => {
-            const debutMin = parseHHMM(p.heureDebut);
-            const finMin = parseHHMM(p.heureFin);
-            if (debutMin === null || finMin === null) return sum;
-            const pause = parseInt(p.pause, 10) || 0;
-            const minutes = (finMin - debutMin) - pause;
-            return sum + (minutes > 0 ? minutes / 60 : 0);
-        }, 0);
-        const hour = new Date().getHours();
-        const greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir';
-        html += `
-            <div class="pointage-actions" style="display:flex; gap:8px; margin-bottom:12px;">
-                <button type="button" class="btn btn-arrivee" ${dejaArrive || !selectedEmpId ? 'disabled' : ''} onclick="pointageQuickArrivee()" style="flex:1;">▶ Arrivée</button>
-                <button type="button" class="btn btn-depart" ${!dejaArrive ? 'disabled' : ''} onclick="pointageQuickDepart()" style="flex:1;">⏹ Départ</button>
-            </div>
 
-            <div class="card" style="margin-bottom:12px;">
-                <div class="card-header" style="margin-bottom: 8px; padding-bottom: 0; border: none;">
-                    <h3 class="card-title">Qui pointe ?</h3>
-                </div>
-                ${employesActifs.length === 0 ? '<p style="color: var(--text-light);">Aucun employé actif. Ajoute-en depuis Paramètres.</p>' : `
-                    <div class="employee-grid">
-                        ${employesActifs.map(e => {
-                            const isSelected = e.id === selectedEmpId;
-                            const isLive = !!pointageEnCoursParEmp[e.id];
-                            return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" onclick="event.preventDefault(); pointageSelectEmployee('${e.id}'); return false;">
-                                <div class="avatar ${isLive ? 'avatar-live' : ''}">${escapeHtml(initiales(e))}</div>
-                                <div>
-                                    <div class="employee-name">${escapeHtml(e.prenom)} ${escapeHtml(e.nom || '')}</div>
-                                    <div class="employee-sub">${isLive ? '● en cours' : 'libre'}</div>
-                                </div>
-                            </a>`;
-                        }).join('')}
-                    </div>
-                `}
+        <div class="pointage-hero">
+            <div class="section-label">${selectedEmp ? escapeHtml(selectedEmp.prenom + ' ' + (selectedEmp.nom || '')) : 'Aucun employé sélectionné'}</div>
+            <div class="pointage-clock-big current-time">${currentTime}</div>
+            <div class="pointage-date">${escapeHtml(dateTxt)}</div>
+            <div class="pointage-actions">
+                <button type="button" class="btn btn-arrivee" ${dejaArrive || !selectedEmp ? 'disabled' : ''} onclick="pointageQuickArrivee()">
+                    ▶ Arrivée
+                </button>
+                <button type="button" class="btn btn-depart" ${!dejaArrive ? 'disabled' : ''} onclick="pointageQuickDepart()">
+                    ⏹ Départ
+                </button>
             </div>
+        </div>
 
-            <div class="pointage-clock">
-                <div style="font-size:13px;font-weight:500;opacity:0.85;margin-bottom:4px;">${greeting}</div>
-                <div class="current-time" id="liveClock">${currentTime}</div>
-                <div class="current-date">${formatDate(today)}</div>
-                <div class="pointage-actions">
-                    <button class="btn btn-success" onclick="showSaisieManuelleModal()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg>
-                        Saisie heures
-                    </button>
-                </div>
+        <div class="card">
+            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
+                <h3 class="card-title">Qui pointe ?</h3>
             </div>
-            
-            <div class="dashboard-grid">
-                <div class="card" style="margin-bottom:0;">
-                    <div class="card-header">
-                        <h3 class="card-title">Ajouter un pointage</h3>
-                    </div>
-                    <form id="quickPointageForm">
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label>Employé</label>
-                                <select name="employeId" required>
-                                    ${employes.filter(e => e.actif).length === 0 ? '<option value="">Aucun employé</option>' :
-                                      employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
-                                </select>
+            ${employesActifs.length === 0 ? '<p style="color: var(--text-light);">Aucun employé actif. Ajoute-en depuis Paramètres.</p>' : `
+                <div class="employee-grid">
+                    ${employesActifs.map(e => {
+                        const isSelected = e.id === selectedEmpId;
+                        const isLive = !!pointageEnCoursParEmp[e.id];
+                        return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" onclick="event.preventDefault(); pointageSelectEmployee('${e.id}'); return false;">
+                            <div class="avatar ${isLive ? 'avatar-live' : ''}">${escapeHtml(initiales(e))}</div>
+                            <div>
+                                <div class="employee-name">${escapeHtml(e.prenom)} ${escapeHtml(e.nom || '')}</div>
+                                <div class="employee-sub">${isLive ? '● en cours' : 'libre'}</div>
                             </div>
-                            <div class="form-group">
-                                <label>Date</label>
-                                <input type="date" name="date" value="${today}" required>
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label>Heure de début</label>
-                                <input type="time" name="heureDebut" required>
-                            </div>
-                            <div class="form-group">
-                                <label>Heure de fin</label>
-                                <input type="time" name="heureFin" required>
-                            </div>
-                            <div class="form-group">
-                                <label>Pause (min)</label>
-                                <input type="number" name="pause" value="0" min="0">
-                            </div>
-                        </div>
-                        <button type="button" class="btn btn-primary" onclick="saveQuickPointage(event)" style="width:100%;">Enregistrer le pointage</button>
-                    </form>
+                        </a>`;
+                    }).join('')}
                 </div>
+            `}
+        </div>
 
-                <div style="display:flex;flex-direction:column;gap:16px;">
-                    <div class="card" style="margin-bottom:0;">
-                        <div class="card-header" style="margin-bottom:12px;padding-bottom:10px;">
-                            <h3 class="card-title">Total aujourd'hui</h3>
-                        </div>
-                        <div style="font-size:36px;font-weight:700;color:var(--primary-darker);line-height:1;letter-spacing:-0.5px;">${todayHeures.toFixed(1)}<span style="font-size:18px;font-weight:600;color:var(--text-light);"> h</span></div>
-                        <div style="font-size:12px;color:var(--text-light);margin-top:6px;">${todayPointages.length} pointage${todayPointages.length > 1 ? 's' : ''}</div>
-                    </div>
-
-                    <div class="card" style="margin-bottom:0;">
-                        <div class="card-header" style="margin-bottom:12px;padding-bottom:10px;">
-                            <h3 class="card-title">Aujourd'hui</h3>
-                        </div>
-                        ${todayPointages.length === 0 ? renderEmptyState('Aucun pointage aujourd\'hui.') : todayPointages.slice(0, 5).map((p, i, arr) => {
-                            const emp = employes.find(e => e.id === p.employeId);
-                            const empName = emp ? `${emp.prenom} ${emp.nom}` : 'N/A';
-                            const initials = `${emp?.prenom?.[0] || ''}${emp?.nom?.[0] || ''}`;
-                            const debutMin = parseHHMM(p.heureDebut);
-                            const finMin = parseHHMM(p.heureFin);
-                            const total = (debutMin !== null && finMin !== null) ? (((finMin - debutMin) - (parseInt(p.pause, 10) || 0)) / 60).toFixed(1) : '-';
-                            return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;${i < arr.length - 1 ? 'border-bottom:1px solid var(--border-light);' : ''}">
-                                <div style="width:30px;height:30px;border-radius:50%;background:var(--bg-success);color:var(--success-dark);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;flex-shrink:0;">${escapeHtml(initials)}</div>
-                                <div style="flex:1;min-width:0;">
-                                    <div style="font-size:12.5px;font-weight:600;color:var(--text);">${escapeHtml(empName)}</div>
-                                    <div style="font-size:10.5px;color:var(--text-light);">${escapeHtml(p.heureDebut)} → ${escapeHtml(p.heureFin)}</div>
-                                </div>
-                                <strong style="font-size:13px;color:var(--primary-darker);">${total}h</strong>
-                            </div>`;
-                        }).join('')}
-                    </div>
-                </div>
+        <div class="card">
+            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
+                <h3 class="card-title">Saisie manuelle</h3>
             </div>
-        `;
-    } else if (tab === 'historique') {
-        html += `
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Historique des pointages</h3>
-                    <button class="btn btn-secondary" onclick="exportPointageExcel()">Exporter Excel</button>
-                </div>
-                
-                <div class="filters">
-                    <select id="filterEmploye" onchange="renderPointage('historique')">
-                        <option value="">Tous les employés</option>
-                        ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
-                    </select>
-                    <input type="date" id="filterDateFrom" placeholder="Du" onchange="renderPointage('historique')">
-                    <input type="date" id="filterDateTo" placeholder="Au" onchange="renderPointage('historique')">
-                </div>
-                
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Date</th>
-                                <th>Employé</th>
-                                <th>Début</th>
-                                <th>Fin</th>
-                                <th>Pause</th>
-                                <th>Total</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${renderHistoriqueTable(pointages, employes)}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        `;
-    } else if (tab === 'stats') {
-        const stats = getPointageStats(pointages, employes);
-        html += `
-            <div class="card">
-                <h3 class="card-title" style="margin-bottom: 16px;">Statistiques</h3>
-                <div class="form-row" style="margin-bottom: 20px;">
+            <form id="quickPointageForm">
+                <div class="form-row">
                     <div class="form-group">
                         <label>Employé</label>
-                        <select id="statsEmploye" onchange="renderPointage('stats')">
-                            <option value="">Tous</option>
-                            ${employes.filter(e => e.actif).map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
+                        <select name="employeId" required>
+                            ${employesActifs.length === 0 ? '<option value="">Aucun employé</option>' :
+                              employesActifs.map(e => `<option value="${e.id}" ${e.id === selectedEmpId ? 'selected' : ''}>${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Période</label>
-                        <select id="statsPeriod" onchange="renderPointage('stats')">
-                            <option value="week">Semaine en cours</option>
-                            <option value="month">Mois en cours</option>
-                            <option value="year">Année en cours</option>
-                        </select>
+                        <label>Date</label>
+                        <input type="date" name="date" value="${today}" required>
                     </div>
                 </div>
-                
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon green">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                        </div>
-                        <div class="stat-content">
-                            <h3>${stats.totalHours}h</h3>
-                            <p>Total heures</p>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon blue">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                        </div>
-                        <div class="stat-content">
-                            <h3>${stats.daysWorked}</h3>
-                            <p>Jours travaillés</p>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon orange">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                        </div>
-                        <div class="stat-content">
-                            <h3>${stats.avgHours}h</h3>
-                            <p>Moyenne/jour</p>
-                        </div>
-                    </div>
-                </div>
-                
-                ${stats.employeeStats.length > 0 ? `
-                <div style="margin-top: 24px;">
-                    <h4 style="margin-bottom: 12px;">Répartition par employé</h4>
-                    <div class="bar-chart">
-                        ${stats.employeeStats.map((emp, i) => `
-                            <div class="bar-row">
-                                <span class="bar-label">${emp.name}</span>
-                                <div class="bar-container">
-                                    <div class="bar" style="width: ${emp.percent}%; background: hsl(${i * 40}, 60%, 45%);"></div>
-                                </div>
-                                <span class="bar-value">${emp.hours}h</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-                ` : ''}
-            </div>
-        `;
-    } else if (tab === 'employes') {
-        html += `
-            <div class="card">
-                <h3 class="card-title" style="margin-bottom: 16px;">Gérer les employés</h3>
-                <div class="form-row" style="margin-bottom: 20px;">
+                <div class="form-row">
                     <div class="form-group">
-                        <label>Nouvel employé</label>
-                        <input type="text" id="newEmployeeName" placeholder="Nom de l'employé">
+                        <label>Arrivée</label>
+                        <input type="time" name="heureDebut" required>
                     </div>
                     <div class="form-group">
-                        <label>Prénom</label>
-                        <input type="text" id="newEmployeePrenom" placeholder="Prénom">
+                        <label>Départ</label>
+                        <input type="time" name="heureFin" required>
                     </div>
-                    <div class="form-group form-group-btn-end">
-                        <button class="btn btn-success" onclick="addNewEmployee()">Ajouter</button>
+                    <div class="form-group">
+                        <label>Pause (min)</label>
+                        <input type="number" name="pause" value="0" min="0">
                     </div>
                 </div>
-                
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Nom</th>
-                                <th>Prénom</th>
-                                <th>Status</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${employes.length === 0 ? '<tr><td colspan="4" class="text-center">Aucun employé</td></tr>' : 
-                              employes.map(e => `
-                                <tr>
-                                    <td>${escapeHtml(e.nom)}</td>
-                                    <td>${escapeHtml(e.prenom)}</td>
-                                    <td><span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span></td>
-                                    <td>
-                                        <button class="btn btn-sm btn-danger" onclick="deleteEmployee('${e.id}')">Supprimer</button>
-                                    </td>
-                                </tr>
-                              `).join('')}
-                        </tbody>
-                    </table>
-                </div>
+                <button type="button" class="btn btn-primary" onclick="saveQuickPointage(event)">Enregistrer</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
+                <h3 class="card-title">Historique du jour</h3>
+                <span style="font-size: 12px; color: var(--text-light);">${historiqueJour.length} pointage${historiqueJour.length !== 1 ? 's' : ''}</span>
             </div>
-        `;
-    }
-    
-    safeRender(html);
-    
-    // Update time every second if on pointage tab
-    if (tab === 'pointage') {
-        if (pointageClockInterval) {
+            ${historiqueJour.length === 0 ? '<p style="color: var(--text-light); font-size: 13px;">Aucun pointage aujourd\'hui pour l\'instant.</p>' : `
+                ${historiqueJour.map(p => {
+                    const emp = employes.find(x => x.id === p.employeId);
+                    const debutMin = parseHHMM(p.heureDebut);
+                    const finMin = parseHHMM(p.heureFin);
+                    const pause = parseInt(p.pause, 10) || 0;
+                    let totalLabel = '— en cours';
+                    if (debutMin !== null && finMin !== null) {
+                        const totalMin = (finMin - debutMin) - pause;
+                        if (totalMin > 0) {
+                            const h = Math.floor(totalMin / 60);
+                            const m = totalMin % 60;
+                            totalLabel = `${h}h${m > 0 ? ' ' + m + 'min' : ''}`;
+                        }
+                    }
+                    return `<div class="history-row">
+                        <div class="avatar avatar-sm">${escapeHtml(initiales(emp))}</div>
+                        <div class="history-row-info">
+                            <div class="history-row-name">${escapeHtml((emp?.prenom || '') + ' ' + (emp?.nom || ''))}</div>
+                            <div class="history-row-times">${escapeHtml(p.heureDebut || '?')} → ${escapeHtml(p.heureFin || '...')}${pause ? ' • pause ' + pause + ' min' : ''}</div>
+                        </div>
+                        <div class="history-row-total">${totalLabel}</div>
+                    </div>`;
+                }).join('')}
+            `}
+        </div>
+
+        <div class="flex gap-4" style="margin-top: 16px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="showPointageStatsModal()">📊 Voir stats</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="showPointageHistoriqueModal()">📅 Historique complet</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="exportPointageExcel()">📤 Export CSV</button>
+        </div>
+    `);
+
+    // Update time every second
+    pointageClockInterval = setInterval(() => {
+        const timeEl = document.querySelector('.pointage-hero .current-time');
+        if (timeEl) {
+            timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
+        } else {
+            // L'élément n'est plus dans le DOM → l'utilisateur a navigué ailleurs, on arrête
             clearInterval(pointageClockInterval);
             pointageClockInterval = null;
         }
-        pointageClockInterval = setInterval(() => {
-            const timeEl = document.querySelector('.current-time');
-            if (timeEl) {
-                timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
-            } else {
-                clearInterval(pointageClockInterval);
-                pointageClockInterval = null;
-            }
-        }, 1000);
-    }
+    }, 1000);
 };
 
 const renderHistoriqueTable = (pointages, employes) => {
@@ -2765,198 +2582,117 @@ const selectWeekDay = (dateStr) => {
 
 // Commandes
 const renderCommandes = () => {
-    const savedFilterClient = DB.getFilter('client');
-    const savedFilterStatut = DB.getFilter('statut');
-    const savedSearch = DB.getFilter('commande_search');
+    const savedFilterStatut = DB.getFilter('statut') || '';
     const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
-    
+
     const allCommandes = DB.get('commandes') || [];
-    const commandes = showArchives 
+    const commandesScope = showArchives
         ? allCommandes.filter(c => c.statut === 'livrée')
         : allCommandes.filter(c => c.statut !== 'livrée');
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
+
     const countByStatut = { en_attente: 0, produite: 0, 'livrée': 0, annulee: 0 };
-    commandes.forEach(c => { if (countByStatut[c.statut] !== undefined) countByStatut[c.statut]++; });
+    commandesScope.forEach(c => { if (countByStatut[c.statut] !== undefined) countByStatut[c.statut]++; });
+
     const commandesByDate = {};
-    commandes.forEach(c => {
+    commandesScope.forEach(c => {
         if (c.dateLivraison) {
             const k = String(c.dateLivraison).slice(0, 10);
             commandesByDate[k] = (commandesByDate[k] || 0) + 1;
         }
     });
-    const filteredCommandes = commandes
-        .filter(c => {
-            const client = clients.find(cl => cl.id === c.clientId);
-            const searchText = `${getCommandeNumero(c)} ${getClientLabel(client)} ${c.dateCommande || ''} ${c.dateLivraison || ''} ${c.statut || ''}`;
-            return (!savedFilterClient || c.clientId === savedFilterClient) &&
-                   (!savedFilterStatut || c.statut === savedFilterStatut) &&
-                   (!showArchives && weekCalendarSelectedDate ? String(c.dateLivraison || '').slice(0,10) === weekCalendarSelectedDate : true) &&
-                   includesText(searchText, savedSearch);
-        })
-        .sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
-    const activeCommandes = allCommandes.filter(c => c.statut !== 'livrée' && c.statut !== 'annulee');
-    const countAttente = activeCommandes.filter(c => c.statut === 'en_attente').length;
-    const countProduite = activeCommandes.filter(c => c.statut === 'produite').length;
-    const countLivree = allCommandes.filter(c => c.statut === 'livrée').length;
-    const todayISO = getLocalDateISOString();
-    const countLivraisonDue = activeCommandes.filter(c => c.dateLivraison && c.dateLivraison <= todayISO).length;
-    
-    let html = `
-        ${!showArchives ? `
-        <div class="stats-grid">
-            <a href="#commandes" class="stat-card stat-link" onclick="DB.setFilter('statut', 'en_attente'); renderCommandes()">
-                <div class="stat-icon orange">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+
+    let filtered = commandesScope;
+    if (!showArchives) {
+        if (savedFilterStatut) filtered = filtered.filter(c => c.statut === savedFilterStatut);
+        if (weekCalendarSelectedDate) {
+            filtered = filtered.filter(c => String(c.dateLivraison || '').slice(0, 10) === weekCalendarSelectedDate);
+        }
+    }
+    filtered.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
+
+    const pillBtn = (key, label) => `
+        <button type="button" class="status-pill ${savedFilterStatut === key ? 'active' : ''}"
+            onclick="togglePillStatut('${key}')">
+            ${label}
+            <span class="pill-count">${countByStatut[key] || 0}</span>
+        </button>`;
+
+    const cardsHtml = filtered.length === 0
+        ? '<div class="commande-empty">Aucune commande</div>'
+        : filtered.map(cmd => {
+            const client = clients.find(cl => cl.id === cmd.clientId);
+            const clientLabel = client?.societe || client?.nom || 'Client inconnu';
+            const safeItems = cmd.items || [];
+            const totalItems = safeItems.reduce((sum, i) => sum + (i.quantite || 0), 0);
+            const articlesPreview = safeItems.slice(0, 3).map(i => {
+                const a = aromes.find(a => a.id === i.aromeId);
+                const f = formats.find(f => f.id === i.formatId);
+                return `${i.quantite}× ${a?.nom || '?'} ${f?.nom || '?'}`;
+            }).join(' • ');
+            const more = safeItems.length > 3 ? ` • +${safeItems.length - 3}` : '';
+            const montant = getCommandeMontant(cmd, clients, formats);
+            const badgeMap = {
+                'en_attente': 'badge-en-attente',
+                'produite':   'badge-produite',
+                'livrée':      'badge-livree',
+                'annulee':    'badge-annulee'
+            };
+            const cardClass = `commande-card statut-${cmd.statut === 'livrée' ? 'livree' : cmd.statut}`;
+            return `<a href="#commandes" class="${cardClass}" onclick="event.preventDefault(); showCommandeDetails('${cmd.id}'); return false;">
+                <div class="commande-card-header">
+                    <span class="commande-card-numero">#${escapeHtml(getCommandeNumero(cmd))}</span>
+                    <span class="badge ${badgeMap[cmd.statut] || 'badge-default'}">${escapeHtml(getCommandeStatutLabel(cmd.statut))}</span>
                 </div>
-                <div class="stat-content"><h3>${countAttente}</h3><p>En attente</p></div>
-            </a>
-            <a href="#commandes" class="stat-card stat-link" onclick="DB.setFilter('statut', 'produite'); renderCommandes()">
-                <div class="stat-icon blue">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                <div class="commande-card-name">${escapeHtml(clientLabel)}</div>
+                <div class="commande-card-items">${escapeHtml(articlesPreview + more)} • ${totalItems} bt</div>
+                <div class="commande-card-footer">
+                    <span class="commande-card-date">Livraison ${formatDate(cmd.dateLivraison)}</span>
+                    <span class="commande-card-amount ${montant === null ? 'muted' : ''}">${formatChf(montant)}</span>
                 </div>
-                <div class="stat-content"><h3>${countProduite}</h3><p>Produites</p></div>
-            </a>
-            <div class="stat-card">
-                <div class="stat-icon red">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                </div>
-                <div class="stat-content"><h3>${countLivraisonDue}</h3><p>Livraison ≤ aujourd'hui</p></div>
+            </a>`;
+        }).join('');
+
+    const html = `
+        <div class="commandes-toolbar">
+            <h1>${showArchives ? 'Archives' : 'Commandes'}</h1>
+            <div class="header-actions" style="display:flex; gap:8px;">
+                <button class="btn btn-ghost btn-sm" onclick="toggleArchives()" title="${showArchives ? 'Voir commandes actives' : 'Voir archives'}">
+                    ${showArchives ? '← Actives' : 'Archives'}
+                </button>
+                ${showArchives
+                    ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
+                    : `<button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
             </div>
-            <a href="#archives" class="stat-card stat-link">
-                <div class="stat-icon green">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-                </div>
-                <div class="stat-content"><h3>${countLivree}</h3><p>Livrées</p></div>
-            </a>
         </div>
+
+        ${!showArchives ? renderWeekCalendar(commandesByDate) : ''}
+
+        ${!showArchives ? `
+            <div class="status-pills">
+                <button type="button" class="status-pill ${!savedFilterStatut ? 'active' : ''}" onclick="togglePillStatut('')">
+                    Toutes
+                    <span class="pill-count">${commandesScope.length}</span>
+                </button>
+                ${pillBtn('en_attente', 'En attente')}
+                ${pillBtn('produite', 'Produite')}
+                ${pillBtn('annulee', 'Annulée')}
+            </div>
         ` : ''}
 
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">${showArchives ? 'Archives' : 'Liste des commandes'}</h3>
-                <div class="header-actions">
-                    ${!showArchives ? `
-                    <button class="btn btn-secondary" onclick="checkStockAndUpdateCommandes()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                        Vérifier stock
-                    </button>
-                    ` : ''}
-                    <button class="btn btn-secondary" onclick="toggleArchives()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
-                        ${showArchives ? '← Commandes' : 'Archives'}
-                    </button>
-                    ${!showArchives ? `
-                    <button class="btn btn-primary" onclick="showCommandeModal()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        Nouvelle commande
-                    </button>
-                    ` : `
-                    <button class="btn btn-secondary" onclick="exportArchivesExcel()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                        Exporter Excel
-                    </button>
-                    `}
-                </div>
-            </div>
-            
-            ${!showArchives ? `${renderWeekCalendar(commandesByDate)}
-            <div class="status-pills">
-                <button type="button" class="status-pill ${!savedFilterStatut ? 'active' : ''}" onclick="togglePillStatut('')">Toutes <span class="pill-count">${commandes.length}</span></button>
-                <button type="button" class="status-pill ${savedFilterStatut === 'en_attente' ? 'active' : ''}" onclick="togglePillStatut('en_attente')">En attente <span class="pill-count">${countByStatut.en_attente}</span></button>
-                <button type="button" class="status-pill ${savedFilterStatut === 'produite' ? 'active' : ''}" onclick="togglePillStatut('produite')">Produite <span class="pill-count">${countByStatut.produite}</span></button>
-                <button type="button" class="status-pill ${savedFilterStatut === 'annulee' ? 'active' : ''}" onclick="togglePillStatut('annulee')">Annulée <span class="pill-count">${countByStatut.annulee}</span></button>
-            </div>
-            ${weekCalendarSelectedDate ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-secondary);border-radius:var(--radius-md);margin-bottom:12px;font-size:12px;"><span>🗓 Filtre : livraisons du ${formatDate(weekCalendarSelectedDate)}</span><button type="button" class="btn-bare" style="color:var(--primary);font-size:12px;padding:0;" onclick="selectWeekDay('${weekCalendarSelectedDate}')">Effacer ✕</button></div>` : ''}
-            <div class="filters">
-                <input type="search" id="filterCommandeSearch" placeholder="Rechercher n°, client, date..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('commande_search', this.value); window.__focusCommandeSearch = true; renderCommandes()">
-                <select id="filterClient" onchange="DB.setFilter('client', this.value); renderCommandes()">
-                    <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
-                </select>
-                ${(savedFilterClient || savedFilterStatut || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="DB.setFilter('client', ''); DB.setFilter('statut', ''); DB.setFilter('commande_search', ''); renderCommandes()">Réinitialiser</button>` : ''}
-            </div>
-            ` : ''}
-            
-            <div class="table-container" id="commandesTableContainer">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>N°</th>
-                            <th>Client</th>
-                            <th>Date commande</th>
-                            <th>Date livraison</th>
-                            <th>Articles</th>
-                            <th>Statut</th>
-                            <th>Montant</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${filteredCommandes.length === 0 ? `<tr><td colspan="7">${renderEmptyState(showArchives ? 'Aucune archive trouvée.' : 'Aucune commande trouvée.', showArchives ? '' : '<button class="btn btn-primary" onclick="showCommandeModal()">Créer une commande</button>')}</td></tr>` :
-                          filteredCommandes.map(cmd => {
-                                const client = clients.find(cl => cl.id === cmd.clientId);
-                                const safeItems = cmd.items || [];
-                                const totalItems = safeItems.reduce((sum, i) => sum + i.quantite, 0);
-                                const articlesPreview = safeItems.slice(0, 2).map(i => {
-                                    const a = aromes.find(a => a.id === i.aromeId);
-                                    const f = formats.find(f => f.id === i.formatId);
-                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
-                                }).join(', ');
+        ${!showArchives && weekCalendarSelectedDate ? `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background: var(--bg-secondary); border-radius: var(--radius-md); margin-bottom: 12px; font-size: 12px;">
+            <span>📅 Filtre : livraisons du ${formatDate(weekCalendarSelectedDate)}</span>
+            <button type="button" class="btn-bare" style="color: var(--primary); font-size: 12px; padding: 0;" onclick="selectWeekDay('${weekCalendarSelectedDate}')">Effacer ✕</button>
+        </div>` : ''}
 
-                                const badgeClass = cmd.statut === 'en_attente' ? 'badge-warning' :
-                                                  cmd.statut === 'produite' ? 'badge-info' :
-                                                  cmd.statut === 'livrée' ? 'badge-success' : 'badge-danger';
-                                const montant = getCommandeMontant(cmd, clients, formats);
-                                const isAnnulee = cmd.statut === 'annulee';
-                                const isLivree = cmd.statut === 'livrée';
-
-                                return `
-                                    <tr>
-                                        <td>${getCommandeNumero(cmd)}</td>
-                                        <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
-                                        <td>${formatDate(cmd.dateCommande)}</td>
-                                        <td>${formatDate(cmd.dateLivraison)}</td>
-                                        <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
-                                        <td class="status-cell">
-                                            <button type="button" class="badge ${badgeClass} status-badge" onclick="showStatusDropdown(event, '${cmd.id}')" aria-haspopup="true" aria-expanded="false">${escapeHtml(getCommandeStatutLabel(cmd.statut))}</button>
-                                            <div class="status-dropdown" id="statusDropdown-${cmd.id}" role="menu">
-                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'en_attente')">En attente</button>
-                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'produite')">Produite</button>
-                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'livrée')">Livrée</button>
-                                                <button type="button" class="status-option" role="menuitem" onclick="updateCommandeStatut('${cmd.id}', 'annulee')">Annulée</button>
-                                            </div>
-                                        </td>
-                                        <td style="white-space: nowrap;">${formatChf(montant)}</td>
-                                        <td class="actions-cell">
-                                            ${cmd.statut === 'produite' ? `<button class="btn btn-sm btn-success" onclick="showLivraisonBouteillesModal('${cmd.id}')">Livrer</button>` : ''}
-                                            <button class="btn btn-sm btn-primary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
-                                            ${cmd.statut === 'livrée' ? `<button class="btn btn-sm btn-secondary" onclick="restaurerCommande('${cmd.id}')">Restaurer</button>` : ''}
-                                            ${!isAnnulee && !isLivree ? `<button class="btn btn-sm btn-secondary" onclick="editCommande('${cmd.id}')">Modifier</button>` : ''}
-                                            ${!isAnnulee && !isLivree ? `<button class="btn btn-sm btn-ghost" onclick="duplicateCommande('${cmd.id}')">⎘ Dupliquer</button>` : ''}
-                                            ${!isAnnulee && !isLivree ? `<button class="btn btn-sm" style="background: var(--bg-danger); color: var(--danger); font-weight: 700;" onclick="confirmAnnulerCommande('${cmd.id}')">Annuler</button>` : ''}
-                                            ${isAnnulee || isLivree ? `<button class="btn btn-sm btn-danger" onclick="deleteCommande('${cmd.id}')">Supprimer</button>` : ''}
-                                        </td>
-                                    </tr>
-                                `;
-                            }).join('')}
-                    </tbody>
-                </table>
-            </div>
-            <p class="text-muted" style="margin-top: 12px; font-size: 12px;">${filteredCommandes.length} commande(s) affichée(s)</p>
+        <div class="commandes-list">
+            ${cardsHtml}
         </div>
     `;
-    
+
     safeRender(html);
-    if (window.__focusCommandeSearch) {
-        const input = document.getElementById('filterCommandeSearch');
-        if (input) {
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-        }
-        window.__focusCommandeSearch = false;
-    }
 };
 
 const onMatrixCellInput = (input) => {
