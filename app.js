@@ -4,6 +4,7 @@
 const CONSTANTS = {
     PRODUCTION_LOSS: 1.015,    // +1.5% loss buffer applied to ingredient consumption
     CAPSULE_LOSS: 1.075,       // +7.5% loss buffer for capsules
+    BOUCHON_MARGIN: 1.05,      // +5% margin on caps shown in the production planner
     CUVE_MAX_L: 25,            // max litres per production cuve
     STOCK_WARN_DAYS: 30        // DLC warning threshold in days
 };
@@ -4571,7 +4572,22 @@ const renderProduction = () => {
 
     const totalBouteillesProduction = Object.values(productionNecesaire).reduce((sum, b) => sum + (b.aProduire || 0), 0);
     const totalLitresProduction = Object.values(litresParArome).reduce((sum, litres) => sum + litres, 0);
-    const totalRecipientsProduction = Object.values(recipientsParArome).reduce((sum, recipients) => sum + recipients.length, 0);
+
+    // Bouteilles à produire par format + bouchons nécessaires
+    // (50cl et 100cl partagent le même bouchon, les 25cl en ont un différent)
+    const bouteillesParFormat = {};
+    Object.values(productionNecesaire).filter(b => b.aProduire > 0).forEach(b => {
+        if (!bouteillesParFormat[b.formatNom]) {
+            const format = formats.find(f => f.nom === b.formatNom);
+            bouteillesParFormat[b.formatNom] = { formatNom: b.formatNom, contenanceCl: format?.contenanceCl || 0, quantite: 0 };
+        }
+        bouteillesParFormat[b.formatNom].quantite += b.aProduire;
+    });
+    const formatsTries = Object.values(bouteillesParFormat).sort((a, b) => b.contenanceCl - a.contenanceCl);
+    const btGrandBouchon = formatsTries.filter(f => f.contenanceCl >= 50).reduce((s, f) => s + f.quantite, 0);
+    const btPetitBouchon = formatsTries.filter(f => f.contenanceCl < 50).reduce((s, f) => s + f.quantite, 0);
+    const bouchonsGrands = Math.ceil(btGrandBouchon * CONSTANTS.BOUCHON_MARGIN);
+    const bouchonsPetits = Math.ceil(btPetitBouchon * CONSTANTS.BOUCHON_MARGIN);
     const kpiHtml = `
         <div class="stats-grid">
             <div class="stat-card">
@@ -4591,12 +4607,6 @@ const renderProduction = () => {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.2 7.8l-7.7 7.7-4-4-5.7 5.7"/></svg>
                 </div>
                 <div class="stat-content"><h3>${totalLitresProduction.toFixed(1)}</h3><p>Litres</p></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon red">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg>
-                </div>
-                <div class="stat-content"><h3>${totalRecipientsProduction}</h3><p>Récipients</p></div>
             </div>
         </div>
     `;
@@ -4636,7 +4646,29 @@ const renderProduction = () => {
                       </div>`;
                   }).join('')}
             </div>
-            
+
+            <div class="production-item">
+                <h4>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M8 2h8M9 2v3.5L5.5 12A4.5 4.5 0 0 0 9.5 22h5a4.5 4.5 0 0 0 4-6.5L15 5.5V2"/></svg>
+                    Bouteilles & bouchons
+                </h4>
+                ${formatsTries.length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : `
+                  ${formatsTries.map(f => `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
+                      <span>Bouteilles ${escapeHtml(f.formatNom)}</span>
+                      <strong>${f.quantite} bt</strong>
+                  </div>`).join('')}
+                  ${bouchonsGrands > 0 ? `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
+                      <span>Bouchons 50cl / 100cl</span>
+                      <strong>${bouchonsGrands} pcs</strong>
+                  </div>` : ''}
+                  ${bouchonsPetits > 0 ? `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
+                      <span>Bouchons 25cl</span>
+                      <strong>${bouchonsPetits} pcs</strong>
+                  </div>` : ''}
+                  <p class="text-muted" style="font-size: 12px; margin-top: 8px;">Bouchons : marge de 5% incluse</p>
+                `}
+            </div>
+
             <div class="production-item" style="grid-column: 1 / -1;">
                 <h4>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
