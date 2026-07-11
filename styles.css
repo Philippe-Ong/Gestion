@@ -1739,13 +1739,23 @@ input[type="checkbox"] {
 .settings-item-info {
     display: flex;
     align-items: center;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 4px 12px;
     font-size: 13.5px;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Les lignes « client » utilisent des <div> (société / adresse) : chacun sur sa propre ligne */
+.settings-item-info > div {
+    flex-basis: 100%;
+    min-width: 0;
 }
 
 .settings-item-actions {
     display: flex;
     gap: 6px;
+    flex-shrink: 0;
 }
 
 /* ── Empty state ─────────────────────────────────────────── */
@@ -3008,6 +3018,175 @@ input[type="checkbox"] {
     font-variant-numeric: tabular-nums;
 }
 
+/* ── Sous-onglets (section Stock / Historique) ─────────────── */
+.sub-tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--bg-tertiary);
+    padding: 4px;
+    border-radius: var(--radius-md);
+    margin-bottom: 18px;
+}
+.sub-tab {
+    flex: 1;
+    text-align: center;
+    padding: 9px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-light);
+    text-decoration: none;
+    transition: var(--transition-fast);
+}
+.sub-tab:hover { color: var(--text); }
+.sub-tab.active {
+    background: var(--white);
+    color: var(--primary-darker);
+    box-shadow: var(--shadow-sm);
+}
+
+/* ── Historique de production : résumé ─────────────────────── */
+.hist-summary {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+.hist-summary-stat {
+    flex: 1;
+    background: var(--white);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    padding: 12px 10px;
+    text-align: center;
+    box-shadow: var(--shadow-xs);
+}
+.hist-summary-val {
+    display: block;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+}
+.hist-summary-val.pos { color: var(--primary); }
+.hist-summary-val.neg { color: var(--danger); }
+.hist-summary-lbl {
+    display: block;
+    font-size: 11px;
+    color: var(--text-light);
+    margin-top: 4px;
+}
+
+/* ── Historique de production : timeline ───────────────────── */
+.hist-timeline { margin-top: 18px; }
+.hist-day { margin-bottom: 20px; }
+.hist-day-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    padding: 0 2px;
+}
+.hist-day-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+}
+.hist-day-meta {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-light);
+    font-variant-numeric: tabular-nums;
+}
+.hist-day-list {
+    background: var(--white);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    box-shadow: var(--shadow-xs);
+}
+.hist-entry {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-light);
+    border-left: 3px solid transparent;
+}
+.hist-entry:last-child { border-bottom: none; }
+.hist-entry.is-prod  { border-left-color: var(--primary-light); }
+.hist-entry.is-vente { border-left-color: var(--danger-light); }
+.hist-entry-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.hist-entry-main { flex: 1; min-width: 0; }
+.hist-entry-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+}
+.hist-entry-format {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-light);
+}
+.hist-entry-sub {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 3px;
+    flex-wrap: wrap;
+}
+.hist-entry-tag {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 2px 7px;
+    border-radius: var(--radius-pill);
+}
+.hist-entry-tag.tag-prod  { background: var(--bg-success); color: var(--success-dark); }
+.hist-entry-tag.tag-vente { background: var(--bg-danger);  color: var(--danger-dark); }
+.hist-entry-lot {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--info);
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+}
+.hist-entry-lot:hover { text-decoration: underline; }
+.hist-entry-note {
+    font-size: 11.5px;
+    color: var(--text-lighter);
+}
+.hist-entry-qty {
+    font-size: 16px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
+.hist-entry-qty.pos { color: var(--primary); }
+.hist-entry-qty.neg { color: var(--danger); }
+.hist-entry-del {
+    background: none;
+    border: none;
+    color: var(--text-lighter);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    transition: var(--transition-fast);
+}
+.hist-entry-del:hover { background: var(--bg-danger); color: var(--danger); }
+
 /* --- Header inline pages refondues (mobile) --- */
 .page-header-big {
     padding: 4px 0 14px 0;
@@ -3392,4 +3571,14 @@ input[type="checkbox"] {
     /* Touch targets mobile */
     .btn { min-height: 44px; -webkit-tap-highlight-color: transparent; }
     .employee-card, .status-pill, .week-day { -webkit-tap-highlight-color: transparent; }
+}
+
+/* --- Lignes de paramètres : empilement sur petit écran (évite l'écrasement du texte) --- */
+@media (max-width: 640px) {
+    .settings-item {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+    .settings-item-actions .btn { flex: 1; }
 }
