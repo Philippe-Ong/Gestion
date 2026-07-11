@@ -1041,6 +1041,11 @@ const navigateTo = (page) => {
     if (page === 'historique') {
         document.querySelectorAll('[data-page="stock"]').forEach(el => el.classList.add('active'));
     }
+    // Pages du menu « Plus » : allumer le bouton Plus
+    const morePages = ['livraisons', 'production', 'inventaire', 'parametres'];
+    if (morePages.includes(page)) {
+        document.getElementById('moreNavBtn')?.classList.add('active');
+    }
 
     const titles = {
         dashboard: 'Dashboard',
@@ -6834,6 +6839,19 @@ const importAllData = (event) => {
     event.target.value = '';
 };
 
+// Bottom sheet (Plus menu) toggle
+const toggleBottomSheet = () => {
+    const overlay = document.getElementById('bottomSheetOverlay');
+    const sheet = document.getElementById('bottomSheet');
+    if (!overlay || !sheet) return;
+    const isActive = overlay.classList.toggle('active');
+    sheet.classList.toggle('active', isActive);
+};
+const closeBottomSheet = () => {
+    document.getElementById('bottomSheetOverlay')?.classList.remove('active');
+    document.getElementById('bottomSheet')?.classList.remove('active');
+};
+
 // Initialize app
 //
 // Rendu « local d'abord » : on affiche l'écran immédiatement à partir des données
@@ -6846,6 +6864,18 @@ const bootLocal = () => {
     initGlobalSearch();
     // Migration silencieuse : normalise les valeurs legacy de client.tarifs
     try { migrateClientTarifs(); } catch (e) { console.warn('[migration] initiale', e); }
+    // Bottom sheet listeners
+    document.getElementById('moreNavBtn')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        toggleBottomSheet();
+    });
+    document.getElementById('bottomSheetOverlay')?.addEventListener('click', closeBottomSheet);
+    document.querySelectorAll('.bottom-sheet-item').forEach(item => {
+        item.addEventListener('click', closeBottomSheet);
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeBottomSheet();
+    });
     router();
 };
 
