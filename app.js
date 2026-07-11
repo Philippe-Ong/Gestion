@@ -35,7 +35,7 @@ const parseHHMM = (str) => {
 const getItems = (cmd) => (cmd && Array.isArray(cmd.items)) ? cmd.items : [];
 
 // Returns active rows from a DB table (rows where actif !== false).
-const getActive = (tableName) => DB.get(tableName).filter(r => r.actif);
+const getActive = (tableName) => DB.get(tableName).filter(r => r.actif !== false);
 
 // Custom confirmation dialog returning a Promise<boolean>.
 // Uses the same modal infrastructure as the rest of the app.
@@ -299,12 +299,12 @@ const resolveCommandeFormat = (item, formats) => {
 };
 
 // Toutes les tables persistées
-const ALL_TABLES = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire', 'livraisons', 'history'];
+const ALL_TABLES = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire', 'livraisons', 'history', 'todos'];
 
 // Data Storage with Firebase sync
 const DB = {
     firebaseSynced: false,
-    
+
     get: (key) => {
         const data = localStorage.getItem('thecol_' + key);
         if (!data) return [];
@@ -317,7 +317,7 @@ const DB = {
             return [];
         }
     },
-    
+
     set: (key, data) => {
         let localOk = true;
         try {
@@ -337,7 +337,7 @@ const DB = {
             showToast('Stockage local plein. Synchronisation cloud effectuée.', 'warning');
         }
     },
-    
+
     syncToFirebase: async (key, data) => {
         if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
         try {
@@ -348,7 +348,7 @@ const DB = {
             showToast('Synchronisation cloud échouée pour « ' + key + ' » — données enregistrées localement uniquement.', 'error');
         }
     },
-    
+
     loadFromFirebase: async (showNotification = true) => {
         if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
         try {
@@ -381,7 +381,7 @@ const DB = {
             console.error('Firebase load error:', e);
         }
     },
-    
+
     init: () => {
         ALL_TABLES.forEach(table => {
             if (!localStorage.getItem('thecol_' + table)) {
@@ -393,7 +393,7 @@ const DB = {
     // UI filter persistence — keeps storage keys uniform under "thecol_filter_<name>".
     getFilter: (name) => localStorage.getItem('thecol_filter_' + name) || '',
     setFilter: (name, value) => localStorage.setItem('thecol_filter_' + name, value || ''),
-    
+
     // Sync from Firebase on page load
     initFromFirebase: async () => {
         if (!window.firebaseReady || !window.firebaseDb) return;
@@ -402,9 +402,8 @@ const DB = {
 };
 
 const calculateAvailableStock = (lots, referenceDate = new Date()) => {
-    const ref = dateOnly(referenceDate);
     const stock = {};
-    lots.filter(lot => !lot.dlc || dateOnly(lot.dlc) >= ref).forEach(lot => {
+    lots.filter(lot => isLotSellable(lot, referenceDate)).forEach(lot => {
         const key = `${lot.arome}-${lot.format}`;
         if (!stock[key]) stock[key] = 0;
         stock[key] += lot.quantite || 0;
@@ -446,15 +445,27 @@ const DEFAULT_COULEURS = {
 // Initialize default data if empty
 // Calculate dates (same as Stock project)
 const calculateDates = (productionDate) => {
-    const prod = new Date(productionDate);
-    const saleLimit = new Date(prod);
-    saleLimit.setMonth(saleLimit.getMonth() + 1);
-    const consumptionLimit = new Date(prod);
-    consumptionLimit.setMonth(consumptionLimit.getMonth() + 6);
-    return {
-        dlv: saleLimit.toISOString().split('T')[0],
-        dlc: consumptionLimit.toISOString().split('T')[0]
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(productionDate || ''));
+    if (!match) return { dlv: '', dlc: '' };
+
+    const year = Number(match[1]);
+    const monthIndex = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const source = new Date(year, monthIndex, day);
+    if (source.getFullYear() !== year || source.getMonth() !== monthIndex || source.getDate() !== day) {
+        return { dlv: '', dlc: '' };
+    }
+
+    const addCalendarMonths = (months) => {
+        const rawTargetMonth = monthIndex + months;
+        const targetYear = year + Math.floor(rawTargetMonth / 12);
+        const targetMonthIndex = rawTargetMonth % 12;
+        const lastDay = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
+        const targetDay = Math.min(day, lastDay);
+        return `${targetYear}-${String(targetMonthIndex + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
     };
+
+    return { dlv: addCalendarMonths(1), dlc: addCalendarMonths(6) };
 };
 
 const escapeHtml = (str) => {
@@ -463,17 +474,50 @@ const escapeHtml = (str) => {
 };
 
 const dateOnly = (d) => {
-    const dt = d instanceof Date ? new Date(d.getTime()) : new Date(d);
+    if (d instanceof Date) {
+        const dt = new Date(d.getTime());
+        dt.setHours(0, 0, 0, 0);
+        return dt;
+    }
+
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || ''));
+    if (match) {
+        const dt = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+        if (dt.getFullYear() === Number(match[1]) && dt.getMonth() === Number(match[2]) - 1 && dt.getDate() === Number(match[3])) {
+            return dt;
+        }
+    }
+
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return new Date(NaN);
     dt.setHours(0, 0, 0, 0);
     return dt;
+};
+
+const isValidDateOnly = (value) => !Number.isNaN(dateOnly(value).getTime());
+
+const isLotDateRangeValid = (dateProduction, dlv, dlc) => {
+    if (!isValidDateOnly(dateProduction) || !isValidDateOnly(dlv) || !isValidDateOnly(dlc)) return false;
+    const productionDate = dateOnly(dateProduction);
+    const saleLimit = dateOnly(dlv);
+    const consumptionLimit = dateOnly(dlc);
+    return productionDate <= saleLimit && saleLimit <= consumptionLimit;
+};
+
+const isLotSellable = (lot, referenceDate = new Date()) => {
+    if (!lot?.dlc) return false;
+    const dlcDate = dateOnly(lot.dlc);
+    const refDate = dateOnly(referenceDate);
+    return !Number.isNaN(dlcDate.getTime()) && !Number.isNaN(refDate.getTime()) && dlcDate >= refDate;
 };
 
 const getStatus = (dlc) => {
     const now = dateOnly(new Date());
     const dlcDate = dateOnly(dlc);
     const oneMonthFromNow = dateOnly(new Date());
-    oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
-    
+    oneMonthFromNow.setDate(oneMonthFromNow.getDate() + CONSTANTS.STOCK_WARN_DAYS);
+
+    if (!dlc || Number.isNaN(dlcDate.getTime())) return 'expired';
     if (now > dlcDate) return 'expired';
     if (dlcDate <= oneMonthFromNow) return 'warning';
     return 'ok';
@@ -958,7 +1002,7 @@ const navigateTo = (page) => {
     };
     const titleEl = document.getElementById('pageTitle');
     if (titleEl) titleEl.textContent = titles[page] || 'Dashboard';
-    
+
     const views = {
         dashboard: renderDashboard,
         stock: renderStock,
@@ -971,10 +1015,10 @@ const navigateTo = (page) => {
         inventaire: renderInventaire,
         parametres: renderParametres
     };
-    
+
     const contentEl = document.getElementById('content');
     if (!contentEl) return;
-    
+
     const viewFn = views[page];
     if (typeof viewFn === 'function') {
         viewFn();
@@ -1046,8 +1090,6 @@ const renderDashboard = () => {
     const formats = DB.get('formats') || [];
 
     const today = new Date();
-    const oneMonthFromNow = new Date();
-    oneMonthFromNow.setMonth(oneMonthFromNow.getMonth() + 1);
     const inSevenDays = new Date();
     inSevenDays.setDate(inSevenDays.getDate() + 7);
     const inThreeDays = new Date();
@@ -1055,13 +1097,9 @@ const renderDashboard = () => {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const expiries = lots.filter(lot => lot.dlc && new Date(lot.dlc) < today).length;
-    const moinsUnMois = lots.filter(lot => {
-        if (!lot.dlc) return false;
-        const dlc = new Date(lot.dlc);
-        return dlc >= today && dlc <= oneMonthFromNow;
-    }).length;
-    const sellableBottles = lots.filter(lot => lot.dlc && new Date(lot.dlc) >= today).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const expiries = lots.filter(lot => getStatus(lot.dlc) === 'expired').length;
+    const moinsUnMois = lots.filter(lot => getStatus(lot.dlc) === 'warning').length;
+    const sellableBottles = lots.filter(lot => isLotSellable(lot, today)).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
 
     // Stock produit ces 7 derniers jours
     const stockLast7Days = lots
@@ -1218,13 +1256,13 @@ const renderStock = () => {
     const savedStatut = DB.getFilter('stockStatut') || '';
 
     const sellableBottles = lots
-        .filter(lot => lot.dlc && new Date(lot.dlc) >= today)
+        .filter(lot => isLotSellable(lot, today))
         .reduce((sum, lot) => sum + (lot.quantite || 0), 0);
 
     const sellableByAroma = {};
     aromes.filter(a => a.actif).forEach(a => { sellableByAroma[a.nom] = 0; });
     lots.forEach(lot => {
-        if (!lot.dlc || new Date(lot.dlc) < today) return;
+        if (!isLotSellable(lot, today)) return;
         if (sellableByAroma[lot.arome] !== undefined) {
             sellableByAroma[lot.arome] += (lot.quantite || 0);
         }
@@ -1403,7 +1441,7 @@ const showNouveauLotModal = () => {
     const formats = getActive('formats');
     const prodDate = getLocalDateISOString();
     const dates = calculateDates(prodDate);
-    
+
     modal.show('Nouveau lot de production', `
         <form id="lotForm">
             <div class="form-row">
@@ -1661,28 +1699,32 @@ const saveLot = (event) => {
         const form = document.getElementById('lotForm');
         if (!form) return;
         const formData = new FormData(form);
-        
+
         const arome = formData.get('arome');
         const format = formData.get('format');
-        const quantite = parseInt(formData.get('quantite'), 10);
+        const quantite = Number(formData.get('quantite'));
         const dateProduction = formData.get('dateProduction');
         const dlv = formData.get('dlv');
         const dlc = formData.get('dlc');
-        
-        if (!arome || !format || !dateProduction || isNaN(quantite) || quantite <= 0) {
+
+        if (!arome || !format || !Number.isInteger(quantite) || quantite <= 0) {
             showToast('Veuillez remplir tous les champs obligatoires', 'error');
             return;
         }
-        
+        if (!isLotDateRangeValid(dateProduction, dlv, dlc)) {
+            showToast('Les dates du lot sont invalides ou incohérentes', 'error');
+            return;
+        }
+
         const lots = DB.get('lots');
         const history = DB.get('history') || [];
-        
-        const existingLot = lots.find(l => 
-            l.arome === arome && 
-            l.format === format && 
+
+        const existingLot = lots.find(l =>
+            l.arome === arome &&
+            l.format === format &&
             l.dateProduction === dateProduction
         );
-        
+
         let newId;
         if (existingLot) {
             existingLot.quantite = (existingLot.quantite || 0) + quantite;
@@ -1700,7 +1742,7 @@ const saveLot = (event) => {
             newId = hasNumericId
                 ? String(maxNum + 1).padStart(6, '0')
                 : generateId();
-            
+
             const lot = {
                 id: newId,
                 arome,
@@ -1712,7 +1754,7 @@ const saveLot = (event) => {
             };
             lots.push(lot);
         }
-        
+
         history.unshift({
             id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
             lotId: newId,
@@ -1722,16 +1764,18 @@ const saveLot = (event) => {
             productionDate: dateProduction,
             dateAdded: new Date().toISOString()
         });
-        
+
         DB.set('lots', lots);
         DB.set('history', history);
-        
+
         modal.hide();
         showToast('Lot créé avec succès');
         renderCurrentView();
     } catch (e) {
         console.error('Error saving lot:', e);
         showToast('Erreur lors de la création du lot', 'error');
+    } finally {
+        if (reenable) reenable();
     }
 };
 
@@ -1747,12 +1791,12 @@ const deleteLot = (id) => {
 
 const renderSellableSummary = (lots, aromes, formats, today) => {
     if (!lots || lots.length === 0) return '';
-    
-    const sellableLots = lots.filter(lot => getStatus(lot.dlc) === 'ok');
-    
+
+    const sellableLots = lots.filter(lot => isLotSellable(lot, today));
+
     if (sellableLots.length === 0) return '';
     if (!aromes || aromes.length === 0) return '';
-    
+
     const summary = aromes.filter(a => a && a.actif).map(arome => {
         const formatsData = (formats || []).filter(f => f && f.actif).map(format => {
             const total = sellableLots
@@ -1760,13 +1804,13 @@ const renderSellableSummary = (lots, aromes, formats, today) => {
                 .reduce((sum, l) => sum + l.quantite, 0);
             return { format: format.nom, total };
         }).filter(f => f.total > 0);
-        
+
         const totalArome = formatsData.reduce((sum, f) => sum + f.total, 0);
         return { arome: arome.nom, couleur: arome.couleur, formats: formatsData, total: totalArome };
     }).filter(item => item.total > 0);
-    
+
     if (summary.length === 0) return '';
-    
+
     return `
         <div class="card" style="margin-bottom: 24px;">
             <h3 class="card-title" style="margin-bottom: 16px;">Stock vendable</h3>
@@ -1790,20 +1834,18 @@ const renderSellableSummary = (lots, aromes, formats, today) => {
     `;
 };
 
-const isSellable = (lot) => {
-    return new Date(lot.dlc) >= new Date();
-};
+const isSellable = (lot) => isLotSellable(lot);
 
 const showVendreModal = (lotId) => {
     const lots = DB.get('lots');
     const lot = lots.find(l => l.id === lotId);
     if (!lot) return;
-    
+
     modal.show('Vendre des bouteilles', `
         <form id="vendreForm">
             <div class="form-group">
                 <label>Quantité à vendre</label>
-                <input type="number" name="quantite" min="1" max="${lot.quantite}" value="1" required>
+                <input type="number" name="quantite" min="1" max="${lot.quantite}" step="1" value="1" required>
                 <small class="text-muted">Stock disponible: ${lot.quantite}</small>
             </div>
         </form>
@@ -1814,13 +1856,22 @@ const showVendreModal = (lotId) => {
 };
 
 const vendreLot = (lotId) => {
-    const quantite = parseInt(document.querySelector('#vendreForm input[name="quantite"]').value);
     const lots = DB.get('lots');
     const lotIndex = lots.findIndex(l => l.id === lotId);
 
-    if (lotIndex === -1) return;
+    if (lotIndex === -1) {
+        showToast('Lot introuvable', 'error');
+        return;
+    }
 
     const lot = lots[lotIndex];
+    const quantite = Number(document.querySelector('#vendreForm input[name="quantite"]')?.value);
+    const stockDisponible = Number(lot.quantite);
+    if (!Number.isInteger(quantite) || quantite <= 0 || !Number.isFinite(stockDisponible) || quantite > stockDisponible) {
+        showToast('Quantité invalide : saisissez un nombre entier disponible en stock', 'error');
+        return;
+    }
+
     lot.quantite -= quantite;
 
     // Traçabilité : journaliser la vente directe
@@ -1970,7 +2021,7 @@ const showEditLotModal = (lotId) => {
     const lots = DB.get('lots');
     const lot = lots.find(l => l.id === lotId);
     if (!lot) return;
-    
+
     modal.show('Modifier le lot', `
         <form id="editLotForm">
             <div class="form-group">
@@ -2009,21 +2060,41 @@ const updateEditLotDates = () => {
 
 const saveEditLot = (event, lotId) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('editLotForm');
-    const formData = new FormData(form);
-    
-    const lots = DB.get('lots');
-    const lotIndex = lots.findIndex(l => l.id === lotId);
-    
-    if (lotIndex !== -1) {
-        lots[lotIndex].quantite = parseInt(formData.get('quantite'));
-        lots[lotIndex].dateProduction = formData.get('dateProduction');
-        lots[lotIndex].dlv = formData.get('dlv');
-        lots[lotIndex].dlc = formData.get('dlc');
-        DB.set('lots', lots);
-        modal.hide();
-        showToast('Lot modifié');
-        renderStock();
+    try {
+        const form = document.getElementById('editLotForm');
+        if (!form) return;
+        const formData = new FormData(form);
+        const quantite = Number(formData.get('quantite'));
+        const dateProduction = formData.get('dateProduction');
+        const dlv = formData.get('dlv');
+        const dlc = formData.get('dlc');
+        if (!Number.isInteger(quantite) || quantite <= 0) {
+            showToast('La quantité doit être un entier positif', 'error');
+            return;
+        }
+        if (!isLotDateRangeValid(dateProduction, dlv, dlc)) {
+            showToast('Les dates du lot sont invalides ou incohérentes', 'error');
+            return;
+        }
+
+        const lots = DB.get('lots');
+        const lotIndex = lots.findIndex(l => l.id === lotId);
+
+        if (lotIndex !== -1) {
+            lots[lotIndex].quantite = quantite;
+            lots[lotIndex].dateProduction = dateProduction;
+            lots[lotIndex].dlv = dlv;
+            lots[lotIndex].dlc = dlc;
+            DB.set('lots', lots);
+            modal.hide();
+            showToast('Lot modifié');
+            renderStock();
+        }
+    } catch (e) {
+        console.error('Error editing lot:', e);
+        showToast('Erreur lors de la modification du lot', 'error');
+    } finally {
+        if (reenable) reenable();
     }
 };
 
@@ -2371,7 +2442,7 @@ const renderHistoriqueTable = (pointages, employes) => {
     const filterEmploye = document.getElementById('filterEmploye')?.value || '';
     const filterDateFrom = document.getElementById('filterDateFrom')?.value || '';
     const filterDateTo = document.getElementById('filterDateTo')?.value || '';
-    
+
     const filtered = pointages
         .filter(p => {
             if (filterEmploye && p.employeId !== filterEmploye) return false;
@@ -2380,11 +2451,11 @@ const renderHistoriqueTable = (pointages, employes) => {
             return true;
         })
         .sort((a, b) => new Date(b.date) - new Date(a.date));
-    
+
     if (filtered.length === 0) {
         return '<tr><td colspan="7" class="text-center">Aucun pointage</td></tr>';
     }
-    
+
     return filtered.map(p => {
         const emp = employes.find(e => e.id === p.employeId);
         const debutMin = parseHHMM(p.heureDebut);
@@ -2422,10 +2493,10 @@ const getMonday = (d) => {
 const getPointageStats = (pointages, employes) => {
     const statsEmploye = document.getElementById('statsEmploye')?.value || '';
     const statsPeriod = document.getElementById('statsPeriod')?.value || 'week';
-    
+
     const now = new Date();
     let startDate, endDate;
-    
+
     if (statsPeriod === 'week') {
         startDate = getMonday(now);
         endDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 6);
@@ -2436,23 +2507,23 @@ const getPointageStats = (pointages, employes) => {
         startDate = new Date(now.getFullYear(), 0, 1);
         endDate = new Date(now.getFullYear(), 11, 31);
     }
-    
+
     const formatDateISO = (d) => {
         const cloned = new Date(d.getTime());
         const offset = cloned.getTimezoneOffset();
         cloned.setMinutes(cloned.getMinutes() - offset);
         return cloned.toISOString().split('T')[0];
     };
-    
+
     const startStr = formatDateISO(startDate);
     const endStr = formatDateISO(endDate);
-    
+
     let filtered = pointages.filter(p => p.date >= startStr && p.date <= endStr && p.heureFin);
-    
+
     if (statsEmploye) {
         filtered = filtered.filter(p => p.employeId === statsEmploye);
     }
-    
+
     const totalMinutes = filtered.reduce((acc, p) => {
         const debutMin = parseHHMM(p.heureDebut);
         const finMin = parseHHMM(p.heureFin);
@@ -2460,11 +2531,11 @@ const getPointageStats = (pointages, employes) => {
         const diff = finMin - debutMin - (p.pause || 0);
         return acc + (diff > 0 ? diff : 0);
     }, 0);
-    
+
     const totalHours = (totalMinutes / 60).toFixed(1);
     const daysWorked = new Set(filtered.map(p => p.date)).size;
     const avgHours = daysWorked > 0 ? (totalMinutes / 60 / daysWorked).toFixed(1) : 0;
-    
+
     // Employee stats
     const empStats = {};
     filtered.forEach(p => {
@@ -2475,7 +2546,7 @@ const getPointageStats = (pointages, employes) => {
         const diff = finMin - debutMin - (p.pause || 0);
         if (diff > 0) empStats[p.employeId] += diff / 60;
     });
-    
+
     const maxHours = Math.max(...Object.values(empStats), 1);
     const employeeStats = Object.entries(empStats).map(([id, hours]) => {
         const emp = employes.find(e => e.id === id);
@@ -2485,61 +2556,68 @@ const getPointageStats = (pointages, employes) => {
             percent: (hours / maxHours) * 100
         };
     }).sort((a, b) => parseFloat(b.hours) - parseFloat(a.hours));
-    
+
     return { totalHours, daysWorked, avgHours, employeeStats };
 };
 
 const saveQuickPointage = (event) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('quickPointageForm');
-    const formData = new FormData(form);
-    
-    const employeId = formData.get('employeId');
-    const date = formData.get('date');
-    const heureDebut = formData.get('heureDebut');
-    const heureFin = formData.get('heureFin');
-    const pause = parseInt(formData.get('pause')) || 0;
-    
-    if (!employeId || !date || !heureDebut || !heureFin) {
-        showToast('Veuillez remplir tous les champs', 'error');
-        return;
-    }
-    if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
-        showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
-        return;
-    }
-    if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
-        showToast('L\'heure de fin doit être après l\'heure de début', 'error');
-        return;
-    }
+    try {
+        const form = document.getElementById('quickPointageForm');
+        const formData = new FormData(form);
 
-    const pointages = DB.get('pointages') || [];
-    const pointage = {
-        id: generateId(),
-        employeId,
-        date,
-        heureDebut,
-        heureFin,
-        pause
-    };
-    pointages.push(pointage);
-    DB.set('pointages', pointages);
+        const employeId = formData.get('employeId');
+        const date = formData.get('date');
+        const heureDebut = formData.get('heureDebut');
+        const heureFin = formData.get('heureFin');
+        const pause = parseInt(formData.get('pause')) || 0;
 
-    form.reset();
-    document.querySelector('#quickPointageForm input[name="date"]').value = getLocalDateISOString();
-    showToast('Pointage ajouté');
-    renderPointage('pointage');
+        if (!employeId || !date || !heureDebut || !heureFin) {
+            showToast('Veuillez remplir tous les champs', 'error');
+            return;
+        }
+        if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
+            showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
+            return;
+        }
+        if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
+            showToast('L\'heure de fin doit être après l\'heure de début', 'error');
+            return;
+        }
+
+        const pointages = DB.get('pointages') || [];
+        const pointage = {
+            id: generateId(),
+            employeId,
+            date,
+            heureDebut,
+            heureFin,
+            pause
+        };
+        pointages.push(pointage);
+        DB.set('pointages', pointages);
+
+        form.reset();
+        document.querySelector('#quickPointageForm input[name="date"]').value = getLocalDateISOString();
+        showToast('Pointage ajouté');
+        renderPointage('pointage');
+    } catch (e) {
+        console.error('Error saving quick pointage:', e);
+        showToast('Erreur lors de l\'enregistrement du pointage', 'error');
+    } finally {
+        if (reenable) reenable();
+    }
 };
 
 const addNewEmployee = () => {
     const nom = document.getElementById('newEmployeeName').value.trim();
     const prenom = document.getElementById('newEmployeePrenom').value.trim();
-    
+
     if (!nom || !prenom) {
         showToast('Veuillez entrer nom et prénom', 'error');
         return;
     }
-    
+
     const employes = DB.get('employees') || [];
     employes.push({
         id: generateId(),
@@ -2548,7 +2626,7 @@ const addNewEmployee = () => {
         actif: true
     });
     DB.set('employees', employes);
-    
+
     document.getElementById('newEmployeeName').value = '';
     document.getElementById('newEmployeePrenom').value = '';
     showToast('Employé ajouté');
@@ -2571,7 +2649,7 @@ const exportPointageExcel = () => {
     const filterEmploye = document.getElementById('filterEmploye')?.value || '';
     const filterDateFrom = document.getElementById('filterDateFrom')?.value || '';
     const filterDateTo = document.getElementById('filterDateTo')?.value || '';
-    
+
     const filtered = pointages
         .filter(p => {
             if (filterEmploye && p.employeId !== filterEmploye) return false;
@@ -2580,14 +2658,14 @@ const exportPointageExcel = () => {
             return true;
         })
         .sort((a, b) => new Date(b.date) - new Date(a.date));
-    
+
     // Create CSV content
     let csv = 'Date,Employé,Début,Fin,Pause,Durée\n';
-    
+
     filtered.forEach(p => {
         const emp = employes.find(e => e.id === p.employeId);
         const empName = emp ? emp.prenom + ' ' + emp.nom : 'N/A';
-        
+
         const debutMin = parseHHMM(p.heureDebut);
         const finMin = parseHHMM(p.heureFin);
         let totalMinutes = 0;
@@ -2597,28 +2675,28 @@ const exportPointageExcel = () => {
         const heures = Math.floor(totalMinutes / 60);
         const mins = totalMinutes % 60;
         const duree = totalMinutes > 0 ? `${heures}h ${mins}min` : '-';
-        
+
         csv += `${p.date},${empName},${p.heureDebut || '-'},${p.heureFin || '-'},${p.pause || 0},${duree}\n`;
     });
-    
+
     // Download CSV
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `pointages_${getLocalDateISOString()}.csv`;
     link.click();
-    
+
     showToast('Exporté en CSV');
 };
 
 const showPointageModal = (type) => {
     const employes = DB.get('employees').filter(e => e.actif);
-    
+
     if (employes.length === 0) {
         showToast('Veuillez d\'abord ajouter des employés dans les paramètres', 'error');
         return;
     }
-    
+
     modal.show(type === 'arrivee' ? 'Pointer arrivée' : 'Pointer départ', `
         <form id="pointageForm">
             <div class="form-group">
@@ -2648,12 +2726,12 @@ const showPointageModal = (type) => {
 
 const showSaisieManuelleModal = () => {
     const employes = DB.get('employees').filter(e => e.actif);
-    
+
     if (employes.length === 0) {
         showToast('Veuillez d\'abord ajouter des employés dans les paramètres', 'error');
         return;
     }
-    
+
     modal.show('Saisie manuelle des heures', `
         <form id="saisieManuelleForm">
             <div class="form-group">
@@ -2689,53 +2767,60 @@ const showSaisieManuelleModal = () => {
 
 const saveSaisieManuelle = (event) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('saisieManuelleForm');
-    const formData = new FormData(form);
-    
-    const employeId = formData.get('employeId');
-    const date = formData.get('date');
-    const heureDebut = formData.get('heureDebut');
-    const heureFin = formData.get('heureFin');
-    const pause = parseInt(formData.get('pause')) || 0;
-    
-    if (!employeId || !date || !heureDebut || !heureFin) {
-        showToast('Veuillez remplir tous les champs', 'error');
-        return;
-    }
-    if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
-        showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
-        return;
-    }
-    if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
-        showToast('L\'heure de fin doit être après l\'heure de début', 'error');
-        return;
-    }
+    try {
+        const form = document.getElementById('saisieManuelleForm');
+        const formData = new FormData(form);
 
-    const pointages = DB.get('pointages');
+        const employeId = formData.get('employeId');
+        const date = formData.get('date');
+        const heureDebut = formData.get('heureDebut');
+        const heureFin = formData.get('heureFin');
+        const pause = parseInt(formData.get('pause')) || 0;
 
-    // Check if there's already a pointage for this employee on this date
-    let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
-    
-    if (pointage) {
-        pointage.heureDebut = heureDebut;
-        pointage.heureFin = heureFin;
-        pointage.pause = pause;
-    } else {
-        pointage = {
-            id: generateId(),
-            employeId,
-            date,
-            heureDebut,
-            heureFin,
-            pause
-        };
-        pointages.push(pointage);
+        if (!employeId || !date || !heureDebut || !heureFin) {
+            showToast('Veuillez remplir tous les champs', 'error');
+            return;
+        }
+        if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
+            showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
+            return;
+        }
+        if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
+            showToast('L\'heure de fin doit être après l\'heure de début', 'error');
+            return;
+        }
+
+        const pointages = DB.get('pointages');
+
+        // Check if there's already a pointage for this employee on this date
+        let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
+
+        if (pointage) {
+            pointage.heureDebut = heureDebut;
+            pointage.heureFin = heureFin;
+            pointage.pause = pause;
+        } else {
+            pointage = {
+                id: generateId(),
+                employeId,
+                date,
+                heureDebut,
+                heureFin,
+                pause
+            };
+            pointages.push(pointage);
+        }
+
+        DB.set('pointages', pointages);
+        modal.hide();
+        showToast('Heures enregistrées');
+        renderPointage();
+    } catch (e) {
+        console.error('Error saving manual pointage:', e);
+        showToast('Erreur lors de l\'enregistrement des heures', 'error');
+    } finally {
+        if (reenable) reenable();
     }
-    
-    DB.set('pointages', pointages);
-    modal.hide();
-    showToast('Heures enregistrées');
-    renderPointage();
 };
 
 const savePointage = (event, type) => {
@@ -2747,16 +2832,16 @@ const savePointage = (event, type) => {
         const employeId = formData.get('employeId');
         const date = formData.get('date');
         const heure = formData.get('heure');
-        
+
         if (!employeId || !date || !heure) {
             showToast('Veuillez remplir tous les champs', 'error');
             return;
         }
-        
+
         const pointages = DB.get('pointages');
-        
+
         let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
-        
+
         if (!pointage) {
             pointage = {
                 id: generateId(),
@@ -2766,14 +2851,14 @@ const savePointage = (event, type) => {
             };
             pointages.push(pointage);
         }
-        
+
         if (type === 'arrivee') {
             pointage.heureDebut = heure;
         } else {
             pointage.heureFin = heure;
             pointage.pause = parseInt(formData.get('pause'), 10) || 0;
         }
-        
+
         DB.set('pointages', pointages);
         modal.hide();
         showToast(type === 'arrivee' ? 'Arrivée pointée' : 'Départ pointé');
@@ -2781,6 +2866,8 @@ const savePointage = (event, type) => {
     } catch (e) {
         console.error('Error saving pointage:', e);
         showToast('Erreur lors du pointage', 'error');
+    } finally {
+        if (reenable) reenable();
     }
 };
 
@@ -3012,12 +3099,22 @@ const showCommandeModal = (id = null) => {
     const aromes = getActive('aromes');
     const formats = getActive('formats');
     const commandes = DB.get('commandes');
-    
+
     let commande = null;
     if (id) {
         commande = commandes.find(c => c.id === id);
     }
-    
+
+    if (id && !commande) {
+        showToast('Commande non trouvée', 'error');
+        return;
+    }
+
+    if (commande?.statut === 'livrée') {
+        showToast('Une commande livrée ne peut plus être modifiée', 'warning');
+        return;
+    }
+
     if (aromes.length === 0 || formats.length === 0) {
         showToast('Veuillez d\'abord configurer aromes et formats', 'error');
         return;
@@ -3104,7 +3201,6 @@ const showCommandeModal = (id = null) => {
                 <select name="statut">
                     <option value="en_attente" ${commande?.statut === 'en_attente' ? 'selected' : ''}>En attente</option>
                     <option value="produite" ${commande?.statut === 'produite' ? 'selected' : ''}>Produite</option>
-                    <option value="livrée" ${commande?.statut === 'livrée' ? 'selected' : ''}>Livrée</option>
                     <option value="annulee" ${commande?.statut === 'annulee' ? 'selected' : ''}>Annulée</option>
                 </select>
             </div>
@@ -3128,8 +3224,30 @@ const saveCommande = (event, id) => {
     try {
         const form = document.getElementById('commandeForm');
         if (!form) return;
+
+        if (!form.checkValidity()) {
+            form.reportValidity();
+            return;
+        }
+
+        const commandes = DB.get('commandes') || [];
+        const commandeExistante = id ? commandes.find(c => c.id === id) : null;
+        if (id && !commandeExistante) {
+            showToast('Commande non trouvée', 'error');
+            return;
+        }
+        if (commandeExistante?.statut === 'livrée') {
+            showToast('Une commande livrée ne peut plus être modifiée', 'warning');
+            return;
+        }
+
         const formData = new FormData(form);
-        
+        const statut = formData.get('statut');
+        if (!['en_attente', 'produite', 'annulee'].includes(statut)) {
+            showToast('Le statut « Livrée » est réservé à la confirmation de livraison', 'error');
+            return;
+        }
+
         const items = [];
         const qtyInputs = document.querySelectorAll('.item-qty-input');
         qtyInputs.forEach(input => {
@@ -3142,12 +3260,12 @@ const saveCommande = (event, id) => {
                 }
             }
         });
-        
+
         if (items.length === 0) {
             showToast('Ajoutez au moins un article', 'error');
             return;
         }
-        
+
         let clientId = formData.get('clientId');
         if (!clientId) {
             showToast('Veuillez sélectionner un client', 'error');
@@ -3190,15 +3308,14 @@ const saveCommande = (event, id) => {
 
         const commande = {
             id: id || generateId(),
-            numero: id ? DB.get('commandes').find(c => c.id === id)?.numero : getNextCommandeNumero(),
+            numero: id ? commandeExistante.numero : getNextCommandeNumero(),
             clientId,
-            dateCommande: id ? DB.get('commandes').find(c => c.id === id)?.dateCommande : getLocalDateISOString(),
+            dateCommande: id ? commandeExistante.dateCommande : getLocalDateISOString(),
             dateLivraison,
-            statut: formData.get('statut'),
+            statut,
             items
         };
-        
-        const commandes = DB.get('commandes');
+
         if (id) {
             const index = commandes.findIndex(c => c.id === id);
             if (index !== -1) {
@@ -3213,7 +3330,7 @@ const saveCommande = (event, id) => {
         if (commande.statut === 'annulee') {
             deleteBLForCommande(commande.id);
         }
-        
+
         modal.hide();
         showToast('Commande enregistrée');
         renderCommandes();
@@ -3267,8 +3384,17 @@ const showStatusDropdown = (event, id) => {
     dropdown.style.minWidth = `${dropdownWidth}px`;
 };
 
-const updateCommandeStatut = (id, statut) => {
-    const commandes = DB.get('commandes');
+const updateCommandeStatut = (id, statut, { fromLivraison = false } = {}) => {
+    if (!['en_attente', 'produite', 'livrée', 'annulee'].includes(statut)) {
+        showToast('Statut de commande invalide', 'error');
+        return false;
+    }
+    if (statut === 'livrée' && !fromLivraison) {
+        showToast('Le statut « Livrée » est réservé à la confirmation de livraison', 'error');
+        return false;
+    }
+
+    const commandes = DB.get('commandes') || [];
     const index = commandes.findIndex(c => c.id === id);
     if (index !== -1) {
         commandes[index].statut = statut;
@@ -3278,7 +3404,9 @@ const updateCommandeStatut = (id, statut) => {
         }
         closeStatusDropdowns();
         renderCommandes();
+        return true;
     }
+    return false;
 };
 
 const marquerCommandeProduite = (id) => {
@@ -3288,68 +3416,86 @@ const marquerCommandeProduite = (id) => {
 };
 
 const livrerCommande = (id) => {
-    const commandes = DB.get('commandes');
-    let lots = DB.get('lots') || [];
-    const aromes = DB.get('aromes');
-    const formats = DB.get('formats');
-    
+    const commandes = DB.get('commandes') || [];
+    const lots = DB.get('lots') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
     const cmdIndex = commandes.findIndex(c => c.id === id);
-    if (cmdIndex === -1) return;
-    
+
+    if (cmdIndex === -1) {
+        showToast('Commande non trouvée', 'error');
+        return;
+    }
+
     const cmd = commandes[cmdIndex];
-    
-    // Normaliser les noms pour comparaison (minuscules, sans espaces)
+    if (cmd.statut !== 'produite') {
+        showToast('Seule une commande produite peut être livrée', 'error');
+        return;
+    }
+
     const normalize = (s) => (s || '').toString().toLowerCase().trim();
-    
-    // FIFO: trier lots par date de production (plus ancien primero)
-    const sortedLots = [...lots].sort((a, b) => 
+    const lotsPlanifies = lots.map(lot => ({ ...lot }));
+    const sortedLots = [...lotsPlanifies].sort((a, b) =>
         new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01')
     );
-    
-    let totalDeducted = 0;
     const lotsUtilises = [];
+    const manquants = [];
+    let totalDeducted = 0;
+    const itemsCommande = getItems(cmd);
 
-    getItems(cmd).forEach(item => {
+    if (itemsCommande.length === 0) {
+        showToast('La commande ne contient aucun article à livrer', 'error');
+        return;
+    }
+
+    for (const item of itemsCommande) {
+        const quantite = Number(item.quantite);
+        if (!Number.isInteger(quantite) || quantite <= 0) {
+            showToast('La commande contient une quantité invalide', 'error');
+            return;
+        }
+
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
         const aromeNom = normalize(arome?.nom || item.aromeId);
         const formatNom = normalize(format?.nom || item.formatId);
-        
-        let qtyToDeduct = item.quantite;
-        
-        for (let lot of sortedLots) {
-            if (normalize(lot.arome) === aromeNom && normalize(lot.format) === formatNom && lot.quantite > 0) {
-                const qtyTaken = Math.min(lot.quantite, qtyToDeduct);
-                lotsUtilises.push({
-                    lotId: lot.id,
-                    arome: lot.arome,
-                    format: lot.format,
-                    dlc: lot.dlc || '',
-                    quantite: qtyTaken
-                });
-                
-                lot.quantite -= qtyTaken;
-                totalDeducted += qtyTaken;
-                qtyToDeduct -= qtyTaken;
-                
-                if (qtyToDeduct <= 0) break;
-            }
+        let quantiteRestante = quantite;
+
+        for (const lot of sortedLots) {
+            const disponible = Number(lot.quantite) || 0;
+            if (!isLotSellable(lot) || normalize(lot.arome) !== aromeNom || normalize(lot.format) !== formatNom || disponible <= 0) continue;
+
+            const quantitePrelevee = Math.min(disponible, quantiteRestante);
+            lot.quantite = disponible - quantitePrelevee;
+            lotsUtilises.push({
+                lotId: lot.id,
+                arome: lot.arome,
+                format: lot.format,
+                dlc: lot.dlc || '',
+                quantite: quantitePrelevee
+            });
+            totalDeducted += quantitePrelevee;
+            quantiteRestante -= quantitePrelevee;
+
+            if (quantiteRestante === 0) break;
         }
-    });
-    
-    // Mettre à jour les lots dans la base
-    lots = sortedLots.map(l => l).filter(l => l.quantite > 0);
-    DB.set('lots', lots);
-    
-    // Stocker les lots utilisés dans la commande
+
+        if (quantiteRestante > 0) {
+            manquants.push(`${arome?.nom || '?'} ${format?.nom || '?'} (${quantiteRestante} manquante(s))`);
+        }
+    }
+
+    if (manquants.length > 0) {
+        showToast(`Stock insuffisant : ${manquants[0]}${manquants.length > 1 ? ` (+${manquants.length - 1})` : ''}. Livraison non effectuée.`, 'error');
+        return;
+    }
+
+    DB.set('lots', lotsPlanifies.filter(lot => Number(lot.quantite) > 0));
     commandes[cmdIndex].lotsUtilises = lotsUtilises;
     DB.set('commandes', commandes);
-    
-    // Mettre à jour le statut
-    updateCommandeStatut(id, 'livrée');
+    updateCommandeStatut(id, 'livrée', { fromLivraison: true });
     showToast(`Commande livrée - ${totalDeducted} bouteille(s) déduite(s) du stock`);
-    
-    // Proposer de générer un bulletin de livraison
+
     confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
         if (!ok) return;
         prepareCommandeBLExport(id);
@@ -3386,6 +3532,10 @@ const showLivraisonBouteillesModal = (commandeId) => {
         showToast('Commande non trouvée', 'error');
         return;
     }
+    if (cmd.statut !== 'produite') {
+        showToast('Seule une commande produite peut être livrée', 'error');
+        return;
+    }
 
     const client = clients.find(cl => cl.id === cmd.clientId);
     const clientName = client ? (client.societe || client.nom) : 'N/A';
@@ -3394,7 +3544,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
     const normalize = (s) => (s || '').toString().toLowerCase().trim();
 
     const sortedLots = [...lots]
-        .filter(lot => new Date(lot.dlc || '9999-12-31') >= new Date())
+        .filter(lot => isLotSellable(lot))
         .sort((a, b) => new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01'));
 
     const lignesHtml = getItems(cmd).map(item => {
@@ -3449,100 +3599,127 @@ const showLivraisonBouteillesModal = (commandeId) => {
         </div>`;
     }).join('');
 
-    const validateAndDeliver = async () => {
+    const validateAndDeliver = () => {
         const inputs = document.querySelectorAll('.lot-qty-input');
         const allocations = {};
-        let hasError = false;
+        const allocationsParLot = new Map();
+        let allocationInvalide = false;
 
         inputs.forEach(input => {
-            const qty = parseInt(input.value, 10) || 0;
-            if (qty <= 0) return;
-            const lotId = input.dataset.lot;
-            const itemKey = input.dataset.item;
+            const valeur = input.value.trim();
+            const quantite = valeur === '' ? 0 : Number(valeur);
+            const maximum = Number(input.max);
+            const lotId = String(input.dataset.lot || '');
+            const itemKey = input.dataset.item || '';
+
+            if (!Number.isInteger(quantite) || quantite < 0 || !Number.isInteger(maximum) || maximum < 0 || quantite > maximum) {
+                allocationInvalide = true;
+                return;
+            }
+            if (quantite === 0) return;
+            if (!lotId || !itemKey) {
+                allocationInvalide = true;
+                return;
+            }
+
             if (!allocations[itemKey]) allocations[itemKey] = [];
-            allocations[itemKey].push({ lotId, quantite: qty });
+            allocations[itemKey].push({ lotId, quantite });
+            allocationsParLot.set(lotId, (allocationsParLot.get(lotId) || 0) + quantite);
         });
 
-        for (const item of getItems(cmd)) {
+        if (allocationInvalide) {
+            showToast('Les quantités allouées doivent être des entiers compris dans le stock disponible', 'error');
+            return;
+        }
+
+        const commandesActuelles = DB.get('commandes') || [];
+        const cmdIndex = commandesActuelles.findIndex(c => c.id === commandeId);
+        const commandeActuelle = commandesActuelles[cmdIndex];
+        if (!commandeActuelle || commandeActuelle.statut !== 'produite') {
+            showToast('Cette commande ne peut plus être livrée', 'error');
+            return;
+        }
+
+        const itemsCommande = getItems(commandeActuelle);
+        if (itemsCommande.length === 0) {
+            showToast('La commande ne contient aucun article à livrer', 'error');
+            return;
+        }
+
+        for (const item of itemsCommande) {
+            const quantiteDemandee = Number(item.quantite);
+            if (!Number.isInteger(quantiteDemandee) || quantiteDemandee <= 0) {
+                showToast('La commande contient une quantité invalide', 'error');
+                return;
+            }
+
             const key = `${item.aromeId}|${item.formatId}`;
-            const alloue = allocations[key]?.reduce((s, a) => s + a.quantite, 0) || 0;
-            if (alloue !== item.quantite) {
-                hasError = true;
+            const alloue = allocations[key]?.reduce((s, allocation) => s + allocation.quantite, 0) || 0;
+            if (alloue !== quantiteDemandee) {
                 const arome = aromes.find(a => a.id === item.aromeId);
                 const format = formats.find(f => f.id === item.formatId);
-                showToast(`Quantité incorrecte pour ${arome?.nom || '?'} ${format?.nom || '?'}: alloué ${alloue} / ${item.quantite}`, 'error');
-                break;
+                showToast(`Quantité incorrecte pour ${arome?.nom || '?'} ${format?.nom || '?'} : alloué ${alloue} / ${quantiteDemandee}`, 'error');
+                return;
             }
         }
 
-        if (hasError) return;
+        const allLots = DB.get('lots') || [];
+        const lotsParId = new Map(allLots.map(lot => [String(lot.id), lot]));
+        for (const [itemKey, group] of Object.entries(allocations)) {
+            const [aromeId, formatId] = itemKey.split('|');
+            const arome = aromes.find(item => item.id === aromeId);
+            const format = formats.find(item => item.id === formatId);
+            const aromeAttendu = normalize(arome?.nom || aromeId);
+            const formatAttendu = normalize(format?.nom || formatId);
 
-        let allLots = DB.get('lots') || [];
-        const lotsUtilises = [];
-        const warnings = [];
-
-        Object.values(allocations).forEach(group => {
-            group.forEach(({ lotId, quantite }) => {
-                const lot = allLots.find(l => l.id === lotId);
-                if (!lot) {
-                    warnings.push(`Lot introuvable: #${String(lotId).slice(-6)}`);
+            for (const { lotId } of group) {
+                const lot = lotsParId.get(String(lotId));
+                if (!lot || normalize(lot.arome) !== aromeAttendu || normalize(lot.format) !== formatAttendu) {
+                    showToast('Un lot alloué ne correspond pas à l’article commandé', 'error');
                     return;
                 }
-                if ((lot.quantite || 0) < quantite) {
-                    warnings.push(`Stock insuffisant sur #${String(lot.id).slice(-6)} (${lot.quantite || 0}/${quantite})`);
-                }
-            });
-        });
-
-        if (warnings.length > 0) {
-            const ok = await confirmDialog(
-                `Attention: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}. Confirmer quand même la livraison ?`,
-                { danger: true, confirmLabel: 'Confirmer quand même', title: 'Stock insuffisant' }
-            );
-            if (!ok) return;
+            }
+        }
+        for (const [lotId, quantite] of allocationsParLot) {
+            const lot = lotsParId.get(lotId);
+            const disponible = Number(lot?.quantite);
+            if (!lot || !isLotSellable(lot) || !Number.isFinite(disponible) || disponible < quantite) {
+                showToast(`Lot indisponible ou stock insuffisant sur #${lot ? String(lot.id).slice(-6) : String(lotId).slice(-6)}. Livraison non effectuée.`, 'error');
+                return;
+            }
         }
 
+        const lotsUtilises = [];
         Object.values(allocations).forEach(group => {
             group.forEach(({ lotId, quantite }) => {
-                if (quantite <= 0) return;
-                const lotIndex = allLots.findIndex(l => l.id === lotId);
-                if (lotIndex === -1) return;
-                const lot = allLots[lotIndex];
-                const taken = Math.min(lot.quantite, quantite);
-                allLots[lotIndex].quantite -= taken;
+                const lot = lotsParId.get(String(lotId));
+                lot.quantite = Number(lot.quantite) - quantite;
                 lotsUtilises.push({
                     lotId: lot.id,
                     arome: lot.arome,
                     format: lot.format,
                     dlc: lot.dlc || '',
-                    quantite: taken,
-                    quantiteDemandee: quantite,
-                    forceStockInsuffisant: taken < quantite
+                    quantite
                 });
             });
         });
 
-        allLots = allLots.filter(l => l.quantite > 0);
-        DB.set('lots', allLots);
-
-        const cmdIndex = commandes.findIndex(c => c.id === commandeId);
-        if (cmdIndex !== -1) {
-            commandes[cmdIndex].lotsUtilises = lotsUtilises;
-            DB.set('commandes', commandes);
+        if (allLots.some(lot => !Number.isFinite(Number(lot.quantite)) || Number(lot.quantite) < 0)) {
+            showToast('Stock invalide : livraison non effectuée', 'error');
+            return;
         }
 
-        updateCommandeStatut(commandeId, 'livrée');
+        DB.set('lots', allLots.filter(lot => Number(lot.quantite) > 0));
+        commandesActuelles[cmdIndex].lotsUtilises = lotsUtilises;
+        DB.set('commandes', commandesActuelles);
+        updateCommandeStatut(commandeId, 'livrée', { fromLivraison: true });
         modal.hide();
-        if (warnings.length > 0) {
-            showToast(`Livraison forcée: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}`, 'warning');
-        }
+        showToast('Commande livrée et stock déduit');
 
         confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
             if (!ok) return;
             prepareCommandeBLExport(commandeId);
         });
-
-        renderCommandes();
     };
 
     const computeTotals = () => {
@@ -3609,45 +3786,62 @@ window.addEventListener('scroll', closeStatusDropdowns, true);
 window.addEventListener('resize', closeStatusDropdowns);
 
 const checkStockAndUpdateCommandes = () => {
-    const commandes = DB.get('commandes');
+    const commandes = DB.get('commandes') || [];
     const lots = DB.get('lots') || [];
-    const formats = DB.get('formats');
-    const aromes = DB.get('aromes');
+    const formats = DB.get('formats') || [];
+    const aromes = DB.get('aromes') || [];
     const now = new Date();
-    
     const stockDisponible = calculateAvailableStock(lots, now);
-    
     let updatedCount = 0;
-    const updatedCommandes = commandes.map(cmd => {
-        if (cmd.statut !== 'en_attente') return cmd;
-        
+
+    const commandesTriees = commandes
+        .map((commande, index) => ({ commande, index }))
+        .sort((a, b) => {
+            const aDate = dateOnly(a.commande.dateLivraison).getTime();
+            const bDate = dateOnly(b.commande.dateLivraison).getTime();
+            const aSort = Number.isNaN(aDate) ? Number.POSITIVE_INFINITY : aDate;
+            const bSort = Number.isNaN(bDate) ? Number.POSITIVE_INFINITY : bDate;
+            return aSort - bSort || a.index - b.index;
+        });
+    const updatedCommandes = [...commandes];
+
+    commandesTriees.forEach(({ commande: cmd, index }) => {
+        if (cmd.statut !== 'en_attente') return;
+
         const needed = {};
+        let canProduce = getItems(cmd).length > 0;
         getItems(cmd).forEach(item => {
+            const quantite = Number(item.quantite);
+            if (!Number.isInteger(quantite) || quantite <= 0) {
+                canProduce = false;
+                return;
+            }
             const format = formats.find(f => f.id === item.formatId);
             const arome = aromes.find(a => a.id === item.aromeId);
             const aromeName = arome?.nom || item.aromeId;
             const formatName = format?.nom || item.formatId;
             const key = `${aromeName}-${formatName}`;
             if (!needed[key]) needed[key] = 0;
-            needed[key] += item.quantite;
+            needed[key] += quantite;
         });
-        
-        let canProduce = true;
+
         Object.entries(needed).forEach(([key, qty]) => {
             const disponible = stockDisponible[key] || 0;
             if (disponible < qty) canProduce = false;
         });
-        
+
         if (canProduce) {
+            Object.entries(needed).forEach(([key, qty]) => {
+                stockDisponible[key] -= qty;
+            });
             updatedCount++;
-            return { ...cmd, statut: 'produite' };
+            updatedCommandes[index] = { ...cmd, statut: 'produite' };
         }
-        return cmd;
     });
-    
+
     DB.set('commandes', updatedCommandes);
     renderCommandes();
-    
+
     if (updatedCount > 0) {
         showToast(`${updatedCount} commande(s) mise(s) en production`);
     } else {
@@ -3660,13 +3854,13 @@ const showCommandeDetails = (id) => {
     const clients = DB.get('clients');
     const aromes = DB.get('aromes');
     const formats = DB.get('formats');
-    
+
     const commande = commandes.find(c => c.id === id);
     if (!commande) return;
-    
+
     const client = clients.find(c => c.id === commande.clientId);
     const clientName = client ? (client.societe || client.nom) : 'N/A';
-    
+
     const itemsHtml = getItems(commande).map(item => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
@@ -3676,8 +3870,8 @@ const showCommandeDetails = (id) => {
             <td>${item.quantite}</td>
         </tr>`;
     }).join('');
-    
-    const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0 
+
+    const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0
         ? commande.lotsUtilises.map(lot => `
             <tr>
                 <td><a href="#" style="color: var(--primary); font-weight: 600;" onclick="event.preventDefault(); showLotTraceModal('${escapeHtml(String(lot.lotId))}')">#${String(lot.lotId).slice(-6)}</a></td>
@@ -3687,12 +3881,12 @@ const showCommandeDetails = (id) => {
             </tr>
         `).join('')
         : '';
-    
+
     const livraisons = DB.get('livraisons') || [];
     const livraison = livraisons.find(l => l.commandeId === id);
-    
+
     const totalItems = (commande.items || []).reduce((sum, i) => sum + i.quantite, 0);
-    
+
     const modalTitle = `Commande #${getCommandeNumero(commande)}`;
     const modalBody = `
         <div class="commande-details">
@@ -3732,7 +3926,7 @@ const showCommandeDetails = (id) => {
             ` : ''}
         </div>
     `;
-    
+
     let actionsHtml = `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`;
     if (commande.statut === 'en_attente') {
         actionsHtml = `<button class="btn btn-success" onclick="marquerCommandeProduite('${id}')">Marquer produite</button>`
@@ -3804,14 +3998,14 @@ const renderArchives = () => {
     const savedFilterYear = DB.getFilter('archive_year');
     const savedFilterClient = DB.getFilter('archive_client');
     const savedFilterStatut = DB.getFilter('archive_statut') || '';
-    
+
     const commandes = DB.get('commandes').filter(c => c.statut === 'livrée' || c.statut === 'annulee');
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    
+
     const years = [...new Set(commandes.map(c => c.dateCommande ? c.dateCommande.substring(0, 4) : '2024'))].sort().reverse();
-    
+
     const filteredCommandes = commandes.filter(c => {
         const year = c.dateCommande ? c.dateCommande.substring(0, 4) : '2024';
         const matchesYear = !savedFilterYear || year === savedFilterYear;
@@ -3819,7 +4013,7 @@ const renderArchives = () => {
         const matchesStatut = !savedFilterStatut || c.statut === savedFilterStatut;
         return matchesYear && matchesClient && matchesStatut;
     });
-    
+
     let html = `
         <div class="card">
             <div class="card-header">
@@ -3829,7 +4023,7 @@ const renderArchives = () => {
                     Exporter Excel
                 </button>
             </div>
-            
+
             <div class="filters">
                 <select id="filterArchiveYear" onchange="DB.setFilter('archive_year', this.value); renderArchives()">
                     <option value="">Toutes les années</option>
@@ -3845,7 +4039,7 @@ const renderArchives = () => {
                     <option value="annulee" ${savedFilterStatut === 'annulee' ? 'selected' : ''}>Annulées</option>
                 </select>
             </div>
-            
+
             <div class="table-container" id="archivesTableContainer">
                 <table>
                     <thead>
@@ -3860,7 +4054,7 @@ const renderArchives = () => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${filteredCommandes.length === 0 ? '<tr><td colspan="7" class="text-center">Aucune commande archivée</td></tr>' : 
+                        ${filteredCommandes.length === 0 ? '<tr><td colspan="7" class="text-center">Aucune commande archivée</td></tr>' :
                           filteredCommandes.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande))
                             .map(cmd => {
                                 const client = clients.find(cl => cl.id === cmd.clientId);
@@ -3891,7 +4085,7 @@ const renderArchives = () => {
             </div>
         </div>
     `;
-    
+
     safeRender(html);
 };
 
@@ -3900,7 +4094,7 @@ const exportArchivesExcel = () => {
     const clients = DB.get('clients');
     const aromes = DB.get('aromes');
     const formats = DB.get('formats');
-    
+
     const data = commandes.map(cmd => {
         const client = clients.find(c => c.id === cmd.clientId);
         const items = getItems(cmd).map(item => {
@@ -3919,7 +4113,7 @@ const exportArchivesExcel = () => {
             'Total': getItems(cmd).reduce((sum, i) => sum + i.quantite, 0)
         };
     });
-    
+
     if (typeof XLSX !== 'undefined') {
         const ws = XLSX.utils.json_to_sheet(data);
         const wb = XLSX.utils.book_new();
@@ -3945,13 +4139,13 @@ const renderLivraisons = () => {
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    
+
     const savedFilterYear = DB.getFilter('livraison_year');
     const savedFilterClient = DB.getFilter('livraison_client');
     const savedSearch = DB.getFilter('livraison_search');
-    
+
     const years = [...new Set(livraisons.map(l => l.dateBL ? l.dateBL.substring(0, 4) : '2024'))].sort().reverse();
-    
+
     const filteredLivraisons = livraisons.filter(l => {
         const year = l.dateBL ? l.dateBL.substring(0, 4) : '2024';
         const commande = commandes.find(c => c.id === l.commandeId);
@@ -3969,13 +4163,13 @@ const renderLivraisons = () => {
         const matchesSearch = !savedSearch || searchText.includes(savedSearch.toLowerCase().trim());
         return matchesYear && matchesClient && matchesSearch;
     });
-    
+
     let html = `
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Bulletins de Livraison</h3>
             </div>
-            
+
             <div class="filters">
                 <input type="search" id="filterLivraisonSearch" placeholder="Rechercher BL, client, commande..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('livraison_search', this.value); window.__focusLivraisonSearch = true; renderLivraisons()">
                 <select id="filterLivraisonYear" onchange="DB.setFilter('livraison_year', this.value); renderLivraisons()">
@@ -3988,7 +4182,7 @@ const renderLivraisons = () => {
                 </select>
                 ${(savedFilterYear || savedFilterClient || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="resetLivraisonFilters()">Réinitialiser</button>` : ''}
             </div>
-            
+
             <div class="table-container" id="livraisonsTableContainer">
                 <table>
                     <thead>
@@ -4040,7 +4234,7 @@ const renderLivraisons = () => {
             </div>
         </div>
     `;
-    
+
     safeRender(html);
 
     if (window.__focusLivraisonSearch) {
@@ -4059,13 +4253,13 @@ const showLivraisonDetails = (id) => {
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
     const commandes = DB.get('commandes') || [];
-    
+
     const livraison = livraisons.find(l => l.id === id);
     if (!livraison) return;
-    
+
     const client = clients.find(c => c.id === livraison.clientId);
     const commande = commandes.find(c => c.id === livraison.commandeId);
-    
+
     const lignesHtml = (livraison.lignes || []).map(l => {
         const a = aromes.find(a => a.id === l.aromeId);
         const f = formats.find(f => f.id === l.formatId);
@@ -4351,13 +4545,13 @@ const generateBL = (commandeId) => {
     const commandes = DB.get('commandes') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    
+
     const commande = commandes.find(c => c.id === commandeId);
     if (!commande) {
         showToast('Commande non trouvée', 'error');
         return null;
     }
-    
+
     const lignes = getItems(commande).filter(item => item.quantite > 0).map(item => {
         const a = aromes.find(ar => ar.id === item.aromeId);
         const f = formats.find(fmt => fmt.id === item.formatId);
@@ -4369,7 +4563,7 @@ const generateBL = (commandeId) => {
             quantite: item.quantite
         };
     });
-    
+
     const livraison = {
         id: generateId(),
         numeroBL: getNextBLNumero(),
@@ -4386,11 +4580,11 @@ const generateBL = (commandeId) => {
         dateDernierExport: '',
         lotsTraces: buildLotsTracesForCommande(commande)
     };
-    
+
     const livraisons = DB.get('livraisons') || [];
     livraisons.push(livraison);
     DB.set('livraisons', livraisons);
-    
+
     return livraison;
 };
 
@@ -4825,19 +5019,19 @@ const renderProduction = () => {
     const formats = DB.get('formats');
     const recettes = DB.get('recettes');
     const lots = DB.get('lots') || [];
-    
+
     // All non-cancelled, non-delivered orders
-    const commandesPeriode = commandes.filter(c => 
+    const commandesPeriode = commandes.filter(c =>
         c.statut !== 'annulee' &&
         c.statut !== 'livrée'
     );
-    
+
     const now = new Date();
     const stockDisponible = calculateAvailableStock(lots, now);
-    
+
     // Calculate totals by arome and format (using names from commands)
     const besoins = {};
-    
+
     commandesPeriode.forEach(cmd => {
         (cmd.items || []).forEach(item => {
             const arome = aromes.find(a => a.id === item.aromeId);
@@ -4849,7 +5043,7 @@ const renderProduction = () => {
             besoins[key].quantite += item.quantite;
         });
     });
-    
+
     // Calculate production needed (total - available stock)
     const productionNecesaire = {};
     Object.entries(besoins).forEach(([key, b]) => {
@@ -4857,7 +5051,7 @@ const renderProduction = () => {
         const aProduire = Math.max(0, b.quantite - disponible);
         productionNecesaire[key] = { ...b, disponible, aProduire };
     });
-    
+
     // Calculate liters per arome (for production needed only)
     const litresParArome = {};
     Object.values(productionNecesaire).filter(b => b.aProduire > 0).forEach(b => {
@@ -4866,7 +5060,7 @@ const renderProduction = () => {
         if (!litresParArome[b.aromeNom]) litresParArome[b.aromeNom] = 0;
         litresParArome[b.aromeNom] += litres;
     });
-    
+
     // Calculate ingredients needed (for total display)
     // Aggregate by name+family to avoid mixing incompatible units (e.g. g vs kg)
     const ingredientsTotal = {};
@@ -4890,7 +5084,7 @@ const renderProduction = () => {
             });
         }
     });
-    
+
     const recipientsParArome = {};
     Object.entries(litresParArome).forEach(([aromeNom, litresTotal]) => {
         const arome = aromes.find(a => a.nom === aromeNom);
@@ -4900,7 +5094,7 @@ const renderProduction = () => {
             ingredients: calculerIngredientsRecipient(recette, recipient.litres)
         }));
     });
-    
+
     productionPlannerState = {
         productionNecesaire,
         litresParArome,
@@ -4956,7 +5150,7 @@ const renderProduction = () => {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/></svg>
                     Bouteilles à produire
                 </h4>
-                ${Object.values(productionNecesaire).length === 0 ? '<p class="text-muted">Aucune commande</p>' : 
+                ${Object.values(productionNecesaire).length === 0 ? '<p class="text-muted">Aucune commande</p>' :
                   Object.values(productionNecesaire).map(b => {
                       const arome = aromes.find(a => a.nom === b.aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
@@ -4968,13 +5162,13 @@ const renderProduction = () => {
                       </div>`;
                   }).join('')}
             </div>
-            
+
             <div class="production-item">
                 <h4>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M20.2 7.8l-7.7 7.7-4-4-5.7 5.7"/></svg>
                     Litres à produire (par arôme)
                 </h4>
-                ${Object.entries(litresParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' : 
+                ${Object.entries(litresParArome).length === 0 ? '<p class="text-muted">Tout le stock est disponible</p>' :
                   Object.entries(litresParArome).map(([aromeNom, litres]) => {
                       const arome = aromes.find(a => a.nom === aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
@@ -5053,12 +5247,12 @@ const renderProduction = () => {
                   }).join('')}
             </div>
         </div>
-        
+
         <div style="margin-top: 24px; padding: 16px; background: var(--bg-secondary); border-radius: var(--radius);">
             <strong>Résumé:</strong> ${commandesPeriode.length} commande(s) à produire - Stock déduit automatiquement
         </div>
     `;
-    
+
     let html = `
         ${kpiHtml}
         <div class="card">
@@ -5068,7 +5262,7 @@ const renderProduction = () => {
             ${resultHtml}
         </div>
     `;
-    
+
     safeRender(html);
     attacherSliderEvents();
 };
@@ -5763,7 +5957,7 @@ const renderInventaire = () => {
         { nom: 'Bouteilles vides 50cl', unite: 'pcs', seuilAlerte: 0 },
         { nom: 'Bouteilles vides 1L', unite: 'pcs', seuilAlerte: 0 }
     ];
-    
+
     let items = DB.get('inventaire');
     if (items.length === 0) {
         items = defaultConsommables.map(item => ({
@@ -5774,7 +5968,7 @@ const renderInventaire = () => {
         }));
         DB.set('inventaire', items);
     }
-    
+
     const savedSearch = DB.getFilter('inventaire_search');
     const savedType = DB.getFilter('inventaire_type') || 'tous';
     const filterInventaireItem = (item) => {
@@ -5790,9 +5984,9 @@ const renderInventaire = () => {
     const allConsommablesCount = items.filter(i => i.categorie === 'consommable').length;
     const allEquipementCount = items.filter(i => i.categorie === 'equipement').length;
     const alertItems = items.filter(item => item.seuilAlerte && (item.quantite || 0) <= item.seuilAlerte);
-    
+
     const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
-    
+
     let html = `
         <div class="stats-grid">
             <div class="stat-card">
@@ -5851,7 +6045,7 @@ const renderInventaire = () => {
                 ], 'renderInventaire')}
                 <input type="search" id="filterInventaireSearch" placeholder="Rechercher un item..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('inventaire_search', this.value); window.__focusInventaireSearch = true; renderInventaire()">
             </div>
-            
+
             <!-- Consommables Section -->
             <div class="inventaire-section">
                 <h4>Consommables</h4>
@@ -5878,7 +6072,7 @@ const renderInventaire = () => {
                       }).join('')}
                 </div>
             </div>
-            
+
             <!-- Équipement Section (collapsible) -->
             <div class="inventaire-section">
                 <h4 class="inventaire-section-heading">
@@ -5912,7 +6106,7 @@ const renderInventaire = () => {
             </div>
         </div>
     `;
-    
+
     safeRender(html);
     if (window.__focusInventaireSearch) {
         const input = document.getElementById('filterInventaireSearch');
@@ -5937,9 +6131,9 @@ const toggleEquipementSection = () => {
 const showInventaireModal = (categorie, id = null) => {
     const items = DB.get('inventaire') || [];
     const item = id ? items.find(i => i.id === id) : null;
-    
+
     const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
-    
+
     modal.show(id ? 'Modifier item' : 'Nouvel item', `
         <form id="inventaireForm">
             <input type="hidden" name="categorie" value="${escapeHtml(categorie)}">
@@ -5974,30 +6168,38 @@ const showInventaireModal = (categorie, id = null) => {
 // Save inventaire item
 const saveInventaireItem = (event, id) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('inventaireForm');
-    const formData = new FormData(form);
-    
-    const item = {
-        id: id || generateId(),
-        categorie: formData.get('categorie'),
-        nom: formData.get('nom'),
-        quantite: parseFloat(formData.get('quantite')) || 0,
-        unite: displayUnit(formData.get('unite')),
-        seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0
-    };
-    
-    const items = DB.get('inventaire');
-    if (id) {
-        const index = items.findIndex(i => i.id === id);
-        items[index] = item;
-    } else {
-        items.push(item);
+    try {
+        const form = document.getElementById('inventaireForm');
+        if (!form?.reportValidity()) return;
+        const formData = new FormData(form);
+
+        const item = {
+            id: id || generateId(),
+            categorie: formData.get('categorie'),
+            nom: formData.get('nom'),
+            quantite: parseFloat(formData.get('quantite')) || 0,
+            unite: displayUnit(formData.get('unite')),
+            seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0
+        };
+
+        const items = DB.get('inventaire');
+        if (id) {
+            const index = items.findIndex(i => i.id === id);
+            items[index] = item;
+        } else {
+            items.push(item);
+        }
+        DB.set('inventaire', items);
+
+        modal.hide();
+        showToast('Item enregistré');
+        renderInventaire();
+    } catch (e) {
+        console.error('Error saving inventaire item:', e);
+        showToast('Erreur lors de l\'enregistrement de l\'item', 'error');
+    } finally {
+        if (reenable) reenable();
     }
-    DB.set('inventaire', items);
-    
-    modal.hide();
-    showToast('Item enregistré');
-    renderInventaire();
 };
 
 // Update inventaire quantity
@@ -6045,7 +6247,7 @@ const renderParametres = () => {
     const formats = DB.get('formats') || [];
     const recettes = DB.get('recettes') || [];
     const clients = DB.get('clients') || [];
-    
+
     let html = `
         <div class="settings-grid">
             <div class="settings-card">
@@ -6054,7 +6256,7 @@ const renderParametres = () => {
                     <button class="btn btn-sm btn-primary" onclick="showEmployeModal()">+ Ajouter</button>
                 </div>
                 <ul class="settings-list">
-                    ${employes.length === 0 ? '<li class="settings-item text-muted">Aucun employé</li>' : 
+                    ${employes.length === 0 ? '<li class="settings-item text-muted">Aucun employé</li>' :
                       employes.map(e => `
                         <li class="settings-item">
                             <div class="settings-item-info">
@@ -6070,14 +6272,14 @@ const renderParametres = () => {
                       `).join('')}
                 </ul>
             </div>
-            
+
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Arômes</h3>
                     <button class="btn btn-sm btn-primary" onclick="showAromeModal()">+ Ajouter</button>
                 </div>
                 <ul class="settings-list">
-                    ${aromes.length === 0 ? '<li class="settings-item text-muted">Aucun arôme</li>' : 
+                    ${aromes.length === 0 ? '<li class="settings-item text-muted">Aucun arôme</li>' :
                       aromes.map(a => `
                         <li class="settings-item">
                             <div class="settings-item-info">
@@ -6093,14 +6295,14 @@ const renderParametres = () => {
                       `).join('')}
                 </ul>
             </div>
-            
+
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Formats</h3>
                     <button class="btn btn-sm btn-primary" onclick="showFormatModal()">+ Ajouter</button>
                 </div>
                 <ul class="settings-list">
-                    ${formats.length === 0 ? '<li class="settings-item text-muted">Aucun format</li>' : 
+                    ${formats.length === 0 ? '<li class="settings-item text-muted">Aucun format</li>' :
                       formats.map(f => `
                         <li class="settings-item">
                             <div class="settings-item-info">
@@ -6116,7 +6318,7 @@ const renderParametres = () => {
                       `).join('')}
                 </ul>
             </div>
-            
+
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Recettes</h3>
@@ -6126,7 +6328,7 @@ const renderParametres = () => {
                     </div>
                 </div>
                 <ul class="settings-list">
-                    ${recettes.length === 0 ? '<li class="settings-item text-muted">Aucune recette</li>' : 
+                    ${recettes.length === 0 ? '<li class="settings-item text-muted">Aucune recette</li>' :
                       recettes.map(r => {
                           const arome = aromes.find(a => a.id === r.aromeId);
                           return `
@@ -6145,7 +6347,7 @@ const renderParametres = () => {
                       }).join('')}
                 </ul>
             </div>
-            
+
             <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
                     <h3>Clients</h3>
@@ -6174,7 +6376,7 @@ const renderParametres = () => {
                       `).join('')}
                 </ul>
             </div>
-            
+
             <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
                     <h3>Sauvegarde & Restauration</h3>
@@ -6188,7 +6390,7 @@ const renderParametres = () => {
                     La sauvegarde inclut: employés, aromes, formats, recettes, clients, lots, commandes et pointages.
                 </p>
             </div>
-            
+
             ${window.StressTest ? `
             <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--warning);">
                 <div class="settings-card-header">
@@ -6200,7 +6402,7 @@ const renderParametres = () => {
                 </div>
             </div>
             ` : ''}
-            
+
             <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--danger);">
                 <div class="settings-card-header">
                     <h3>Réinitialisation</h3>
@@ -6214,7 +6416,7 @@ const renderParametres = () => {
             </div>
         </div>
     `;
-    
+
     safeRender(html);
 };
 
@@ -6227,7 +6429,7 @@ const resetCounters = () => {
 const showEmployeModal = (id = null) => {
     const employes = DB.get('employees');
     const emp = id ? employes.find(e => e.id === id) : null;
-    
+
     modal.show(id ? 'Modifier employé' : 'Nouvel employé', `
         <form id="employeForm">
             <div class="form-row">
@@ -6258,34 +6460,42 @@ const showEmployeModal = (id = null) => {
 
 const saveEmploye = (event, id) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('employeForm');
-    const formData = new FormData(form);
-    
-    const employe = {
-        id: id || generateId(),
-        nom: formData.get('nom'),
-        prenom: formData.get('prenom'),
-        actif: form.querySelector('input[name="actif"]').checked
-    };
-    
-    const employes = DB.get('employees');
-    if (id) {
-        const index = employes.findIndex(e => e.id === id);
-        employes[index] = employe;
-    } else {
-        employes.push(employe);
+    try {
+        const form = document.getElementById('employeForm');
+        if (!form?.reportValidity()) return;
+        const formData = new FormData(form);
+
+        const employe = {
+            id: id || generateId(),
+            nom: formData.get('nom'),
+            prenom: formData.get('prenom'),
+            actif: form.querySelector('input[name="actif"]').checked
+        };
+
+        const employes = DB.get('employees');
+        if (id) {
+            const index = employes.findIndex(e => e.id === id);
+            employes[index] = employe;
+        } else {
+            employes.push(employe);
+        }
+        DB.set('employees', employes);
+
+        modal.hide();
+        showToast('Employé enregistré');
+        renderParametres();
+    } catch (e) {
+        console.error('Error saving employee:', e);
+        showToast('Erreur lors de l\'enregistrement de l\'employé', 'error');
+    } finally {
+        if (reenable) reenable();
     }
-    DB.set('employees', employes);
-    
-    modal.hide();
-    showToast('Employé enregistré');
-    renderParametres();
 };
 
 const deleteEmploye = (id) => {
     const pointages = DB.get('pointages');
     const hasPointages = pointages.some(p => p.employeId === id);
-    
+
     if (hasPointages) {
         showToast('Impossible de supprimer cet employé : il a des pointages enregistrés. Vous pouvez le désactiver à la place.', 'error');
         return;
@@ -6304,7 +6514,7 @@ const deleteEmploye = (id) => {
 const showAromeModal = (id = null) => {
     const aromes = DB.get('aromes');
     const arome = id ? aromes.find(a => a.id === id) : null;
-    
+
     modal.show(id ? 'Modifier arôme' : 'Nouvel arôme', `
         <form id="aromeForm">
             <div class="form-group">
@@ -6330,37 +6540,45 @@ const showAromeModal = (id = null) => {
 
 const saveArome = (event, id) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('aromeForm');
-    const formData = new FormData(form);
-    
-    const arome = {
-        id: id || generateId(),
-        nom: formData.get('nom'),
-        couleur: formData.get('couleur'),
-        actif: form.querySelector('input[name="actif"]').checked
-    };
-    
-    const aromes = DB.get('aromes');
-    if (id) {
-        const index = aromes.findIndex(a => a.id === id);
-        aromes[index] = arome;
-    } else {
-        aromes.push(arome);
+    try {
+        const form = document.getElementById('aromeForm');
+        if (!form?.reportValidity()) return;
+        const formData = new FormData(form);
+
+        const arome = {
+            id: id || generateId(),
+            nom: formData.get('nom'),
+            couleur: formData.get('couleur'),
+            actif: form.querySelector('input[name="actif"]').checked
+        };
+
+        const aromes = DB.get('aromes');
+        if (id) {
+            const index = aromes.findIndex(a => a.id === id);
+            aromes[index] = arome;
+        } else {
+            aromes.push(arome);
+        }
+        DB.set('aromes', aromes);
+
+        modal.hide();
+        showToast('Arôme enregistré');
+        renderParametres();
+    } catch (e) {
+        console.error('Error saving arome:', e);
+        showToast('Erreur lors de l\'enregistrement de l\'arôme', 'error');
+    } finally {
+        if (reenable) reenable();
     }
-    DB.set('aromes', aromes);
-    
-    modal.hide();
-    showToast('Arôme enregistré');
-    renderParametres();
 };
 
 const deleteArome = (id) => {
     const commandes = DB.get('commandes');
     const recettes = DB.get('recettes');
-    
+
     const isUsedInCommandes = commandes.some(c => getItems(c).some(i => i.aromeId === id));
     const isUsedInRecettes = recettes.some(r => r.aromeId === id);
-    
+
     if (isUsedInCommandes || isUsedInRecettes) {
         showToast('Impossible de supprimer cet arôme : il est utilisé dans des commandes ou des recettes. Vous pouvez le désactiver à la place.', 'error');
         return;
@@ -6379,7 +6597,7 @@ const deleteArome = (id) => {
 const showFormatModal = (id = null) => {
     const formats = DB.get('formats');
     const format = id ? formats.find(f => f.id === id) : null;
-    
+
     modal.show(id ? 'Modifier format' : 'Nouveau format', `
         <form id="formatForm">
             <div class="form-row">
@@ -6407,34 +6625,42 @@ const showFormatModal = (id = null) => {
 
 const saveFormat = (event, id) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('formatForm');
-    const formData = new FormData(form);
-    
-    const format = {
-        id: id || generateId(),
-        nom: formData.get('nom'),
-        contenanceCl: parseInt(formData.get('contenanceCl')),
-        actif: form.querySelector('input[name="actif"]').checked
-    };
-    
-    const formats = DB.get('formats');
-    if (id) {
-        const index = formats.findIndex(f => f.id === id);
-        formats[index] = format;
-    } else {
-        formats.push(format);
+    try {
+        const form = document.getElementById('formatForm');
+        if (!form?.reportValidity()) return;
+        const formData = new FormData(form);
+
+        const format = {
+            id: id || generateId(),
+            nom: formData.get('nom'),
+            contenanceCl: parseInt(formData.get('contenanceCl')),
+            actif: form.querySelector('input[name="actif"]').checked
+        };
+
+        const formats = DB.get('formats');
+        if (id) {
+            const index = formats.findIndex(f => f.id === id);
+            formats[index] = format;
+        } else {
+            formats.push(format);
+        }
+        DB.set('formats', formats);
+
+        modal.hide();
+        showToast('Format enregistré');
+        renderParametres();
+    } catch (e) {
+        console.error('Error saving format:', e);
+        showToast('Erreur lors de l\'enregistrement du format', 'error');
+    } finally {
+        if (reenable) reenable();
     }
-    DB.set('formats', formats);
-    
-    modal.hide();
-    showToast('Format enregistré');
-    renderParametres();
 };
 
 const deleteFormat = (id) => {
     const commandes = DB.get('commandes');
     const isUsedInCommandes = commandes.some(c => getItems(c).some(i => i.formatId === id));
-    
+
     if (isUsedInCommandes) {
         showToast('Impossible de supprimer ce format : il est utilisé dans des commandes. Vous pouvez le désactiver à la place.', 'error');
         return;
@@ -6454,12 +6680,12 @@ const showRecetteModal = (id = null) => {
     const aromes = DB.get('aromes');
     const recettes = DB.get('recettes');
     const recette = id ? recettes.find(r => r.id === id) : null;
-    
+
     if (aromes.length === 0) {
         showToast('Veuillez d\'abord ajouter des aromes', 'error');
         return;
     }
-    
+
     const inventaire = DB.get('inventaire') || [];
     const consumableNames = inventaire.filter(i => i.categorie === 'consommable').map(i => i.nom);
     const suggestionsId = 'ingredientSuggestions';
@@ -6470,12 +6696,12 @@ const showRecetteModal = (id = null) => {
     const ingredientsHtml = recette ? recette.ingredients.map((ing, idx) => `
         <div class="ingredient-row">
             <input type="text" name="ingredients[${idx}][nom]" value="${escapeHtml(ing.nom)}" placeholder="Ingrédient" list="${suggestionsId}" required>
-            <input type="number" name="ingredients[${idx}][quantite]" value="${ing.quantite}" placeholder="Qté" step="0.01" required>
+            <input type="number" name="ingredients[${idx}][quantite]" value="${ing.quantite}" placeholder="Qté" step="0.01" min="0.01" required>
             <input type="text" name="ingredients[${idx}][unite]" value="${escapeHtml(displayUnit(ing.unite))}" placeholder="Unité" required>
             <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
         </div>
-    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>`;
-    
+    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" min="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>`;
+
     // Filter out aromes that already have a recipe (except the one being edited)
     const availableAromes = aromes.filter(a => {
         if (!a.actif) return false;
@@ -6483,13 +6709,13 @@ const showRecetteModal = (id = null) => {
         const existingRecipe = recettes.find(r => r.aromeId === a.id);
         return !existingRecipe;
     });
-    
+
     modal.show(id ? 'Modifier recette' : 'Nouvelle recette', `
         <form id="recetteForm">
             <div class="form-group">
                 <label>Arôme (recette pour 1 litre)</label>
                 <select name="aromeId" required ${id ? 'disabled' : ''}>
-                    ${availableAromes.length === 0 && !recette ? '<option value="">Aucun arôme disponible</option>' : 
+                    ${availableAromes.length === 0 && !recette ? '<option value="">Aucun arôme disponible</option>' :
                       aromes.filter(a => {
                           if (!a.actif) return false;
                           if (recette && recette.aromeId === a.id) return true;
@@ -6522,7 +6748,7 @@ const addIngredient = () => {
     div.className = 'ingredient-row';
     div.innerHTML = `
         <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" list="ingredientSuggestions" required>
-        <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" required>
+        <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" min="0.01" required>
         <input type="text" name="ingredients[${index}][unite]" placeholder="Unité" required>
         <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
     `;
@@ -6532,28 +6758,55 @@ const addIngredient = () => {
 const saveRecette = (event, id) => {
     const reenable = disableSaveBtn(event);
     const form = document.getElementById('recetteForm');
+    if (!form) {
+        showToast('Formulaire de recette introuvable', 'error');
+        if (reenable) reenable();
+        return;
+    }
     const formData = new FormData(form);
-    
+
     const ingredients = [];
+    const incompleteIngredients = [];
+    const invalidQuantities = [];
     const invalidUnits = [];
     const rows = document.querySelectorAll('.ingredient-row');
     rows.forEach((row, idx) => {
         const nom = row.querySelector(`input[name="ingredients[${idx}][nom]"]`)?.value || row.querySelector('[name*="nom"]')?.value;
         const quantite = row.querySelector(`input[name="ingredients[${idx}][quantite]"]`)?.value || row.querySelector('[name*="quantite"]')?.value;
         const rawUnite = row.querySelector(`input[name="ingredients[${idx}][unite]"]`)?.value || row.querySelector('[name*="unite"]')?.value;
-        
-        if (nom && quantite && rawUnite) {
-            const unite = displayUnit(rawUnite);
-            if (!isValidUnit(unite)) {
-                invalidUnits.push(`${nom} (${rawUnite})`);
-                return;
-            }
-            ingredients.push({ nom, quantite: parseFloat(quantite), unite });
+
+        if (!nom || !quantite || !rawUnite) {
+            incompleteIngredients.push(`Ingrédient ${idx + 1}`);
+            return;
         }
+
+        const quantiteValue = Number(quantite);
+        if (!Number.isFinite(quantiteValue) || quantiteValue <= 0) {
+            invalidQuantities.push(nom);
+            return;
+        }
+
+        const unite = displayUnit(rawUnite);
+        if (!isValidUnit(unite)) {
+            invalidUnits.push(`${nom} (${rawUnite})`);
+            return;
+        }
+        ingredients.push({ nom, quantite: quantiteValue, unite });
     });
-    
+
+    if (incompleteIngredients.length > 0) {
+        showToast('Veuillez compléter tous les ingrédients', 'error');
+        if (reenable) reenable();
+        return;
+    }
+    if (invalidQuantities.length > 0) {
+        showToast(`La quantité doit être supérieure à zéro: ${invalidQuantities.join(', ')}`, 'error');
+        if (reenable) reenable();
+        return;
+    }
     if (invalidUnits.length > 0) {
         showToast(`Unité invalide: ${invalidUnits.join(', ')}`, 'error');
+        if (reenable) reenable();
         return;
     }
 
@@ -6565,24 +6818,29 @@ const saveRecette = (event, id) => {
     if (missingIngredients.length > 0) {
         showToast(`Ingrédient(s) absents de l'inventaire: ${missingIngredients.map(i => i.nom).join(', ')}`, 'warning');
     }
-    
+
     // Get aromeId from select or hidden input
     let aromeId = formData.get('aromeId');
     if (!aromeId) {
         const hiddenInput = form.querySelector('input[name="aromeId"][type="hidden"]');
         aromeId = hiddenInput?.value;
     }
-    
+
     const recettes = DB.get('recettes');
     const arome = DB.get('aromes').find(a => a.id === aromeId);
-    
+    if (!arome) {
+        showToast('Arôme de recette invalide', 'error');
+        if (reenable) reenable();
+        return;
+    }
+
     const recette = {
         id: id || generateId(),
         aromeId: aromeId,
-        nom: arome ? arome.nom : 'Recette',
+        nom: arome.nom,
         ingredients
     };
-    
+
     if (id) {
         const index = recettes.findIndex(r => r.id === id);
         recettes[index] = recette;
@@ -6590,7 +6848,8 @@ const saveRecette = (event, id) => {
         recettes.push(recette);
     }
     DB.set('recettes', recettes);
-    
+
+    if (reenable) reenable();
     modal.hide();
     showToast('Recette enregistrée');
     renderParametres();
@@ -6653,7 +6912,7 @@ const syncRecettesInventaire = () => {
 const showClientModal = (id = null) => {
     const clients = DB.get('clients');
     const client = id ? clients.find(c => c.id === id) : null;
-    
+
     modal.show(id ? 'Modifier client' : 'Nouveau client', `
         <form id="clientForm">
             <div class="form-row">
@@ -6728,42 +6987,54 @@ const showClientModal = (id = null) => {
 
 const saveClient = (event, id) => {
     const reenable = disableSaveBtn(event);
-    const form = document.getElementById('clientForm');
-    const formData = new FormData(form);
-    
-    const client = {
-        id: id || generateId(),
-        societe: formData.get('societe') || '',
-        nom: formData.get('nom') || '',
-        adresse: formData.get('adresse') || '',
-        npa: formData.get('npa') || '',
-        tarifs: formData.get('tarifs') || '',
-        prix25cl: formData.get('prix25cl') || '',
-        prix50cl: formData.get('prix50cl') || '',
-        prix100cl: formData.get('prix100cl') || '',
-        modeFact: formData.get('modeFact') || '',
-        coord: formData.get('coord') || '',
-        actif: form.querySelector('input[name="actif"]').checked
-    };
-    
-    const clients = DB.get('clients');
-    if (id) {
-        const index = clients.findIndex(c => c.id === id);
-        clients[index] = client;
-    } else {
-        clients.push(client);
+    try {
+        const form = document.getElementById('clientForm');
+        if (!form?.reportValidity()) return;
+        const formData = new FormData(form);
+
+        const client = {
+            id: id || generateId(),
+            societe: formData.get('societe') || '',
+            nom: formData.get('nom') || '',
+            adresse: formData.get('adresse') || '',
+            npa: formData.get('npa') || '',
+            tarifs: formData.get('tarifs') || '',
+            prix25cl: formData.get('prix25cl') || '',
+            prix50cl: formData.get('prix50cl') || '',
+            prix100cl: formData.get('prix100cl') || '',
+            modeFact: formData.get('modeFact') || '',
+            coord: formData.get('coord') || '',
+            actif: form.querySelector('input[name="actif"]').checked
+        };
+        if (!client.societe.trim() && !client.nom.trim()) {
+            showToast('Veuillez renseigner le nom ou la société du client', 'error');
+            return;
+        }
+
+        const clients = DB.get('clients');
+        if (id) {
+            const index = clients.findIndex(c => c.id === id);
+            clients[index] = client;
+        } else {
+            clients.push(client);
+        }
+        DB.set('clients', clients);
+
+        modal.hide();
+        showToast('Client enregistré');
+        renderParametres();
+    } catch (e) {
+        console.error('Error saving client:', e);
+        showToast('Erreur lors de l\'enregistrement du client', 'error');
+    } finally {
+        if (reenable) reenable();
     }
-    DB.set('clients', clients);
-    
-    modal.hide();
-    showToast('Client enregistré');
-    renderParametres();
 };
 
 const deleteClient = (id) => {
     const commandes = DB.get('commandes');
     const isUsedInCommandes = commandes.some(c => c.clientId === id);
-    
+
     if (isUsedInCommandes) {
         showToast('Impossible de supprimer ce client : il a des commandes associées. Vous pouvez le désactiver à la place.', 'error');
         return;

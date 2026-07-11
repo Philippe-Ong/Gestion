@@ -904,11 +904,20 @@ input[type="checkbox"] {
     visibility: visible;
 }
 
+.modal-container {
+    width: 100%;
+    max-width: 560px;
+}
+
+.modal-container.modal-large {
+    max-width: 880px;
+}
+
 .modal {
     background: var(--white);
     border-radius: var(--radius-xl);
     width: 100%;
-    max-width: 560px;
+    max-width: none;
     max-height: 90vh;
     overflow: hidden;
     display: flex;
@@ -920,11 +929,6 @@ input[type="checkbox"] {
 
 .modal-overlay.active .modal {
     transform: translateY(0) scale(1);
-}
-
-.modal-large,
-.modal-container.modal-large .modal {
-    max-width: 880px;
 }
 
 .modal-header {
@@ -2128,19 +2132,31 @@ input[type="checkbox"] {
 
     .modal {
         max-width: 100%;
-        max-height: 96vh;
+        max-height: calc(100dvh - 24px);
         margin: 0;
         border-radius: var(--radius-lg);
     }
 
+    .modal-overlay {
+        padding: 12px;
+    }
+
     .modal-header,
-    .modal-body,
-    .modal-footer {
+    .modal-body {
         padding: 14px 16px;
     }
 
+    .modal-footer {
+        padding: 14px 16px;
+        flex-wrap: wrap;
+    }
+
+    .modal-footer .btn {
+        flex: 1 1 180px;
+    }
+
     .toast-container {
-        bottom: 12px;
+        bottom: calc(72px + env(safe-area-inset-bottom));
         right: 12px;
         left: 12px;
     }
@@ -2649,6 +2665,89 @@ input[type="checkbox"] {
     margin: 0;
 }
 .matrix-cell input[type=number] { -moz-appearance: textfield; }
+
+.items-matrix-container {
+    overflow-x: auto;
+    margin: 4px 0;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    background: var(--white);
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+}
+
+.items-matrix {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.items-matrix th,
+.items-matrix td {
+    padding: 6px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.items-matrix th:first-child,
+.items-matrix td:first-child {
+    min-width: 116px;
+    text-align: left;
+    position: sticky;
+    left: 0;
+}
+
+.items-matrix th:first-child {
+    z-index: 3;
+    background: var(--bg-secondary);
+}
+
+.items-matrix td:first-child {
+    z-index: 1;
+    background: var(--white);
+    color: var(--text);
+    font-weight: 600;
+}
+
+.items-matrix tbody tr:nth-child(even) td:first-child {
+    background: var(--bg-secondary);
+}
+
+.items-matrix tbody tr:hover td:first-child {
+    background: var(--primary-tint);
+}
+
+.items-matrix td:not(:first-child) {
+    min-width: 64px;
+    padding: 5px;
+}
+
+.items-matrix .item-qty-input {
+    width: 54px;
+    min-width: 54px;
+    min-height: 44px;
+    padding: 4px;
+    text-align: center;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.items-matrix td.filled .item-qty-input {
+    background: var(--bg-success);
+    border-color: var(--success-light);
+    color: var(--success-dark);
+}
+
+.items-matrix .item-qty-input::-webkit-outer-spin-button,
+.items-matrix .item-qty-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.items-matrix .item-qty-input[type=number] {
+    -moz-appearance: textfield;
+}
 
 /* --- Récap total commande (modal) --- */
 .commande-total {
@@ -3536,7 +3635,7 @@ input[type="checkbox"] {
         bottom: 0;
         left: 0;
         right: 0;
-        height: 56px;
+        height: calc(56px + env(safe-area-inset-bottom));
         background: var(--white);
         border-top: 1px solid var(--border);
         box-shadow: 0 -2px 8px rgba(0,0,0,0.05);
@@ -3571,9 +3670,27 @@ input[type="checkbox"] {
     /* Touch targets mobile */
     .btn { min-height: 44px; -webkit-tap-highlight-color: transparent; }
     .employee-card, .status-pill, .week-day { -webkit-tap-highlight-color: transparent; }
+
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea {
+        font-size: 16px;
+    }
 }
 
 /* --- Lignes de paramètres : empilement sur petit écran (évite l'écrasement du texte) --- */
+@media (max-width: 480px) {
+    .modal-footer {
+        flex-direction: column-reverse;
+        align-items: stretch;
+    }
+
+    .modal-footer .btn {
+        width: 100%;
+        flex: none;
+    }
+}
+
 @media (max-width: 640px) {
     .settings-item {
         flex-direction: column;

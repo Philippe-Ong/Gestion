@@ -11,8 +11,8 @@
 ## 2. Structure des données
 
 ### Tables synchronisées (ALL_TABLES)
-Les 11 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
-`employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`.
+Les 12 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
+`employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`, `todos`.
 
 ### Employés
 ```json
@@ -139,6 +139,16 @@ Les 11 tables persistées dans localStorage et synchronisées avec Firebase Fire
   "format": "string",
   "quantity": "number",
   "productionDate": "date",
+  "dateAdded": "datetime (ISO string)"
+}
+```
+
+### Tâches du dashboard
+```json
+{
+  "id": "uuid",
+  "text": "string",
+  "done": "boolean",
   "dateAdded": "datetime (ISO string)"
 }
 ```
