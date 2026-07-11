@@ -14,6 +14,16 @@
 Les 12 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
 `employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`, `todos`.
 
+### Tables modifiées localement (non synchronisées)
+Clé localStorage hors `ALL_TABLES` : `thecol_dirty_tables`.
+
+Stocke un tableau JSON des noms de tables qui ont été modifiées localement mais pas encore synchronisées avec Firebase Firestore. Gérée par les helpers :
+- `getDirtyTables()` — retourne le tableau (parsing JSON, défaut `[]`)
+- `markDirty(key)` — ajoute une table à la liste si elle n'y est pas déjà
+- `unmarkDirty(key)` — retire une table de la liste
+
+Ces helpers sont appelés automatiquement par `DB.set()` et `DB.forceSet()` lors des écritures locales, et par les fonctions de synchronisation Firestore une fois l'envoi réussi.
+
 ### Employés
 ```json
 {
@@ -130,10 +140,12 @@ Les 12 tables persistées dans localStorage et synchronisées avec Firebase Fire
 }
 ```
 
+**Pointages de nuit :** Les pointages où `heureFin < heureDebut` (ex. 22:00 → 02:00) sont supportés. La durée est calculée par le helper `computePointageMinutes` qui ajoute 24h (1440 min) à l'heure de fin si elle est antérieure à l'heure de début, avant de soustraire la pause.
+
 ### Historique de production
 ```json
 {
-  "id": "string (PROD-{timestamp}-{random})",
+  "id": "string (PROD-{timestamp}-{random} | VENTE-{timestamp}-{random} | RESTAURE-{timestamp}-{random})",
   "lotId": "string (uuid or numeric)",
   "arome": "string",
   "format": "string",
@@ -142,6 +154,11 @@ Les 12 tables persistées dans localStorage et synchronisées avec Firebase Fire
   "dateAdded": "datetime (ISO string)"
 }
 ```
+
+Les entrées d'historique utilisent trois préfixes d'ID :
+- **`PROD-`** : créées lors de la production d'un lot (ajout de stock).
+- **`VENTE-`** : créées lors de la vente/livraison d'une commande (déduction de stock).
+- **`RESTAURE-`** : créées lors de la restauration d'une commande livrée (re-crédit des quantités aux lots). Ces entrées sont filtrées par `renderHistorique` et ne sont pas affichées dans la vue historique de production.
 
 ### Tâches du dashboard
 ```json
@@ -250,6 +267,12 @@ Les 12 tables persistées dans localStorage et synchronisées avec Firebase Fire
    - Bouteilles par arôme/format
    - Litres totaux par arôme
    - Ingrédients requis
+
+6. **Déduction des bouchons :** Lors de la confirmation de production, les bouchons sont déduits de l'inventaire par taille :
+   - **"Bouchons 25cl"** pour les formats dont la contenance est < 50 cl
+   - **"Bouchons 50cl/100cl"** pour les formats ≥ 50 cl
+   - Une marge de 5 % est ajoutée au nombre de bouchons déduits
+   - Ces articles sont créés ou migrés automatiquement depuis l'ancien nom "Capsules" par `syncRecettesInventaire`
 
 ### Pointage
 1. Sélectionner employé
