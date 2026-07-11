@@ -89,6 +89,11 @@ const getLocalDateISOString = () => {
     return date.toISOString().split('T')[0];
 };
 
+const toLocalDayKey = (ms) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const getNextCommandeNumero = () => {
     const commandes = DB.get('commandes');
     let maxNum = 0;
@@ -1583,7 +1588,7 @@ const renderHistorique = () => {
     const dayKeys = [];
     const byDay = {};
     entries.forEach(e => {
-        const key = e.when ? new Date(e.when).toISOString().slice(0, 10) : 'na';
+        const key = e.when ? toLocalDayKey(e.when) : 'na';
         if (!byDay[key]) { byDay[key] = []; dayKeys.push(key); }
         byDay[key].push(e);
     });
@@ -1599,7 +1604,7 @@ const renderHistorique = () => {
         if (key === todayKey) return "Aujourd'hui";
         if (key === yesterdayKey) return 'Hier';
         if (key === 'na') return 'Date inconnue';
-        const lbl = new Date(key).toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long' });
+        const lbl = dateOnly(key).toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long' });
         return lbl.charAt(0).toUpperCase() + lbl.slice(1);
     };
 
