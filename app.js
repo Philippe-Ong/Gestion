@@ -5763,16 +5763,33 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
         }
     });
 
-    const capsulesItem = inventaire.find(item => {
-        const n = normalizeName(item.nom);
-        return n.includes('capsule') || n.includes('bouchon');
+    // Bouchons : déduction par taille (25cl vs 50/100cl)
+    let btPetitBouchon = 0, btGrandBouchon = 0;
+    producedByFormat.forEach(({ format, quantite }) => {
+        if ((format.contenanceCl || 0) < 50) btPetitBouchon += quantite;
+        else btGrandBouchon += quantite;
     });
-    const capsulesNecessaires = Math.ceil(totalBouteilles * CONSTANTS.CAPSULE_LOSS);
-    if (capsulesItem) {
-        if ((capsulesItem.quantite || 0) < capsulesNecessaires) warnings.push(`Stock insuffisant: ${capsulesItem.nom}`);
-        capsulesItem.quantite = (capsulesItem.quantite || 0) - capsulesNecessaires;
-    } else {
-        warnings.push('Capsules/bouchons absents de l\'inventaire');
+
+    const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.CAPSULE_LOSS);
+    const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.CAPSULE_LOSS);
+
+    if (bouchonsPetitsNecessaires > 0) {
+        const bouchonPetitItem = findInventaireItemByName(inventaire, 'Bouchons 25cl');
+        if (bouchonPetitItem) {
+            if ((bouchonPetitItem.quantite || 0) < bouchonsPetitsNecessaires) warnings.push(`Stock insuffisant: ${bouchonPetitItem.nom}`);
+            bouchonPetitItem.quantite = (bouchonPetitItem.quantite || 0) - bouchonsPetitsNecessaires;
+        } else {
+            warnings.push('Bouchons 25cl absents de l\'inventaire');
+        }
+    }
+    if (bouchonsGrandsNecessaires > 0) {
+        const bouchonGrandItem = findInventaireItemByName(inventaire, 'Bouchons 50cl/100cl');
+        if (bouchonGrandItem) {
+            if ((bouchonGrandItem.quantite || 0) < bouchonsGrandsNecessaires) warnings.push(`Stock insuffisant: ${bouchonGrandItem.nom}`);
+            bouchonGrandItem.quantite = (bouchonGrandItem.quantite || 0) - bouchonsGrandsNecessaires;
+        } else {
+            warnings.push('Bouchons 50cl/100cl absents de l\'inventaire');
+        }
     }
 
     if (warnings.length > 0) {
@@ -5969,18 +5986,33 @@ const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
             }
         });
 
-        const capsulesItem = inventaire.find(item => {
-            const n = normalizeName(item.nom);
-            return n.includes('capsule') || n.includes('bouchon');
+        // Bouchons : déduction par taille (25cl vs 50/100cl)
+        let btPetitBouchon = 0, btGrandBouchon = 0;
+        producedByFormat.forEach(({ format, quantite }) => {
+            if ((format.contenanceCl || 0) < 50) btPetitBouchon += quantite;
+            else btGrandBouchon += quantite;
         });
-        const capsulesNecessaires = Math.ceil(totalBouteilles * CONSTANTS.CAPSULE_LOSS);
-        if (capsulesItem) {
-            if ((capsulesItem.quantite || 0) < capsulesNecessaires) {
-                warnings.push(`Stock insuffisant: ${capsulesItem.nom}`);
+
+        const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.CAPSULE_LOSS);
+        const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.CAPSULE_LOSS);
+
+        if (bouchonsPetitsNecessaires > 0) {
+            const bouchonPetitItem = findInventaireItemByName(inventaire, 'Bouchons 25cl');
+            if (bouchonPetitItem) {
+                if ((bouchonPetitItem.quantite || 0) < bouchonsPetitsNecessaires) warnings.push(`Stock insuffisant: ${bouchonPetitItem.nom}`);
+                bouchonPetitItem.quantite = (bouchonPetitItem.quantite || 0) - bouchonsPetitsNecessaires;
+            } else {
+                warnings.push('Bouchons 25cl absents de l\'inventaire');
             }
-            capsulesItem.quantite = (capsulesItem.quantite || 0) - capsulesNecessaires;
-        } else {
-            warnings.push('Capsules/bouchons absents de l\'inventaire');
+        }
+        if (bouchonsGrandsNecessaires > 0) {
+            const bouchonGrandItem = findInventaireItemByName(inventaire, 'Bouchons 50cl/100cl');
+            if (bouchonGrandItem) {
+                if ((bouchonGrandItem.quantite || 0) < bouchonsGrandsNecessaires) warnings.push(`Stock insuffisant: ${bouchonGrandItem.nom}`);
+                bouchonGrandItem.quantite = (bouchonGrandItem.quantite || 0) - bouchonsGrandsNecessaires;
+            } else {
+                warnings.push('Bouchons 50cl/100cl absents de l\'inventaire');
+            }
         }
 
         if (warnings.length > 0) {
@@ -7031,6 +7063,23 @@ const syncRecettesInventaire = () => {
             ajouteCount++;
         }
     });
+
+    // Migration bouchons : 2 articles distincts par taille (25cl vs 50/100cl)
+    const bouchon25Existant = findInventaireItemByName(inventaire, 'Bouchons 25cl');
+    const bouchon50Existant = findInventaireItemByName(inventaire, 'Bouchons 50cl/100cl');
+    const capsulesAncien = inventaire.find(item => normalizeName(item.nom).includes('capsule'));
+
+    if (capsulesAncien && !bouchon50Existant) {
+        capsulesAncien.nom = 'Bouchons 50cl/100cl';
+    }
+    if (!bouchon25Existant && !findInventaireItemByName(inventaire, 'Bouchons 25cl')) {
+        inventaire.push({ id: generateId(), categorie: 'consommable', nom: 'Bouchons 25cl', quantite: 0, unite: 'pcs', seuilAlerte: 0 });
+        ajouteCount++;
+    }
+    if (!findInventaireItemByName(inventaire, 'Bouchons 50cl/100cl') && !capsulesAncien) {
+        inventaire.push({ id: generateId(), categorie: 'consommable', nom: 'Bouchons 50cl/100cl', quantite: 0, unite: 'pcs', seuilAlerte: 0 });
+        ajouteCount++;
+    }
 
     DB.set('inventaire', inventaire);
 
