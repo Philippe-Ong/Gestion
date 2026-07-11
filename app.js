@@ -2890,6 +2890,17 @@ const onCommandeClientChange = (select) => {
     updateCommandeTotalModal();
 };
 
+const filterClientOptions = (query) => {
+    const select = document.querySelector('select[name="clientId"]');
+    if (!select) return;
+    const q = (query || '').toLowerCase().trim();
+    Array.from(select.options).forEach(opt => {
+        if (opt.value === '__ponctuel__') { opt.style.display = ''; return; }
+        if (!q) { opt.style.display = ''; return; }
+        opt.style.display = includesText(opt.text, q) ? '' : 'none';
+    });
+};
+
 const showCommandeModal = (id = null) => {
     const clients = getActive('clients');
     const aromes = getActive('aromes');
@@ -2928,6 +2939,7 @@ const showCommandeModal = (id = null) => {
             <div class="form-row">
                 <div class="form-group">
                     <label>Client</label>
+                    <input type="search" placeholder="Filtrer les clients…" oninput="filterClientOptions(this.value)" style="margin-bottom: 8px;">
                     <select name="clientId" required onchange="onCommandeClientChange(this)">
                         ${clientOptions.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                         <option value="__ponctuel__">➕ Client ponctuel (non récurrent)</option>
