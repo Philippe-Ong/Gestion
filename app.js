@@ -3917,54 +3917,40 @@ const renderLivraisons = () => {
                 ${(savedFilterYear || savedFilterClient || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="resetLivraisonFilters()">Réinitialiser</button>` : ''}
             </div>
 
-            <div class="table-container" id="livraisonsTableContainer">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>N° BL</th>
-                            <th>N° Commande</th>
-                            <th>Client</th>
-                            <th>Date BL</th>
-                            <th>Articles</th>
-                            <th>Trace</th>
-                            <th>Dernier export</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${filteredLivraisons.length === 0 ? '<tr><td colspan="8" class="text-center">Aucun bulletin de livraison</td></tr>' :
-                          filteredLivraisons.sort((a, b) => new Date(b.dateBL) - new Date(a.dateBL))
-                            .map(liv => {
-                                const commande = commandes.find(c => c.id === liv.commandeId);
-                                const client = clients.find(cl => cl.id === liv.clientId);
-                                const totalItems = (liv.lignes || []).reduce((sum, l) => sum + l.quantite, 0);
-                                const traceItems = (liv.lotsTraces || []).reduce((sum, l) => sum + (l.quantite || 0), 0);
-                                const articlesPreview = (liv.lignes || []).slice(0, 2).map(l => {
-                                    const a = aromes.find(a => a.id === l.aromeId);
-                                    const f = formats.find(f => f.id === l.formatId);
-                                    return escapeHtml(`${l.quantite}x ${a?.nom || l.aromeNom || '?'} ${f?.nom || l.formatNom || '?'}`);
-                                }).join(', ');
-                                const lastExport = liv.dateDernierExport ? formatDateTime(liv.dateDernierExport) : 'Jamais exporté';
+            <div class="livraisons-list">
+                ${filteredLivraisons.length === 0 ? '<div class="commande-empty">Aucun bulletin de livraison</div>' :
+                  filteredLivraisons.sort((a, b) => new Date(b.dateBL) - new Date(a.dateBL))
+                    .map(liv => {
+                        const commande = commandes.find(c => c.id === liv.commandeId);
+                        const client = clients.find(cl => cl.id === liv.clientId);
+                        const totalItems = (liv.lignes || []).reduce((sum, l) => sum + l.quantite, 0);
+                        const traceItems = (liv.lotsTraces || []).reduce((sum, l) => sum + (l.quantite || 0), 0);
+                        const articlesPreview = (liv.lignes || []).slice(0, 3).map(l => {
+                            const a = aromes.find(a => a.id === l.aromeId);
+                            const f = formats.find(f => f.id === l.formatId);
+                            return `${l.quantite}× ${a?.nom || l.aromeNom || '?'} ${f?.nom || l.formatNom || '?'}`;
+                        }).join(' • ');
+                        const more = (liv.lignes || []).length > 3 ? ` • +${liv.lignes.length - 3}` : '';
+                        const lastExport = liv.dateDernierExport ? formatDateTime(liv.dateDernierExport) : 'Jamais exporté';
 
-                                return `
-                                    <tr>
-                                        <td>BL-${getBLNumero(liv)}</td>
-                                        <td>#${commande ? getCommandeNumero(commande) : liv.commandeId.slice(-5)}</td>
-                                        <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
-                                        <td>${formatDate(liv.dateBL)}</td>
-                                        <td>${articlesPreview}${(liv.lignes || []).length > 2 ? '...' : ''} (${totalItems})</td>
-                                        <td>${traceItems > 0 ? `${traceItems} bouteille(s)` : '<span class="text-muted">Non tracé</span>'}</td>
-                                        <td>${lastExport}</td>
-                                        <td>
-                                            <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
-                                            <button class="btn btn-sm btn-primary" onclick="showPrepareBLExportModal('${liv.id}')">Préparer / Exporter</button>
-                                            <button class="btn btn-sm btn-danger" onclick="deleteLivraison('${liv.id}')">Supprimer</button>
-                                        </td>
-                                    </tr>
-                                `;
-                            }).join('')}
-                    </tbody>
-                </table>
+                        return `<div class="commande-card">
+                            <div class="commande-card-header">
+                                <span class="commande-card-numero">BL-${getBLNumero(liv)}</span>
+                                <span class="commande-card-date">${formatDate(liv.dateBL)}</span>
+                            </div>
+                            <div class="commande-card-name">${escapeHtml(client?.societe || client?.nom || 'N/A')}</div>
+                            <div class="commande-card-items">${escapeHtml(articlesPreview + more)} • ${totalItems} bt</div>
+                            <div class="commande-card-footer">
+                                <span class="badge ${traceItems > 0 ? 'badge-success' : 'badge-default'}">${traceItems > 0 ? `${traceItems} bt tracées` : 'Non tracé'}</span>
+                                <span class="text-muted" style="font-size: 11px;">${escapeHtml(lastExport)}</span>
+                            </div>
+                            <div class="lot-card-actions" style="margin-top: 10px;">
+                                <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
+                                <button class="btn btn-sm btn-primary" onclick="showPrepareBLExportModal('${liv.id}')">Préparer / Exporter</button>
+                                <button class="btn btn-sm btn-danger" onclick="deleteLivraison('${liv.id}')">Supprimer</button>
+                            </div>
+                        </div>`;
+                    }).join('')}
             </div>
         </div>
     `;
