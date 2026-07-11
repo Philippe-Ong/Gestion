@@ -939,7 +939,11 @@ const router = () => {
 const navigateTo = (page) => {
     document.querySelectorAll('.nav-item, .bottom-nav-item').forEach(el => el.classList.remove('active'));
     document.querySelectorAll(`[data-page="${page}"]`).forEach(el => el.classList.add('active'));
-    
+    // L'historique fait partie de la section Stock : garder l'onglet Stock actif
+    if (page === 'historique') {
+        document.querySelectorAll('[data-page="stock"]').forEach(el => el.classList.add('active'));
+    }
+
     const titles = {
         dashboard: 'Dashboard',
         stock: 'Gestion du stock',
@@ -948,6 +952,7 @@ const navigateTo = (page) => {
         livraisons: 'Livraisons',
         archives: 'Archives',
         production: 'Planificateur de production',
+        historique: 'Historique de production',
         inventaire: 'Inventaire',
         parametres: 'Paramètres'
     };
@@ -962,6 +967,7 @@ const navigateTo = (page) => {
         livraisons: renderLivraisons,
         archives: renderArchives,
         production: renderProduction,
+        historique: renderHistorique,
         inventaire: renderInventaire,
         parametres: renderParametres
     };
@@ -1191,6 +1197,13 @@ const toggleStockStatutFilter = (statut) => {
     renderStock();
 };
 
+// Sous-onglets de la section Stock (Lots / Historique)
+const stockSubTabs = (active) => `
+    <div class="sub-tabs" role="tablist" aria-label="Vues du stock">
+        <a href="#stock" class="sub-tab ${active === 'lots' ? 'active' : ''}" role="tab" aria-selected="${active === 'lots'}">Lots</a>
+        <a href="#historique" class="sub-tab ${active === 'historique' ? 'active' : ''}" role="tab" aria-selected="${active === 'historique'}">Historique</a>
+    </div>`;
+
 // Stock Management
 const renderStock = () => {
     const lots = DB.get('lots') || [];
@@ -1345,6 +1358,8 @@ const renderStock = () => {
             <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
         </div>
 
+        ${stockSubTabs('lots')}
+
         <div class="stock-search">
             <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input type="search"
@@ -1377,33 +1392,6 @@ const renderStock = () => {
             <div class="commande-section-title" style="padding: 0 4px;">Lots récents</div>
             ${lotCardsHtml}
             ${archivedLotsHtml}
-        </div>
-
-        <div class="card" style="margin-top: 16px;">
-            <button type="button" class="btn-bare" onclick="toggleHistory()" aria-expanded="false" aria-controls="historyContent" style="width:100%; text-align:left; display:flex; justify-content:space-between; align-items:center;">
-                <span><span id="historyArrow" style="font-size:12px;">▶</span> Historique de production</span>
-                <span style="font-size: 12px; color: var(--text-light);">${lots.length} lots</span>
-            </button>
-            <div id="historyContent" style="display:none;margin-top:12px;">
-                <div class="table-container" style="max-height:300px;overflow-y:auto;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Lot</th>
-                                <th>Date prod.</th>
-                                <th>Arôme</th>
-                                <th>Format</th>
-                                <th>Qté</th>
-                                <th>Ajouté le</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${renderHistoryTable()}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
         </div>
     `;
 
@@ -1470,40 +1458,187 @@ const updateLotDates = () => {
     }
 };
 
-const toggleHistory = () => {
-    const content = document.getElementById('historyContent');
-    const arrow = document.getElementById('historyArrow');
-    const btn = arrow?.parentElement;
-    const willOpen = content.style.display === 'none';
-    if (willOpen) {
-        content.style.display = 'block';
-        arrow.textContent = '▼';
-    } else {
-        content.style.display = 'none';
-        arrow.textContent = '▶';
-    }
-    if (btn) btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+// Applique/retire un filtre de l'historique (toggle) puis re-rend la page
+const setHistFilter = (name, value) => {
+    const key = 'hist' + name;
+    const current = DB.getFilter(key) || '';
+    DB.setFilter(key, current === value ? '' : value);
+    renderHistorique();
 };
 
-const renderHistoryTable = () => {
+// Page dédiée : Historique de production (timeline groupée par jour + filtres)
+const renderHistorique = () => {
     const history = DB.get('history') || [];
-    if (history.length === 0) {
-        return '<tr><td colspan="7" class="text-center">Aucun historique</td></tr>';
-    }
-    return history.map(record => {
-        const lotNum = record.lotId ? `#${String(record.lotId)}` : 'N/A';
-        const isVente = String(record.id).startsWith('VENTE-');
-        return `
-        <tr>
-            <td>${lotNum}${isVente ? ' <span class="badge badge-default">Vente</span>' : ''}</td>
-            <td>${formatDate(record.productionDate)}</td>
-            <td>${escapeHtml(record.arome)}</td>
-            <td>${escapeHtml(record.format)}</td>
-            <td style="color:${isVente ? 'var(--danger)' : 'var(--primary)'};font-weight:bold;">${isVente ? '−' : ''}${record.quantity}</td>
-            <td>${new Date(record.dateAdded).toLocaleDateString('fr-CH')}</td>
-            <td><button class="btn btn-sm btn-danger" onclick="deleteHistoryRecord('${record.id}')">✕</button></td>
-        </tr>
-    `}).join('');
+    const aromes  = DB.get('aromes')  || [];
+    const formats = DB.get('formats') || [];
+
+    const savedQuery  = (DB.getFilter('histQuery') || '').toString().toLowerCase().trim();
+    const savedType   = DB.getFilter('histType')   || ''; // '', 'prod', 'vente'
+    const savedArome  = DB.getFilter('histArome')  || '';
+    const savedFormat = DB.getFilter('histFormat') || '';
+    const savedPeriod = DB.getFilter('histPeriod') || ''; // '', '7', '30', '90'
+
+    const aromeColor = {};
+    aromes.forEach(a => { aromeColor[a.nom] = a.couleur || '#ccc'; });
+
+    const periodDays = parseInt(savedPeriod, 10);
+    const cutoff = !isNaN(periodDays) ? Date.now() - periodDays * 86400000 : null;
+
+    const entries = history.map(r => {
+        const isVente = String(r.id).startsWith('VENTE-');
+        const when = r.dateAdded ? new Date(r.dateAdded).getTime()
+                   : r.productionDate ? new Date(r.productionDate).getTime() : 0;
+        return { ...r, isVente, when };
+    }).filter(e => {
+        if (savedType === 'prod'  &&  e.isVente) return false;
+        if (savedType === 'vente' && !e.isVente) return false;
+        if (savedArome  && e.arome  !== savedArome)  return false;
+        if (savedFormat && e.format !== savedFormat) return false;
+        if (cutoff !== null && e.when < cutoff)      return false;
+        if (savedQuery) {
+            const hay = `${e.lotId || ''} ${e.arome || ''} ${e.format || ''} ${e.quantity || ''}`.toLowerCase();
+            if (!hay.includes(savedQuery)) return false;
+        }
+        return true;
+    }).sort((a, b) => b.when - a.when);
+
+    const totalProd  = entries.filter(e => !e.isVente).reduce((s, e) => s + (e.quantity || 0), 0);
+    const totalVente = entries.filter(e =>  e.isVente).reduce((s, e) => s + (e.quantity || 0), 0);
+
+    // Regroupement par jour (entrées déjà triées du plus récent au plus ancien)
+    const dayKeys = [];
+    const byDay = {};
+    entries.forEach(e => {
+        const key = e.when ? new Date(e.when).toISOString().slice(0, 10) : 'na';
+        if (!byDay[key]) { byDay[key] = []; dayKeys.push(key); }
+        byDay[key].push(e);
+    });
+
+    const todayKey = getLocalDateISOString();
+    const yesterdayKey = (() => {
+        const d = new Date();
+        d.setDate(d.getDate() - 1);
+        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+        return d.toISOString().slice(0, 10);
+    })();
+    const dayLabel = (key) => {
+        if (key === todayKey) return "Aujourd'hui";
+        if (key === yesterdayKey) return 'Hier';
+        if (key === 'na') return 'Date inconnue';
+        const lbl = new Date(key).toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long' });
+        return lbl.charAt(0).toUpperCase() + lbl.slice(1);
+    };
+
+    const typePill   = (val, label) => `<button type="button" class="status-pill ${savedType   === val ? 'active' : ''}" onclick="setHistFilter('Type', '${val}')">${label}</button>`;
+    const aromePill  = (val)        => `<button type="button" class="status-pill ${savedArome  === val ? 'active' : ''}" onclick="setHistFilter('Arome', '${escapeHtml(val).replace(/'/g, "\\'")}')">${escapeHtml(val)}</button>`;
+    const formatPill = (val)        => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" onclick="setHistFilter('Format', '${escapeHtml(val).replace(/'/g, "\\'")}')">${escapeHtml(val)}</button>`;
+    const periodPill = (val, label) => `<button type="button" class="status-pill ${savedPeriod === val ? 'active' : ''}" onclick="setHistFilter('Period', '${val}')">${label}</button>`;
+
+    const aromesActifs  = aromes.filter(a => a.actif);
+    const formatsActifs = formats.filter(f => f.actif);
+
+    const listHtml = entries.length === 0
+        ? `<div class="commande-empty">${history.length === 0 ? "Aucun mouvement de production pour l'instant." : 'Aucun mouvement ne correspond aux filtres.'}</div>`
+        : dayKeys.map(key => {
+            const dayEntries = byDay[key];
+            const dProd  = dayEntries.filter(e => !e.isVente).reduce((s, e) => s + (e.quantity || 0), 0);
+            const dVente = dayEntries.filter(e =>  e.isVente).reduce((s, e) => s + (e.quantity || 0), 0);
+            const meta = [dProd ? `+${dProd}` : '', dVente ? `−${dVente}` : ''].filter(Boolean).join('  ·  ');
+            return `
+            <div class="hist-day">
+                <div class="hist-day-head">
+                    <span class="hist-day-label">${dayLabel(key)}</span>
+                    <span class="hist-day-meta">${meta}</span>
+                </div>
+                <div class="hist-day-list">
+                    ${dayEntries.map(e => {
+                        const lotNum = e.lotId ? `#${String(e.lotId).padStart(6, '0')}` : 'Lot ?';
+                        const color = aromeColor[e.arome] || '#ccc';
+                        return `
+                        <div class="hist-entry ${e.isVente ? 'is-vente' : 'is-prod'}">
+                            <span class="hist-entry-dot" style="background:${escapeHtml(color)}"></span>
+                            <div class="hist-entry-main">
+                                <div class="hist-entry-title">${escapeHtml(e.arome || '?')} <span class="hist-entry-format">${escapeHtml(e.format || '')}</span></div>
+                                <div class="hist-entry-sub">
+                                    <span class="hist-entry-tag ${e.isVente ? 'tag-vente' : 'tag-prod'}">${e.isVente ? 'Vente directe' : 'Production'}</span>
+                                    <button type="button" class="hist-entry-lot" onclick="showLotTraceModal('${escapeHtml(String(e.lotId))}')">${lotNum}</button>
+                                    ${e.isVente && e.productionDate ? `<span class="hist-entry-note">prod. ${formatDate(e.productionDate)}</span>` : ''}
+                                </div>
+                            </div>
+                            <div class="hist-entry-qty ${e.isVente ? 'neg' : 'pos'}">${e.isVente ? '−' : '+'}${e.quantity}</div>
+                            <button type="button" class="hist-entry-del" title="Supprimer" aria-label="Supprimer cet enregistrement" onclick="deleteHistoryRecord('${e.id}')">✕</button>
+                        </div>`;
+                    }).join('')}
+                </div>
+            </div>`;
+        }).join('');
+
+    const html = `
+        <div class="commandes-toolbar">
+            <h1>Historique</h1>
+            <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
+        </div>
+
+        ${stockSubTabs('historique')}
+
+        <div class="hist-summary">
+            <div class="hist-summary-stat">
+                <span class="hist-summary-val pos">${totalProd}</span>
+                <span class="hist-summary-lbl">produites</span>
+            </div>
+            <div class="hist-summary-stat">
+                <span class="hist-summary-val neg">${totalVente}</span>
+                <span class="hist-summary-lbl">vendues (directes)</span>
+            </div>
+            <div class="hist-summary-stat">
+                <span class="hist-summary-val">${entries.length}</span>
+                <span class="hist-summary-lbl">mouvement${entries.length !== 1 ? 's' : ''}</span>
+            </div>
+        </div>
+
+        <div class="stock-search" id="histSearch">
+            <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="search"
+                   placeholder="Rechercher un lot, arôme, format…"
+                   value="${escapeHtml(savedQuery)}"
+                   oninput="DB.setFilter('histQuery', this.value); renderHistorique(); document.querySelector('#histSearch input')?.focus();">
+        </div>
+
+        <div class="stock-pills-row">
+            <span class="stock-pills-label">Type :</span>
+            <button type="button" class="status-pill ${!savedType ? 'active' : ''}" onclick="setHistFilter('Type', '')">Tout</button>
+            ${typePill('prod', 'Production')}
+            ${typePill('vente', 'Ventes')}
+        </div>
+
+        ${aromesActifs.length > 0 ? `
+        <div class="stock-pills-row">
+            <span class="stock-pills-label">Arôme :</span>
+            <button type="button" class="status-pill ${!savedArome ? 'active' : ''}" onclick="setHistFilter('Arome', '')">Tous</button>
+            ${aromesActifs.map(a => aromePill(a.nom)).join('')}
+        </div>` : ''}
+
+        ${formatsActifs.length > 0 ? `
+        <div class="stock-pills-row">
+            <span class="stock-pills-label">Format :</span>
+            <button type="button" class="status-pill ${!savedFormat ? 'active' : ''}" onclick="setHistFilter('Format', '')">Tous</button>
+            ${formatsActifs.map(f => formatPill(f.nom)).join('')}
+        </div>` : ''}
+
+        <div class="stock-pills-row">
+            <span class="stock-pills-label">Période :</span>
+            <button type="button" class="status-pill ${!savedPeriod ? 'active' : ''}" onclick="setHistFilter('Period', '')">Tout</button>
+            ${periodPill('7', '7 jours')}
+            ${periodPill('30', '30 jours')}
+            ${periodPill('90', '90 jours')}
+        </div>
+
+        <div class="hist-timeline">
+            ${listHtml}
+        </div>
+    `;
+
+    safeRender(html);
 };
 
 const deleteHistoryRecord = (recordId) => {
@@ -1515,7 +1650,7 @@ const deleteHistoryRecord = (recordId) => {
             history.splice(index, 1);
             DB.set('history', history);
             showToast('Enregistrement supprimé');
-            renderStock();
+            renderCurrentView();
         }
     });
 };
@@ -1593,7 +1728,7 @@ const saveLot = (event) => {
         
         modal.hide();
         showToast('Lot créé avec succès');
-        renderStock();
+        renderCurrentView();
     } catch (e) {
         console.error('Error saving lot:', e);
         showToast('Erreur lors de la création du lot', 'error');
@@ -6819,12 +6954,23 @@ const importAllData = (event) => {
 };
 
 // Initialize app
-document.addEventListener('DOMContentLoaded', async () => {
+//
+// Rendu « local d'abord » : on affiche l'écran immédiatement à partir des données
+// locales (localStorage), SANS attendre le réseau. Sinon, quand Firebase est lent
+// (réseau mobile) le premier rendu est retardé et l'app démarre sur un dashboard
+// vide — il faut retoucher un onglet pour qu'il s'affiche. La synchronisation
+// Firebase se fait ensuite en arrière-plan, avec un re-rendu si des données arrivent.
+const bootLocal = () => {
     DB.init();
     initGlobalSearch();
+    // Migration silencieuse : normalise les valeurs legacy de client.tarifs
+    try { migrateClientTarifs(); } catch (e) { console.warn('[migration] initiale', e); }
+    router();
+};
+
+const bootFirebaseSync = async () => {
     // Hors-ligne, le module Firebase du CDN ne se charge pas et firebaseReady reste
-    // undefined : sans borne, l'attente ne rend jamais la main et router() n'est
-    // jamais appelé (écran blanc). Ne rejette jamais.
+    // false : ne jamais bloquer indéfiniment.
     const waitForFirebase = (timeoutMs = 4000) => new Promise(resolve => {
         const deadline = Date.now() + timeoutMs;
         const check = () => {
@@ -6838,10 +6984,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     const firebaseAvailable = await waitForFirebase();
     if (firebaseAvailable) {
         await DB.loadFromFirebase(false);
+        // Re-migration après import cloud, puis re-rendu de la vue courante.
+        try { migrateClientTarifs(); } catch (e) { console.warn('[migration] post-sync', e); }
+        renderCurrentView();
     } else {
         console.warn('Firebase indisponible — démarrage sur les données locales');
     }
-    // Migration silencieuse (post-sync Firebase) : normalise les valeurs legacy de client.tarifs
-    migrateClientTarifs();
-    router();
-});
+};
+
+// app.js s'exécute pendant le parsing du HTML : le shell (#content, nav, header) est
+// déjà présent (défini plus haut dans index.html), on rend donc tout de suite — avant
+// même que le module Firebase (chargé en différé) ne bloque DOMContentLoaded.
+bootLocal();
+
+// La synchronisation Firebase attend que le module se soit exécuté : DOMContentLoaded
+// se déclenche après les scripts différés (dont le module Firebase).
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootFirebaseSync, { once: true });
+} else {
+    bootFirebaseSync();
+}
