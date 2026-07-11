@@ -364,6 +364,7 @@ body {
     padding: 24px 28px 40px;
     max-width: 1400px;
     width: 100%;
+    margin: 0 auto;
 }
 
 /* ── Buttons ─────────────────────────────────────────────── */
