@@ -876,9 +876,7 @@ const openGlobalSearchResult = (type, id) => {
         return;
     }
     if (type === 'client') {
-        DB.setFilter('client', id);
-        DB.setFilter('statut', '');
-        DB.setFilter('commande_search', '');
+        DB.setFilter('commandeClient', id);
         if (window.location.hash === '#commandes') renderCommandes();
         else window.location.hash = '#commandes';
         return;
@@ -889,7 +887,10 @@ const openGlobalSearchResult = (type, id) => {
         return;
     }
     if (type === 'lot') {
-        DB.setFilter('stock_search', id);
+        DB.setFilter('stockQuery', id);
+        DB.setFilter('stockArome', '');
+        DB.setFilter('stockFormat', '');
+        DB.setFilter('stockStatut', '');
         if (window.location.hash === '#stock') renderStock();
         else window.location.hash = '#stock';
     }
@@ -3002,6 +3003,7 @@ const selectWeekDay = (dateStr) => {
 // Commandes
 const renderCommandes = () => {
     const savedFilterStatut = DB.getFilter('statut') || '';
+    const savedFilterClient = DB.getFilter('commandeClient') || '';
     const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
 
     const allCommandes = DB.get('commandes') || [];
@@ -3009,6 +3011,7 @@ const renderCommandes = () => {
         ? allCommandes.filter(c => c.statut === 'livrée' || c.statut === 'annulee')
         : allCommandes.filter(c => c.statut !== 'livrée' && c.statut !== 'annulee');
     const clients = DB.get('clients') || [];
+    const clientFiltre = savedFilterClient ? clients.find(c => c.id === savedFilterClient) : null;
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
 
@@ -3029,6 +3032,7 @@ const renderCommandes = () => {
         if (weekCalendarSelectedDate) {
             filtered = filtered.filter(c => String(c.dateLivraison || '').slice(0, 10) === weekCalendarSelectedDate);
         }
+        if (savedFilterClient) filtered = filtered.filter(c => c.clientId === savedFilterClient);
     }
     filtered.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
 
@@ -3104,6 +3108,10 @@ const renderCommandes = () => {
         ${!showArchives && weekCalendarSelectedDate ? `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background: var(--bg-secondary); border-radius: var(--radius-md); margin-bottom: 12px; font-size: 12px;">
             <span>📅 Filtre : livraisons du ${formatDate(weekCalendarSelectedDate)}</span>
             <button type="button" class="btn-bare" style="color: var(--primary); font-size: 12px; padding: 0;" onclick="selectWeekDay('${weekCalendarSelectedDate}')">Effacer ✕</button>
+        </div>` : ''}
+        ${!showArchives && savedFilterClient && clientFiltre ? `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background: var(--bg-secondary); border-radius: var(--radius-md); margin-bottom: 12px; font-size: 12px;">
+            <span>👤 Filtre : ${escapeHtml(clientFiltre.societe || clientFiltre.nom || 'Client')}</span>
+            <button type="button" class="btn-bare" style="color: var(--primary); font-size: 12px; padding: 0;" onclick="DB.setFilter('commandeClient', ''); renderCommandes()">Effacer ✕</button>
         </div>` : ''}
 
         <div class="commandes-list">
