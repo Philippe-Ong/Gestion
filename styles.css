@@ -1915,6 +1915,11 @@ input[type="checkbox"] {
         font-size: 12px;
         height: 30px;
     }
+
+    .lot-card-actions .btn { min-height: 40px; }
+    .status-pill { padding: 9px 14px; }
+    .week-calendar-header .btn-bare { padding: 8px 14px; }
+    .inventaire-qty-controls .btn { width: 40px; }
 }
 
 @media (max-width: 1024px) {
