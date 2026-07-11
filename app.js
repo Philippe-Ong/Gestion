@@ -1845,53 +1845,6 @@ const deleteLot = (id) => {
     });
 };
 
-const renderSellableSummary = (lots, aromes, formats, today) => {
-    if (!lots || lots.length === 0) return '';
-
-    const sellableLots = lots.filter(lot => isLotSellable(lot, today));
-
-    if (sellableLots.length === 0) return '';
-    if (!aromes || aromes.length === 0) return '';
-
-    const summary = aromes.filter(a => a && a.actif).map(arome => {
-        const formatsData = (formats || []).filter(f => f && f.actif).map(format => {
-            const total = sellableLots
-                .filter(l => l.arome === arome.nom && l.format === format.nom)
-                .reduce((sum, l) => sum + l.quantite, 0);
-            return { format: format.nom, total };
-        }).filter(f => f.total > 0);
-
-        const totalArome = formatsData.reduce((sum, f) => sum + f.total, 0);
-        return { arome: arome.nom, couleur: arome.couleur, formats: formatsData, total: totalArome };
-    }).filter(item => item.total > 0);
-
-    if (summary.length === 0) return '';
-
-    return `
-        <div class="card" style="margin-bottom: 24px;">
-            <h3 class="card-title" style="margin-bottom: 16px;">Stock vendable</h3>
-            <div class="sellable-grid">
-                ${summary.map(item => `
-                    <div class="sellable-item">
-                        <div class="sellable-header">
-                            <span class="color-dot" style="background: ${escapeHtml(item.couleur || '#5D7B3E')}"></span>
-                            <strong>${escapeHtml(item.arome)}</strong>
-                            <span class="badge badge-success">${item.total} bt</span>
-                        </div>
-                        <div class="sellable-formats">
-                            ${item.formats.map(f => `
-                                <span>${escapeHtml(f.format)}: <strong>${f.total}</strong></span>
-                            `).join('')}
-                        </div>
-                    </div>
-                `).join('')}
-            </div>
-        </div>
-    `;
-};
-
-const isSellable = (lot) => isLotSellable(lot);
-
 const showVendreModal = (lotId) => {
     const lots = DB.get('lots');
     const lot = lots.find(l => l.id === lotId);
@@ -2661,40 +2614,6 @@ const saveQuickPointage = (event) => {
     }
 };
 
-const addNewEmployee = () => {
-    const nom = document.getElementById('newEmployeeName').value.trim();
-    const prenom = document.getElementById('newEmployeePrenom').value.trim();
-
-    if (!nom || !prenom) {
-        showToast('Veuillez entrer nom et prénom', 'error');
-        return;
-    }
-
-    const employes = DB.get('employees') || [];
-    employes.push({
-        id: generateId(),
-        nom,
-        prenom,
-        actif: true
-    });
-    DB.set('employees', employes);
-
-    document.getElementById('newEmployeeName').value = '';
-    document.getElementById('newEmployeePrenom').value = '';
-    showToast('Employé ajouté');
-    renderPointage('employes');
-};
-
-const deleteEmployee = (id) => {
-    confirmDialog('Supprimer cet employé ?', { danger: true }).then(ok => {
-        if (!ok) return;
-        const employes = DB.get('employees').filter(e => e.id !== id);
-        DB.set('employees', employes);
-        showToast('Employé supprimé');
-        renderPointage('employes');
-    });
-};
-
 const exportPointageExcel = () => {
     const pointages = DB.get('pointages') || [];
     const employes = DB.get('employees') || [];
@@ -2739,188 +2658,6 @@ const exportPointageExcel = () => {
     link.click();
 
     showToast('Exporté en CSV');
-};
-
-const showPointageModal = (type) => {
-    const employes = DB.get('employees').filter(e => e.actif);
-
-    if (employes.length === 0) {
-        showToast('Veuillez d\'abord ajouter des employés dans les paramètres', 'error');
-        return;
-    }
-
-    modal.show(type === 'arrivee' ? 'Pointer arrivée' : 'Pointer départ', `
-        <form id="pointageForm">
-            <div class="form-group">
-                <label>Employé</label>
-                <select name="employeId" required>
-                    ${employes.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Date</label>
-                <input type="date" name="date" value="${getLocalDateISOString()}" required>
-            </div>
-            <div class="form-group">
-                <label>Heure</label>
-                <input type="time" name="heure" value="" required>
-            </div>
-            <div class="form-group">
-                <label>Pause (minutes)</label>
-                <input type="number" name="pause" value="0" min="0">
-            </div>
-        </form>
-    `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="savePointage(event, '${type}')">Valider</button>
-    `);
-};
-
-const showSaisieManuelleModal = () => {
-    const employes = DB.get('employees').filter(e => e.actif);
-
-    if (employes.length === 0) {
-        showToast('Veuillez d\'abord ajouter des employés dans les paramètres', 'error');
-        return;
-    }
-
-    modal.show('Saisie manuelle des heures', `
-        <form id="saisieManuelleForm">
-            <div class="form-group">
-                <label>Employé</label>
-                <select name="employeId" required>
-                    ${employes.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + e.nom)}</option>`).join('')}
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Date</label>
-                <input type="date" name="date" value="${getLocalDateISOString()}" required>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Heure de début</label>
-                    <input type="time" name="heureDebut" required>
-                </div>
-                <div class="form-group">
-                    <label>Heure de fin</label>
-                    <input type="time" name="heureFin" required>
-                </div>
-            </div>
-            <div class="form-group">
-                <label>Pause (minutes)</label>
-                <input type="number" name="pause" value="0" min="0">
-            </div>
-        </form>
-    `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveSaisieManuelle(event)">Enregistrer</button>
-    `);
-};
-
-const saveSaisieManuelle = (event) => {
-    const reenable = disableSaveBtn(event);
-    try {
-        const form = document.getElementById('saisieManuelleForm');
-        const formData = new FormData(form);
-
-        const employeId = formData.get('employeId');
-        const date = formData.get('date');
-        const heureDebut = formData.get('heureDebut');
-        const heureFin = formData.get('heureFin');
-        const pause = parseInt(formData.get('pause')) || 0;
-
-        if (!employeId || !date || !heureDebut || !heureFin) {
-            showToast('Veuillez remplir tous les champs', 'error');
-            return;
-        }
-        if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
-            showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
-            return;
-        }
-        if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
-            showToast('L\'heure de fin doit être après l\'heure de début', 'error');
-            return;
-        }
-
-        const pointages = DB.get('pointages');
-
-        // Check if there's already a pointage for this employee on this date
-        let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
-
-        if (pointage) {
-            pointage.heureDebut = heureDebut;
-            pointage.heureFin = heureFin;
-            pointage.pause = pause;
-        } else {
-            pointage = {
-                id: generateId(),
-                employeId,
-                date,
-                heureDebut,
-                heureFin,
-                pause
-            };
-            pointages.push(pointage);
-        }
-
-        DB.set('pointages', pointages);
-        modal.hide();
-        showToast('Heures enregistrées');
-        renderPointage();
-    } catch (e) {
-        console.error('Error saving manual pointage:', e);
-        showToast('Erreur lors de l\'enregistrement des heures', 'error');
-    } finally {
-        if (reenable) reenable();
-    }
-};
-
-const savePointage = (event, type) => {
-    const reenable = disableSaveBtn(event);
-    try {
-        const form = document.getElementById('pointageForm');
-        if (!form) return;
-        const formData = new FormData(form);
-        const employeId = formData.get('employeId');
-        const date = formData.get('date');
-        const heure = formData.get('heure');
-
-        if (!employeId || !date || !heure) {
-            showToast('Veuillez remplir tous les champs', 'error');
-            return;
-        }
-
-        const pointages = DB.get('pointages');
-
-        let pointage = pointages.find(p => p.employeId === employeId && p.date === date);
-
-        if (!pointage) {
-            pointage = {
-                id: generateId(),
-                employeId,
-                date,
-                pause: parseInt(formData.get('pause'), 10) || 0
-            };
-            pointages.push(pointage);
-        }
-
-        if (type === 'arrivee') {
-            pointage.heureDebut = heure;
-        } else {
-            pointage.heureFin = heure;
-            pointage.pause = parseInt(formData.get('pause'), 10) || 0;
-        }
-
-        DB.set('pointages', pointages);
-        modal.hide();
-        showToast(type === 'arrivee' ? 'Arrivée pointée' : 'Départ pointé');
-        renderPointage();
-    } catch (e) {
-        console.error('Error saving pointage:', e);
-        showToast('Erreur lors du pointage', 'error');
-    } finally {
-        if (reenable) reenable();
-    }
 };
 
 const deletePointage = (id) => {
@@ -3403,46 +3140,6 @@ const saveCommande = (event, id) => {
 
 const editCommande = (id) => showCommandeModal(id);
 
-const closeStatusDropdowns = () => {
-    document.querySelectorAll('.status-dropdown.active').forEach(d => {
-        d.classList.remove('active');
-        d.removeAttribute('style');
-        d.previousElementSibling?.setAttribute('aria-expanded', 'false');
-    });
-};
-
-const showStatusDropdown = (event, id) => {
-    event.stopPropagation();
-    const button = event.currentTarget;
-    const dropdown = document.getElementById('statusDropdown-' + id);
-    if (!dropdown) return;
-
-    const wasOpen = dropdown.classList.contains('active');
-    closeStatusDropdowns();
-    if (wasOpen) return;
-
-    dropdown.classList.add('active');
-    if (button && button.setAttribute) {
-        button.setAttribute('aria-expanded', 'true');
-    }
-
-    const rect = button.getBoundingClientRect();
-    const dropdownWidth = Math.max(dropdown.offsetWidth, 160);
-    const dropdownHeight = dropdown.offsetHeight;
-    const gap = 6;
-    const viewportPadding = 8;
-    let left = rect.left + (rect.width / 2) - (dropdownWidth / 2);
-    left = Math.max(viewportPadding, Math.min(left, window.innerWidth - dropdownWidth - viewportPadding));
-    let top = rect.bottom + gap;
-    if (top + dropdownHeight > window.innerHeight - viewportPadding) {
-        top = Math.max(viewportPadding, rect.top - dropdownHeight - gap);
-    }
-
-    dropdown.style.left = `${left}px`;
-    dropdown.style.top = `${top}px`;
-    dropdown.style.minWidth = `${dropdownWidth}px`;
-};
-
 const updateCommandeStatut = (id, statut, { fromLivraison = false } = {}) => {
     if (!['en_attente', 'produite', 'livrée', 'annulee'].includes(statut)) {
         showToast('Statut de commande invalide', 'error');
@@ -3461,7 +3158,6 @@ const updateCommandeStatut = (id, statut, { fromLivraison = false } = {}) => {
         if (statut === 'annulee') {
             deleteBLForCommande(id);
         }
-        closeStatusDropdowns();
         renderCommandes();
         return true;
     }
@@ -3472,93 +3168,6 @@ const marquerCommandeProduite = (id) => {
     updateCommandeStatut(id, 'produite');
     modal.hide();
     showToast('Commande marquée comme produite');
-};
-
-const livrerCommande = (id) => {
-    const commandes = DB.get('commandes') || [];
-    const lots = DB.get('lots') || [];
-    const aromes = DB.get('aromes') || [];
-    const formats = DB.get('formats') || [];
-    const cmdIndex = commandes.findIndex(c => c.id === id);
-
-    if (cmdIndex === -1) {
-        showToast('Commande non trouvée', 'error');
-        return;
-    }
-
-    const cmd = commandes[cmdIndex];
-    if (cmd.statut !== 'produite') {
-        showToast('Seule une commande produite peut être livrée', 'error');
-        return;
-    }
-
-    const normalize = (s) => (s || '').toString().toLowerCase().trim();
-    const lotsPlanifies = lots.map(lot => ({ ...lot }));
-    const sortedLots = [...lotsPlanifies].sort((a, b) =>
-        new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01')
-    );
-    const lotsUtilises = [];
-    const manquants = [];
-    let totalDeducted = 0;
-    const itemsCommande = getItems(cmd);
-
-    if (itemsCommande.length === 0) {
-        showToast('La commande ne contient aucun article à livrer', 'error');
-        return;
-    }
-
-    for (const item of itemsCommande) {
-        const quantite = Number(item.quantite);
-        if (!Number.isInteger(quantite) || quantite <= 0) {
-            showToast('La commande contient une quantité invalide', 'error');
-            return;
-        }
-
-        const arome = aromes.find(a => a.id === item.aromeId);
-        const format = formats.find(f => f.id === item.formatId);
-        const aromeNom = normalize(arome?.nom || item.aromeId);
-        const formatNom = normalize(format?.nom || item.formatId);
-        let quantiteRestante = quantite;
-
-        for (const lot of sortedLots) {
-            const disponible = Number(lot.quantite) || 0;
-            if (!isLotSellable(lot) || normalize(lot.arome) !== aromeNom || normalize(lot.format) !== formatNom || disponible <= 0) continue;
-
-            const quantitePrelevee = Math.min(disponible, quantiteRestante);
-            lot.quantite = disponible - quantitePrelevee;
-            lotsUtilises.push({
-                lotId: lot.id,
-                arome: lot.arome,
-                format: lot.format,
-                dlc: lot.dlc || '',
-                quantite: quantitePrelevee
-            });
-            totalDeducted += quantitePrelevee;
-            quantiteRestante -= quantitePrelevee;
-
-            if (quantiteRestante === 0) break;
-        }
-
-        if (quantiteRestante > 0) {
-            manquants.push(`${arome?.nom || '?'} ${format?.nom || '?'} (${quantiteRestante} manquante(s))`);
-        }
-    }
-
-    if (manquants.length > 0) {
-        showToast(`Stock insuffisant : ${manquants[0]}${manquants.length > 1 ? ` (+${manquants.length - 1})` : ''}. Livraison non effectuée.`, 'error');
-        return;
-    }
-
-    DB.set('lots', lotsPlanifies.filter(lot => Number(lot.quantite) > 0));
-    commandes[cmdIndex].lotsUtilises = lotsUtilises;
-    DB.set('commandes', commandes);
-    updateCommandeStatut(id, 'livrée', { fromLivraison: true });
-    showToast(`Commande livrée - ${totalDeducted} bouteille(s) déduite(s) du stock`);
-
-    confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
-        if (!ok) return;
-        prepareCommandeBLExport(id);
-    });
 };
 
 const restaurerCommande = (id) => {
@@ -3890,10 +3499,6 @@ const showLivraisonBouteillesModal = (commandeId) => {
     document.getElementById('confirm-livraison-btn')?.addEventListener('click', validateAndDeliver);
     computeTotals();
 };
-
-document.addEventListener('click', closeStatusDropdowns);
-window.addEventListener('scroll', closeStatusDropdowns, true);
-window.addEventListener('resize', closeStatusDropdowns);
 
 const checkStockAndUpdateCommandes = () => {
     const commandes = DB.get('commandes') || [];
@@ -5176,30 +4781,6 @@ const renderProduction = () => {
         litresParArome[b.aromeNom] += litres;
     });
 
-    // Calculate ingredients needed (for total display)
-    // Aggregate by name+family to avoid mixing incompatible units (e.g. g vs kg)
-    const ingredientsTotal = {};
-    Object.entries(litresParArome).forEach(([aromeNom, litres]) => {
-        const arome = aromes.find(a => a.nom === aromeNom);
-        const recette = recettes.find(r => r.aromeId === arome?.id);
-        if (recette) {
-            recette.ingredients.forEach(ing => {
-                const ingUnit = displayUnit(ing.unite);
-                const family = getUnitFamily(ingUnit);
-                const key = `${ing.nom}|${family || ingUnit}`;
-                let besoin = ing.quantite * litres;
-                if (!ingredientsTotal[key]) {
-                    ingredientsTotal[key] = { nom: ing.nom, quantite: 0, unite: ingUnit, family };
-                }
-                if (areUnitsCompatible(ingredientsTotal[key].unite, ingUnit)) {
-                    const converted = convertQuantity(besoin, ingUnit, ingredientsTotal[key].unite);
-                    besoin = converted !== null ? converted : besoin;
-                }
-                ingredientsTotal[key].quantite += besoin;
-            });
-        }
-    });
-
     const recipientsParArome = {};
     Object.entries(litresParArome).forEach(([aromeNom, litresTotal]) => {
         const arome = aromes.find(a => a.nom === aromeNom);
@@ -5487,8 +5068,6 @@ const calculerIngredientsRecipient = (recette, litres) => {
         unite: ing.unite
     }));
 };
-
-const calculerIngredientsCuve = calculerIngredientsRecipient;
 
 const mettreAJourRecipientsUI = (aromeNom) => {
     const state = productionPlannerState;
