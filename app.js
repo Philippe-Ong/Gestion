@@ -1524,10 +1524,12 @@ const renderHistorique = () => {
 
     const entries = history.map(r => {
         const isVente = String(r.id).startsWith('VENTE-');
+        const isRestauration = String(r.id).startsWith('RESTAURE-');
         const when = r.dateAdded ? new Date(r.dateAdded).getTime()
                    : r.productionDate ? new Date(r.productionDate).getTime() : 0;
-        return { ...r, isVente, when };
+        return { ...r, isVente, isRestauration, when };
     }).filter(e => {
+        if (e.isRestauration) return false;
         if (savedType === 'prod'  &&  e.isVente) return false;
         if (savedType === 'vente' && !e.isVente) return false;
         if (savedArome  && e.arome  !== savedArome)  return false;
@@ -3512,11 +3514,71 @@ const archiverCommande = (id) => {
 };
 
 const restaurerCommande = (id) => {
-    confirmDialog('Restaurer cette commande ? Elle redeviendra "produite" et réapparaîtra dans les commandes actives.').then(ok => {
+    const commandes = DB.get('commandes') || [];
+    const cmd = commandes.find(c => c.id === id);
+    if (!cmd) { showToast('Commande non trouvée', 'error'); return; }
+
+    const estLivree = cmd.statut === 'livrée';
+    const estAnnulee = cmd.statut === 'annulee';
+    if (!estLivree && !estAnnulee) { showToast('Cette commande ne peut pas être restaurée', 'error'); return; }
+
+    const message = estLivree
+        ? 'Restaurer cette commande ? Le stock sera restitué (bouteilles re-créditées aux lots), le bulletin de livraison sera supprimé, et la commande repassera en statut « produite ».'
+        : 'Restaurer cette commande ? Elle repassera en statut « en attente ».';
+
+    confirmDialog(message, { danger: false }).then(ok => {
         if (!ok) return;
-        updateCommandeStatut(id, 'produite');
+
+        if (estLivree) {
+            const lots = DB.get('lots') || [];
+            const history = DB.get('history') || [];
+            const lotsUtilises = cmd.lotsUtilises || [];
+            const newHistoryEntries = [];
+
+            lotsUtilises.forEach(entry => {
+                const existingLot = lots.find(l => String(l.id) === String(entry.lotId));
+                if (existingLot) {
+                    existingLot.quantite = (existingLot.quantite || 0) + entry.quantite;
+                } else {
+                    // Recréer le lot supprimé
+                    const prodEntry = history.find(h => String(h.lotId) === String(entry.lotId) && String(h.id).startsWith('PROD-'));
+                    const nouveauLot = {
+                        id: entry.lotId,
+                        arome: entry.arome,
+                        format: entry.format,
+                        quantite: entry.quantite,
+                        dlc: entry.dlc,
+                        dlv: entry.dlc,
+                        dateProduction: prodEntry ? (prodEntry.productionDate || '') : ''
+                    };
+                    lots.push(nouveauLot);
+                }
+
+                newHistoryEntries.push({
+                    id: `RESTAURE-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+                    lotId: entry.lotId,
+                    arome: entry.arome,
+                    format: entry.format,
+                    quantity: entry.quantite,
+                    productionDate: '',
+                    dateAdded: new Date().toISOString()
+                });
+            });
+
+            DB.set('lots', lots);
+
+            cmd.lotsUtilises = [];
+            DB.set('commandes', commandes);
+
+            deleteBLForCommande(id);
+
+            history.unshift(...newHistoryEntries);
+            DB.set('history', history);
+        }
+
+        updateCommandeStatut(id, estLivree ? 'produite' : 'en_attente');
         modal.hide();
-        showToast('Commande restaurée');
+        showToast(estLivree ? 'Commande restaurée — stock restitué et BL supprimé' : 'Commande restaurée');
     });
 };
 
