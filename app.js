@@ -301,6 +301,20 @@ const resolveCommandeFormat = (item, formats) => {
 // Toutes les tables persistées
 const ALL_TABLES = ['employees', 'aromes', 'formats', 'recettes', 'clients', 'lots', 'commandes', 'pointages', 'inventaire', 'livraisons', 'history', 'todos'];
 
+// Helpers pour le suivi des tables non synchronisées (hors-band, pas dans ALL_TABLES)
+const getDirtyTables = () => {
+    try { return JSON.parse(localStorage.getItem('thecol_dirty_tables') || '[]'); }
+    catch { return []; }
+};
+const markDirty = (key) => {
+    const dirty = getDirtyTables();
+    if (!dirty.includes(key)) { dirty.push(key); localStorage.setItem('thecol_dirty_tables', JSON.stringify(dirty)); }
+};
+const unmarkDirty = (key) => {
+    const dirty = getDirtyTables().filter(k => k !== key);
+    localStorage.setItem('thecol_dirty_tables', JSON.stringify(dirty));
+};
+
 // Data Storage with Firebase sync
 const DB = {
     firebaseSynced: false,
@@ -332,6 +346,8 @@ const DB = {
         }
         if (window.firebaseReady && window.firebaseDb) {
             DB.syncToFirebase(key, data);
+        } else {
+            markDirty(key);
         }
         if (!localOk) {
             showToast('Stockage local plein. Synchronisation cloud effectuée.', 'warning');
@@ -339,17 +355,21 @@ const DB = {
     },
 
     syncToFirebase: async (key, data) => {
-        if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
+        if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) { markDirty(key); return false; }
         try {
             const { setDoc, doc } = window.firebaseApi;
             await setDoc(doc(window.firebaseDb, 'data', key), { data: data, updatedAt: new Date().toISOString() });
+            unmarkDirty(key);
+            return true;
         } catch(e) {
             console.error('Firebase sync error:', e);
+            markDirty(key);
             showToast('Synchronisation cloud échouée pour « ' + key + ' » — données enregistrées localement uniquement.', 'error');
+            return false;
         }
     },
 
-    loadFromFirebase: async (showNotification = true) => {
+    loadFromFirebase: async (showNotification = true, skipTables = []) => {
         if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
         try {
             // Backup before sync
@@ -366,6 +386,7 @@ const DB = {
             const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
             const hasData = !snapshot.empty;
             snapshot.forEach(docSnap => {
+                if (skipTables.includes(docSnap.id)) return;
                 const cloudData = docSnap.data().data;
                 if (Array.isArray(cloudData)) {
                     localStorage.setItem('thecol_' + docSnap.id, JSON.stringify(cloudData));
@@ -420,7 +441,19 @@ window.forceFirebaseSync = async () => {
         '');
     document.getElementById('modalClose').style.display = 'none'; // Lock modal during sync
     try {
-        await DB.loadFromFirebase(true);
+        const dirty = getDirtyTables();
+        const failedTables = [];
+        if (dirty.length > 0) {
+            for (const key of dirty) {
+                const data = DB.get(key);
+                const success = await DB.syncToFirebase(key, data);
+                if (!success) failedTables.push(key);
+            }
+            if (failedTables.length > 0) {
+                showToast(`${failedTables.length} table(s) locale(s) non synchronisée(s) — pull partiel`, 'warning');
+            }
+        }
+        await DB.loadFromFirebase(true, failedTables);
         renderCurrentView();
     } catch(e) {
         showToast('Erreur lors de la synchronisation', 'error');
@@ -6302,6 +6335,22 @@ const deleteInventaireItem = (id) => {
     });
 };
 
+// Restauration du backup pré-synchronisation
+const restorePreSyncBackup = () => {
+    confirmDialog('Restaurer les données telles qu\'elles étaient avant la dernière synchronisation cloud ? Les modifications effectuées depuis seront perdues.', { danger: true, confirmLabel: 'Restaurer' }).then(ok => {
+        if (!ok) return;
+        try {
+            const backup = JSON.parse(localStorage.getItem('thecol_backup_pre_sync') || '{}');
+            Object.entries(backup).forEach(([k, v]) => localStorage.setItem(k, v));
+            showToast('Backup pré-synchro restauré');
+            renderCurrentView();
+        } catch(e) {
+            console.error('restorePreSyncBackup:', e);
+            showToast('Erreur lors de la restauration du backup', 'error');
+        }
+    });
+};
+
 // Settings
 const renderParametres = () => {
     const employes = DB.get('employees') || [];
@@ -6446,6 +6495,9 @@ const renderParametres = () => {
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; padding: 12px;">
                     <button class="btn btn-primary" onclick="exportAllData()">💾 Sauvegarder tout (JSON)</button>
                     <button class="btn btn-secondary" onclick="document.getElementById('importDataFile').click()">📂 Restaurer depuis JSON</button>
+                    ${localStorage.getItem('thecol_backup_pre_sync') ? `
+                    <button class="btn btn-secondary" onclick="restorePreSyncBackup()">♻️ Restaurer le backup pré-synchro</button>
+                    ` : ''}
                     <input type="file" id="importDataFile" accept=".json" style="display:none" onchange="importAllData(event)">
                 </div>
                 <p class="text-muted" style="font-size: 12px; padding: 0 12px 12px;">
@@ -7316,7 +7368,20 @@ const bootFirebaseSync = async () => {
     });
     const firebaseAvailable = await waitForFirebase();
     if (firebaseAvailable) {
-        await DB.loadFromFirebase(false);
+        // Push dirty tables before pull
+        const dirty = getDirtyTables();
+        const failedTables = [];
+        if (dirty.length > 0) {
+            for (const key of dirty) {
+                const data = DB.get(key);
+                const success = await DB.syncToFirebase(key, data);
+                if (!success) failedTables.push(key);
+            }
+        }
+        if (failedTables.length > 0) {
+            showToast(`${failedTables.length} table(s) locale(s) non synchronisée(s) — pull partiel`, 'warning');
+        }
+        await DB.loadFromFirebase(false, failedTables);
         // Re-migration après import cloud, puis re-rendu de la vue courante.
         try { migrateClientTarifs(); } catch (e) { console.warn('[migration] post-sync', e); }
         renderCurrentView();
