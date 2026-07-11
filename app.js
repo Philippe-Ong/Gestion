@@ -31,6 +31,15 @@ const parseHHMM = (str) => {
     return h * 60 + min;
 };
 
+// Calcule la durée en minutes d'un pointage, en gérant les pointages de nuit
+// (fin < début = la fin est le lendemain, ex. 22:00→02:00 = 240 min).
+const computePointageMinutes = (debutMin, finMin, pause = 0) => {
+    if (debutMin === null || finMin === null) return null;
+    let diff = finMin - debutMin - pause;
+    if (diff < 0) diff += 1440; // franchit minuit
+    return diff;
+};
+
 // Null-safe accessor for command/order line items.
 const getItems = (cmd) => (cmd && Array.isArray(cmd.items)) ? cmd.items : [];
 
@@ -92,6 +101,12 @@ const getLocalDateISOString = () => {
 const toLocalDayKey = (ms) => {
     const d = new Date(ms);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const csvCell = (v) => {
+    const s = String(v ?? '');
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
 };
 
 const getNextCommandeNumero = () => {
@@ -2440,7 +2455,7 @@ const renderPointage = (_tabIgnored) => {
                     const pause = parseInt(p.pause, 10) || 0;
                     let totalLabel = '— en cours';
                     if (debutMin !== null && finMin !== null) {
-                        const totalMin = (finMin - debutMin) - pause;
+                        const totalMin = computePointageMinutes(debutMin, finMin, pause);
                         if (totalMin > 0) {
                             const h = Math.floor(totalMin / 60);
                             const m = totalMin % 60;
@@ -2503,7 +2518,7 @@ const renderHistoriqueTable = (pointages, employes) => {
         const finMin = parseHHMM(p.heureFin);
         let totalMinutes = 0;
         if (debutMin !== null && finMin !== null) {
-            totalMinutes = finMin - debutMin - (p.pause || 0);
+            totalMinutes = computePointageMinutes(debutMin, finMin, p.pause || 0);
         }
         const heures = Math.floor(totalMinutes / 60);
         const mins = totalMinutes % 60;
@@ -2569,7 +2584,7 @@ const getPointageStats = (pointages, employes) => {
         const debutMin = parseHHMM(p.heureDebut);
         const finMin = parseHHMM(p.heureFin);
         if (debutMin === null || finMin === null) return acc;
-        const diff = finMin - debutMin - (p.pause || 0);
+        const diff = computePointageMinutes(debutMin, finMin, p.pause || 0);
         return acc + (diff > 0 ? diff : 0);
     }, 0);
 
@@ -2584,7 +2599,7 @@ const getPointageStats = (pointages, employes) => {
         const debutMin = parseHHMM(p.heureDebut);
         const finMin = parseHHMM(p.heureFin);
         if (debutMin === null || finMin === null) return;
-        const diff = finMin - debutMin - (p.pause || 0);
+        const diff = computePointageMinutes(debutMin, finMin, p.pause || 0);
         if (diff > 0) empStats[p.employeId] += diff / 60;
     });
 
@@ -2619,10 +2634,6 @@ const saveQuickPointage = (event) => {
         }
         if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
             showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
-            return;
-        }
-        if (parseHHMM(heureFin) <= parseHHMM(heureDebut)) {
-            showToast('L\'heure de fin doit être après l\'heure de début', 'error');
             return;
         }
 
@@ -2701,7 +2712,7 @@ const exportPointageExcel = () => {
         .sort((a, b) => new Date(b.date) - new Date(a.date));
 
     // Create CSV content
-    let csv = 'Date,Employé,Début,Fin,Pause,Durée\n';
+    let csv = '\uFEFFDate,Employé,Début,Fin,Pause,Durée\n';
 
     filtered.forEach(p => {
         const emp = employes.find(e => e.id === p.employeId);
@@ -2711,13 +2722,13 @@ const exportPointageExcel = () => {
         const finMin = parseHHMM(p.heureFin);
         let totalMinutes = 0;
         if (debutMin !== null && finMin !== null) {
-            totalMinutes = finMin - debutMin - (p.pause || 0);
+            totalMinutes = computePointageMinutes(debutMin, finMin, p.pause || 0);
         }
         const heures = Math.floor(totalMinutes / 60);
         const mins = totalMinutes % 60;
         const duree = totalMinutes > 0 ? `${heures}h ${mins}min` : '-';
 
-        csv += `${p.date},${empName},${p.heureDebut || '-'},${p.heureFin || '-'},${p.pause || 0},${duree}\n`;
+        csv += [p.date, empName, p.heureDebut || '-', p.heureFin || '-', p.pause || 0, duree].map(csvCell).join(',') + '\n';
     });
 
     // Download CSV
@@ -3938,7 +3949,9 @@ const checkStockAndUpdateCommandes = () => {
         }
     });
 
-    DB.set('commandes', updatedCommandes);
+    if (updatedCount > 0) {
+        DB.set('commandes', updatedCommandes);
+    }
     renderCommandes();
 
     if (updatedCount > 0) {
@@ -4471,7 +4484,6 @@ const AROME_BL_NAMES = {
     'hibiscus': 'Hibiscus',
     'coing': 'Coing',
     'edition noel': 'Edition Noël',
-    'edition noel': 'Edition Noël',
     'menthe': 'Menthe'
 };
 
@@ -4803,7 +4815,6 @@ const exportBLExcel = (livraisonId) => {
                     }
                 }
 
-                const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
                 const parser = new DOMParser();
                 const sheetDoc = parser.parseFromString(sheetXml, 'text/xml');
 
@@ -5258,7 +5269,7 @@ const renderProduction = () => {
                   Object.values(productionNecesaire).map(b => {
                       const arome = aromes.find(a => a.nom === b.aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
-                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${b.aromeNom} ${b.formatNom}</span>
+                          <span><span class="color-dot" style="background: ${escapeHtml(arome?.couleur || '#ccc')}"></span>${escapeHtml(b.aromeNom)} ${escapeHtml(b.formatNom)}</span>
                           <div style="text-align: right;">
                               <div style="font-size: 12px; color: var(--text-muted);">Stock: ${b.disponible} bt</div>
                               <strong>À produire: ${b.aProduire} bt</strong>
