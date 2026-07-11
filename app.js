@@ -3545,15 +3545,6 @@ const livrerCommande = (id) => {
     });
 };
 
-const archiverCommande = (id) => {
-    confirmDialog('Archiver cette commande ? Elle sera déplacée vers les archives.').then(ok => {
-        if (!ok) return;
-        modal.hide();
-        showToast('Commande archivée');
-        renderCommandes();
-    });
-};
-
 const restaurerCommande = (id) => {
     const commandes = DB.get('commandes') || [];
     const cmd = commandes.find(c => c.id === id);
@@ -4032,13 +4023,18 @@ const showCommandeDetails = (id) => {
 
     let actionsHtml = `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`;
     if (commande.statut === 'en_attente') {
-        actionsHtml = `<button class="btn btn-success" onclick="marquerCommandeProduite('${id}')">Marquer produite</button>`
+        actionsHtml = `<button class="btn btn-secondary" onclick="editCommande('${id}')">Modifier</button>`
+            + `<button class="btn btn-secondary" onclick="duplicateCommande('${id}')">Dupliquer</button>`
+            + `<button class="btn btn-success" onclick="marquerCommandeProduite('${id}')">Marquer produite</button>`
             + `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
     } else if (commande.statut === 'produite') {
-        actionsHtml = `<button class="btn btn-success" onclick="showLivraisonBouteillesModal('${id}')">Livrer</button>`
+        actionsHtml = `<button class="btn btn-secondary" onclick="editCommande('${id}')">Modifier</button>`
+            + `<button class="btn btn-secondary" onclick="duplicateCommande('${id}')">Dupliquer</button>`
+            + `<button class="btn btn-success" onclick="showLivraisonBouteillesModal('${id}')">Livrer</button>`
             + `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
     } else if (commande.statut === 'livrée') {
-        actionsHtml = `<button class="btn btn-primary" onclick="archiverCommande('${id}')">Archiver</button>` + actionsHtml;
+        actionsHtml = `<button class="btn btn-secondary" onclick="duplicateCommande('${id}')">Dupliquer</button>`
+            + `<button class="btn btn-secondary" onclick="restaurerCommande('${id}')">Restaurer</button>` + actionsHtml;
     } else if (commande.statut === 'annulee') {
         actionsHtml = `<button class="btn btn-secondary" onclick="restaurerCommande('${id}')">Restaurer</button>` + actionsHtml;
     }
