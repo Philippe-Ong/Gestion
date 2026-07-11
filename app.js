@@ -5478,12 +5478,6 @@ const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
         }
 
         const formats = DB.get('formats') || [];
-        const aromes = DB.get('aromes') || [];
-        const recettes = DB.get('recettes') || [];
-        const inventaire = (DB.get('inventaire') || []).map(item => ({ ...item }));
-        const lots = DB.get('lots') || [];
-        const history = DB.get('history') || [];
-
         const producedByFormat = [];
         let totalBouteilles = 0;
         let litresProduit = 0;
@@ -5503,157 +5497,13 @@ const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
             return;
         }
 
-        const arome = aromes.find(a => a.nom === aromeNom);
-        const recette = recettes.find(r => r.aromeId === arome?.id);
-        const warnings = [];
-
-        if (recette && Array.isArray(recette.ingredients)) {
-            recette.ingredients.forEach(ing => {
-                if (isWaterIngredient(ing.nom)) return;
-
-                const ingQty = parseFloat(ing.quantite);
-                if (Number.isNaN(ingQty)) {
-                    warnings.push(`Quantité de recette invalide pour ${ing.nom}`);
-                    return;
-                }
-                const baseBesoin = ingQty * litresProduit;
-                const besoinMajore = baseBesoin * CONSTANTS.PRODUCTION_LOSS;
-                const item = findInventaireItemByName(inventaire, ing.nom);
-
-                if (!item) {
-                    warnings.push(`Ingrédient absent: ${ing.nom}`);
-                    return;
-                }
-
-                const ingUnit = displayUnit(ing.unite);
-                const invUnit = displayUnit(item.unite);
-
-                if (!areUnitsCompatible(ingUnit, invUnit)) {
-                    warnings.push(`Unité incompatible pour ${ing.nom} (recette: ${ingUnit}, inventaire: ${invUnit})`);
-                    return;
-                }
-
-                let besoinInInvUnit = besoinMajore;
-                if (ingUnit !== invUnit) {
-                    const converted = convertQuantity(besoinMajore, ingUnit, invUnit);
-                    if (converted === null) {
-                        warnings.push(`Conversion impossible pour ${ing.nom}`);
-                        return;
-                    }
-                    besoinInInvUnit = converted;
-                }
-
-                if ((item.quantite || 0) < besoinInInvUnit) {
-                    warnings.push(`Stock insuffisant: ${item.nom}`);
-                }
-
-                item.quantite = Math.round(((item.quantite || 0) - besoinInInvUnit) * 10000) / 10000;
-            });
-        } else {
-            warnings.push(`Recette introuvable pour ${aromeNom}`);
-        }
-
-        producedByFormat.forEach(({ format, quantite }) => {
-            const bottleItem = getBottleInventoryItem(inventaire, format);
-            if (!bottleItem) {
-                warnings.push(`Bouteilles vides absentes pour ${format.nom}`);
-            } else {
-                if ((bottleItem.quantite || 0) < quantite) {
-                    warnings.push(`Stock insuffisant: ${bottleItem.nom}`);
-                }
-                bottleItem.quantite = (bottleItem.quantite || 0) - quantite;
-            }
-        });
-
-        // Bouchons : déduction par taille (25cl vs 50/100cl)
-        let btPetitBouchon = 0, btGrandBouchon = 0;
-        producedByFormat.forEach(({ format, quantite }) => {
-            if ((format.contenanceCl || 0) < 50) btPetitBouchon += quantite;
-            else btGrandBouchon += quantite;
-        });
-
-        const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.CAPSULE_LOSS);
-        const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.CAPSULE_LOSS);
-
-        if (bouchonsPetitsNecessaires > 0) {
-            const bouchonPetitItem = findInventaireItemByName(inventaire, 'Bouchons 25cl');
-            if (bouchonPetitItem) {
-                if ((bouchonPetitItem.quantite || 0) < bouchonsPetitsNecessaires) warnings.push(`Stock insuffisant: ${bouchonPetitItem.nom}`);
-                bouchonPetitItem.quantite = (bouchonPetitItem.quantite || 0) - bouchonsPetitsNecessaires;
-            } else {
-                warnings.push('Bouchons 25cl absents de l\'inventaire');
-            }
-        }
-        if (bouchonsGrandsNecessaires > 0) {
-            const bouchonGrandItem = findInventaireItemByName(inventaire, 'Bouchons 50cl/100cl');
-            if (bouchonGrandItem) {
-                if ((bouchonGrandItem.quantite || 0) < bouchonsGrandsNecessaires) warnings.push(`Stock insuffisant: ${bouchonGrandItem.nom}`);
-                bouchonGrandItem.quantite = (bouchonGrandItem.quantite || 0) - bouchonsGrandsNecessaires;
-            } else {
-                warnings.push('Bouchons 50cl/100cl absents de l\'inventaire');
-            }
-        }
-
-        if (warnings.length > 0) {
-            const ok = await confirmDialog(
-                `Attention: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}. Confirmer quand même la production ?`,
-                { danger: true, confirmLabel: 'Confirmer quand même', title: 'Inventaire insuffisant' }
-            );
-            if (!ok) return;
-        }
-
-        const dateProduction = getLocalDateISOString();
-        const dates = calculateDates(dateProduction);
-
-        producedByFormat.forEach(({ format, quantite }) => {
-            const existingLot = lots.find(l =>
-                l.arome === aromeNom &&
-                l.format === format.nom &&
-                l.dateProduction === dateProduction
-            );
-
-            let lotId;
-            if (existingLot) {
-                existingLot.quantite = (existingLot.quantite || 0) + quantite;
-                lotId = existingLot.id;
-            } else {
-                let maxNum = 0;
-                lots.forEach(l => {
-                    const num = parseInt(l.id, 10);
-                    if (!isNaN(num) && num > maxNum) maxNum = num;
-                });
-                lotId = String(maxNum + 1).padStart(6, '0');
-
-                lots.push({
-                    id: lotId,
-                    arome: aromeNom,
-                    format: format.nom,
-                    quantite,
-                    dateProduction,
-                    dlv: dates.dlv,
-                    dlc: dates.dlc
-                });
-            }
-
-            history.unshift({
-                id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-                lotId,
-                arome: aromeNom,
-                format: format.nom,
-                quantity: quantite,
-                productionDate: dateProduction,
-                dateAdded: new Date().toISOString()
-            });
-        });
-
-        DB.set('inventaire', inventaire);
-        DB.set('lots', lots);
-        DB.set('history', history);
+        const result = await finaliserProductionFormats(aromeNom, producedByFormat, litresProduit, totalBouteilles);
+        if (!result) return;
 
         modal.hide();
         showToast(`Production confirmée: ${totalBouteilles} bouteille(s) ajoutée(s) au stock`);
-        if (warnings.length > 0) {
-            showToast(`Attention: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}`, 'warning');
+        if (result.warnings.length > 0) {
+            showToast(`Attention: ${result.warnings[0]}${result.warnings.length > 1 ? ` (+${result.warnings.length - 1})` : ''}`, 'warning');
         }
         renderProduction();
     } catch (e) {
