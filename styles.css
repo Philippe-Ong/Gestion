@@ -847,6 +847,7 @@ input[type="checkbox"] {
     padding: 14px 22px;
     border-top: 1px solid var(--border-light);
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 10px;
     background: var(--bg-secondary);
@@ -1916,9 +1917,6 @@ input[type="checkbox"] {
         height: 30px;
     }
 
-    .lot-card-actions .btn { min-height: 40px; }
-    .status-pill { padding: 9px 14px; }
-    .week-calendar-header .btn-bare { padding: 8px 14px; }
     .inventaire-qty-controls .btn { width: 40px; }
 }
 
@@ -2015,11 +2013,18 @@ input[type="checkbox"] {
     background: rgba(93, 123, 62, 0.08);
 }
 
+.employee-info {
+    min-width: 0;
+    flex: 1;
+}
+
 .employee-name {
     font-weight: 600;
     font-size: 15px;
     color: var(--text);
     line-height: 1.2;
+    overflow-wrap: break-word;
+    word-break: break-word;
 }
 
 .employee-sub {
@@ -3417,6 +3422,14 @@ input[type="checkbox"] {
     /* Touch targets mobile */
     .btn { min-height: 44px; -webkit-tap-highlight-color: transparent; }
     .employee-card, .status-pill, .week-day { -webkit-tap-highlight-color: transparent; }
+
+    /* Ces 3 règles doivent rester APRÈS leurs sélecteurs de base (.week-calendar-header
+       .btn-bare, .status-pill, .lot-card-actions .btn) plus haut dans ce fichier :
+       à spécificité égale, l'ordre source tranche — placées avant, elles étaient
+       silencieusement écrasées malgré la media query. */
+    .lot-card-actions .btn { min-height: 40px; }
+    .status-pill { padding: 9px 14px; }
+    .week-calendar-header .btn-bare { padding: 8px 14px; }
 
     input:not([type="checkbox"]):not([type="radio"]),
     select,
