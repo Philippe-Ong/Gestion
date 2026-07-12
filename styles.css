@@ -262,7 +262,7 @@ body {
     background: rgba(255, 255, 255, 0.92);
     backdrop-filter: saturate(180%) blur(12px);
     -webkit-backdrop-filter: saturate(180%) blur(12px);
-    padding: 14px 28px;
+    padding: calc(14px + env(safe-area-inset-top, 0px)) 28px 14px;
     border-bottom: 1px solid var(--border-light);
     display: flex;
     align-items: center;
@@ -1701,7 +1701,7 @@ input[type="checkbox"] {
     }
 
     .header {
-        padding: 10px 12px;
+        padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px;
         gap: 8px;
         flex-wrap: wrap;
     }

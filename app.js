@@ -1049,7 +1049,7 @@ const navigateTo = (page) => {
         document.querySelectorAll('[data-page="stock"]').forEach(el => el.classList.add('active'));
     }
     // Pages du menu « Plus » : allumer le bouton Plus
-    const morePages = ['livraisons', 'production', 'inventaire', 'parametres'];
+    const morePages = ['pointage', 'livraisons', 'inventaire', 'parametres'];
     if (morePages.includes(page)) {
         document.getElementById('moreNavBtn')?.classList.add('active');
     }
