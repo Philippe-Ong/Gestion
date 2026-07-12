@@ -82,6 +82,7 @@ Ces helpers sont appelés automatiquement par `DB.set()` et `DB.forceSet()` lors
 ```json
 {
   "id": "uuid",
+  "numLot": "string (optionnel, numéro de lot commun par arôme et date de production)",
   "aromeId": "uuid",
   "formatId": "uuid",
   "quantite": "number",

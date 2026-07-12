@@ -457,6 +457,8 @@ const calculateAvailableStock = (lots, referenceDate = new Date()) => {
     return stock;
 };
 
+const getLotNumero = (lot) => String(lot?.numLot || lot?.id || '');
+
 // Manual sync function
 window.forceFirebaseSync = async () => {
     const syncBtn = document.getElementById('syncBtn');
@@ -856,7 +858,7 @@ const getGlobalSearchMatches = (query) => {
     });
 
     lots.forEach(lot => {
-        const label = `Lot #${String(lot.id).slice(-6)} - ${lot.arome || ''} ${lot.format || ''}`;
+        const label = `Lot #${String(lot.numLot || lot.id).slice(-6)} - ${lot.arome || ''} ${lot.format || ''}`;
         if (includesText(label, q) || includesText(lot.dlc, q)) {
             matches.push({ type: 'lot', id: lot.id, label, meta: `${lot.quantite || 0} bt` });
         }
@@ -1380,14 +1382,14 @@ const renderStock = () => {
             (cmd.lotsUtilises || []).forEach(lu => {
                 const idS = String(lu.lotId || '');
                 if (!idS || knownIds.has(idS) || archived[idS]) return;
-                archived[idS] = { id: idS, arome: lu.arome || '', format: lu.format || '', dlc: lu.dlc || '', dateProduction: '' };
+                archived[idS] = { id: idS, numLot: lu.numLot || idS, arome: lu.arome || '', format: lu.format || '', dlc: lu.dlc || '', dateProduction: '' };
             });
         });
         (DB.get('history') || []).forEach(h => {
             const idS = String(h.lotId || '');
             if (!idS || knownIds.has(idS)) return;
             if (!archived[idS]) {
-                archived[idS] = { id: idS, arome: h.arome || '', format: h.format || '', dlc: '', dateProduction: h.productionDate || '' };
+                archived[idS] = { id: idS, numLot: h.numLot || idS, arome: h.arome || '', format: h.format || '', dlc: '', dateProduction: h.productionDate || '' };
             } else if (!archived[idS].dateProduction) {
                 archived[idS].dateProduction = h.productionDate || '';
             }
@@ -1402,7 +1404,7 @@ const renderStock = () => {
                     const arome = aromes.find(a => a.nom === l.arome);
                     return `<div class="lot-card">
                         <div class="lot-card-header">
-                            <span class="lot-card-numero">#${escapeHtml(String(l.id).padStart(6, '0'))}</span>
+                            <span class="lot-card-numero">#${escapeHtml(String(l.numLot || l.id).padStart(6, '0'))}</span>
                             <span class="badge badge-default">Épuisé</span>
                         </div>
                         <div class="lot-card-aroma">
@@ -1432,7 +1434,7 @@ const renderStock = () => {
             const statusLabel = status === 'expired' ? 'Expiré' : status === 'warning' ? '< 1 mois' : 'OK';
             return `<div class="lot-card lot-status-${status}">
                 <div class="lot-card-header">
-                    <span class="lot-card-numero">#${escapeHtml(String(lot.id).padStart(6, '0'))}</span>
+                    <span class="lot-card-numero">#${escapeHtml(String(lot.numLot || lot.id).padStart(6, '0'))}</span>
                     <span class="badge ${badgeClass}">${statusLabel}</span>
                 </div>
                 <div class="lot-card-aroma">
@@ -1656,7 +1658,7 @@ const renderHistorique = () => {
                 </div>
                 <div class="hist-day-list">
                     ${dayEntries.map(e => {
-                        const lotNum = e.lotId ? `#${String(e.lotId).padStart(6, '0')}` : 'Lot ?';
+                        const lotNum = e.lotId ? `#${String(e.numLot || e.lotId).padStart(6, '0')}` : 'Lot ?';
                         const color = aromeColor[e.arome] || '#ccc';
                         return `
                         <div class="hist-entry ${e.isVente ? 'is-vente' : 'is-prod'}">
@@ -1811,6 +1813,7 @@ const saveLot = (event) => {
 
             const lot = {
                 id: newId,
+                numLot: newId,
                 arome,
                 format,
                 quantite,
@@ -1824,6 +1827,7 @@ const saveLot = (event) => {
         history.unshift({
             id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
             lotId: newId,
+            numLot: newId,
             arome,
             format,
             quantity: quantite,
@@ -1898,6 +1902,7 @@ const vendreLot = (lotId) => {
     history.unshift({
         id: `VENTE-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
         lotId: lot.id,
+        numLot: lot.numLot || lot.id,
         arome: lot.arome,
         format: lot.format,
         quantity: quantite,
@@ -1958,6 +1963,7 @@ const getLotTraceData = (lotId) => {
     const ref = lot || productions[productions.length - 1] || livraisonsClients[0] || ventes[0] || {};
     return {
         lotId: idStr,
+        numLot: lot?.numLot || productions[0]?.numLot || idStr,
         lot,
         arome: ref.arome || '',
         format: ref.format || '',
@@ -2016,7 +2022,7 @@ const showLotTraceModal = (lotId) => {
             </div>
         `).join('')}`;
 
-    modal.show(`Traçabilité lot #${escapeHtml(String(t.lotId).padStart(6, '0'))}`, `
+    modal.show(`Traçabilité lot #${escapeHtml(String(t.numLot || t.lotId).padStart(6, '0'))}`, `
         <div class="commande-details">
             ${ligne('Arôme / Format', `${escapeHtml(t.arome || '?')} • ${escapeHtml(t.format || '?')}`)}
             ${t.dateProduction ? ligne('Date de production', formatDate(t.dateProduction)) : ''}
@@ -3223,6 +3229,7 @@ const restaurerCommande = (id) => {
                     const prodEntry = history.find(h => String(h.lotId) === String(entry.lotId) && String(h.id).startsWith('PROD-'));
                     const nouveauLot = {
                         id: entry.lotId,
+                        numLot: entry.numLot || entry.lotId,
                         arome: entry.arome,
                         format: entry.format,
                         quantite: entry.quantite,
@@ -3236,6 +3243,7 @@ const restaurerCommande = (id) => {
                 newHistoryEntries.push({
                     id: `RESTAURE-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
                     lotId: entry.lotId,
+                    numLot: entry.numLot || entry.lotId,
                     arome: entry.arome,
                     format: entry.format,
                     quantity: entry.quantite,
@@ -3302,30 +3310,20 @@ const showLivraisonBouteillesModal = (commandeId) => {
             lot.quantite > 0
         );
 
-        let autoFilled = [];
-        let remaining = item.quantite;
-        for (const lot of lotsDisponibles) {
-            if (remaining <= 0) break;
-            const take = Math.min(lot.quantite, remaining);
-            autoFilled.push({ lotId: lot.id, quantite: take });
-            remaining -= take;
-        }
-
         const lotsRow = lotsDisponibles.length === 0
             ? `<em class="text-muted">Aucun lot disponible</em>`
             : lotsDisponibles.map(lot => {
-                const prefill = autoFilled.find(a => a.lotId === lot.id)?.quantite || 0;
                 return `<div class="flex-between" style="padding: 4px 0;">
-                    <span style="font-size: 12px;">#${String(lot.id).slice(-6)} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
+                    <span style="font-size: 12px;">#${String(lot.numLot || lot.id).slice(-6)} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" data-auto="${prefill}" value="${prefill}" min="0" max="${lot.quantite}" style="width: 60px;">
+                        <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" value="0" min="0" max="${lot.quantite}" style="width: 60px;">
                         <span style="font-size: 12px; color: var(--text-muted);">/ ${lot.quantite}</span>
                     </div>
                 </div>`;
             }).join('');
 
         const itemKey = `${item.aromeId}|${item.formatId}`;
-        const filledTotal = autoFilled.reduce((s, a) => s + a.quantite, 0);
+        const filledTotal = 0;
         const totalId = `item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_');
 
         return `<div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
@@ -3425,7 +3423,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
             const lot = lotsParId.get(lotId);
             const disponible = Number(lot?.quantite);
             if (!lot || !isLotSellable(lot) || !Number.isFinite(disponible) || disponible < quantite) {
-                showToast(`Lot indisponible ou stock insuffisant sur #${lot ? String(lot.id).slice(-6) : String(lotId).slice(-6)}. Livraison non effectuée.`, 'error');
+                showToast(`Lot indisponible ou stock insuffisant sur #${lot ? String(lot.numLot || lot.id).slice(-6) : String(lotId).slice(-6)}. Livraison non effectuée.`, 'error');
                 return;
             }
         }
@@ -3437,6 +3435,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
                 lot.quantite = Number(lot.quantite) - quantite;
                 lotsUtilises.push({
                     lotId: lot.id,
+                    numLot: lot.numLot || lot.id,
                     arome: lot.arome,
                     format: lot.format,
                     dlc: lot.dlc || '',
@@ -3486,14 +3485,6 @@ const showLivraisonBouteillesModal = (commandeId) => {
         if (ecartsEl) ecartsEl.textContent = ecarts === 0 ? 'Aucun écart' : `${ecarts} écart(s)`;
     };
 
-    const allouerAutoFifo = () => {
-        document.querySelectorAll('.lot-qty-input').forEach(input => {
-            input.value = input.dataset.auto || '0';
-        });
-        computeTotals();
-        showToast('Allocation FIFO appliquée');
-    };
-
     modal.show(`Livrer commande #${getCommandeNumero(cmd)} — ${clientName}`, `
         <div style="max-height: 65vh; overflow-y: auto;">
             <div class="workflow-summary">
@@ -3501,10 +3492,6 @@ const showLivraisonBouteillesModal = (commandeId) => {
                 <div><span>Commandé</span><strong>${totalItems}</strong></div>
                 <div><span>Alloué</span><strong id="livraison-total-alloue">0</strong></div>
                 <div><span>Écarts</span><strong id="livraison-ecarts">Calcul...</strong></div>
-            </div>
-            <div class="modal-toolbar">
-                <button type="button" class="btn btn-sm btn-secondary" id="auto-fifo-btn">Allouer automatiquement FIFO</button>
-                <span class="text-muted">L'allocation reste modifiable avant confirmation.</span>
             </div>
             ${lignesHtml}
         </div>
@@ -3517,7 +3504,6 @@ const showLivraisonBouteillesModal = (commandeId) => {
         input.addEventListener('input', computeTotals);
     });
 
-    document.getElementById('auto-fifo-btn')?.addEventListener('click', allouerAutoFifo);
     document.getElementById('confirm-livraison-btn')?.addEventListener('click', validateAndDeliver);
     computeTotals();
 };
@@ -3613,7 +3599,7 @@ const showCommandeDetails = (id) => {
     const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0
         ? commande.lotsUtilises.map(lot => `
             <tr>
-                <td><a href="#" style="color: var(--primary); font-weight: 600;" onclick="event.preventDefault(); showLotTraceModal('${escapeHtml(String(lot.lotId))}')">#${String(lot.lotId).slice(-6)}</a></td>
+                <td><a href="#" style="color: var(--primary); font-weight: 600;" onclick="event.preventDefault(); showLotTraceModal('${escapeHtml(String(lot.lotId))}')">#${String(lot.numLot || lot.lotId).slice(-6)}</a></td>
                 <td>${escapeHtml(lot.arome)}</td>
                 <td>${escapeHtml(lot.format)}</td>
                 <td>${lot.quantite}</td>
@@ -4005,7 +3991,7 @@ const showLivraisonDetails = (id) => {
         : buildLotsTracesForCommande(commande);
     const traceHtml = lotsTraces.map(lot => `
         <tr>
-            <td>#${String(lot.lotId || '').slice(-6)}</td>
+            <td>#${String(lot.numLot || lot.lotId || '').slice(-6)}</td>
             <td>${escapeHtml(lot.arome || '?')}</td>
             <td>${escapeHtml(lot.format || '?')}</td>
             <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
@@ -4115,6 +4101,7 @@ const buildLotsTracesForCommande = (commande) => {
         .filter(lot => (lot.quantite || 0) > 0)
         .map(lot => ({
             lotId: lot.lotId,
+            numLot: lot.numLot || '',
             arome: lot.arome || '',
             format: lot.format || '',
             dlc: lot.dlc || '',
@@ -4209,7 +4196,7 @@ const showPrepareBLExportModal = (livraisonId) => {
     const forcedCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
     const tracePreview = lotsTraces.slice(0, 4).map(lot => `
         <tr>
-            <td>#${String(lot.lotId || '').slice(-6)}</td>
+            <td>#${String(lot.numLot || lot.lotId || '').slice(-6)}</td>
             <td>${escapeHtml(lot.arome || '?')}</td>
             <td>${escapeHtml(lot.format || '?')}</td>
             <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
@@ -5389,24 +5376,43 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
 
     const dateProduction = getLocalDateISOString();
     const dates = calculateDates(dateProduction);
+
+    // Un seul numLot par arôme + date de production (commun à tous les formats)
+    let numLot;
+    const existingLotForArome = lots.find(l => l.arome === aromeNom && l.dateProduction === dateProduction);
+    if (existingLotForArome) {
+        numLot = existingLotForArome.numLot || existingLotForArome.id;
+    } else {
+        let maxNum = 0;
+        let hasNumeric = false;
+        lots.forEach(l => {
+            const num = parseInt(l.numLot || l.id, 10);
+            if (!isNaN(num)) { hasNumeric = true; if (num > maxNum) maxNum = num; }
+        });
+        numLot = hasNumeric ? String(maxNum + 1).padStart(6, '0') : generateId();
+    }
+
     producedByFormat.forEach(({ format, quantite }) => {
         const existingLot = lots.find(l => l.arome === aromeNom && l.format === format.nom && l.dateProduction === dateProduction);
         let lotId;
         if (existingLot) {
             existingLot.quantite = (existingLot.quantite || 0) + quantite;
+            if (!existingLot.numLot) existingLot.numLot = numLot;
             lotId = existingLot.id;
         } else {
-            let maxNum = 0;
+            let maxId = 0;
+            let hasNumericId = false;
             lots.forEach(l => {
                 const num = parseInt(l.id, 10);
-                if (!isNaN(num) && num > maxNum) maxNum = num;
+                if (!isNaN(num)) { hasNumericId = true; if (num > maxId) maxId = num; }
             });
-            lotId = String(maxNum + 1).padStart(6, '0');
-            lots.push({ id: lotId, arome: aromeNom, format: format.nom, quantite, dateProduction, dlv: dates.dlv, dlc: dates.dlc });
+            lotId = hasNumericId ? String(maxId + 1).padStart(6, '0') : generateId();
+            lots.push({ id: lotId, numLot, arome: aromeNom, format: format.nom, quantite, dateProduction, dlv: dates.dlv, dlc: dates.dlc });
         }
         history.unshift({
             id: `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
             lotId,
+            numLot,
             arome: aromeNom,
             format: format.nom,
             quantity: quantite,
