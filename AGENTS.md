@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v10.8
+**Current Version:** v10.9
 
 ## 1. Build, Lint, and Test Commands
 

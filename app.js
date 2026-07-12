@@ -1033,6 +1033,7 @@ document.addEventListener('keydown', (e) => {
 let pointageSelectedEmployeId = null;
 let pointageClockInterval = null;
 let weekCalendarSelectedDate = '';
+let _commandeModalClientOptions = [];
 
 // Navigation
 const router = () => {
@@ -3055,12 +3056,35 @@ const onCommandeClientChange = (select) => {
 const filterClientOptions = (query) => {
     const select = document.querySelector('select[name="clientId"]');
     if (!select) return;
-    const q = (query || '').toLowerCase().trim();
-    Array.from(select.options).forEach(opt => {
-        if (opt.value === '__ponctuel__') { opt.style.display = ''; return; }
-        if (!q) { opt.style.display = ''; return; }
-        opt.style.display = includesText(opt.text, q) ? '' : 'none';
+    const q = (query || '').trim();
+    const previousValue = select.value;
+
+    // Reconstruire les options via DOM API à partir de la source sûre
+    select.textContent = '';
+    const matching = !q
+        ? _commandeModalClientOptions
+        : _commandeModalClientOptions.filter(c => includesText(c.label, q));
+
+    matching.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.label;
+        select.appendChild(opt);
     });
+
+    const ponctuelOpt = document.createElement('option');
+    ponctuelOpt.value = '__ponctuel__';
+    ponctuelOpt.textContent = '➕ Client ponctuel (non récurrent)';
+    select.appendChild(ponctuelOpt);
+
+    // Restaurer la sélection si elle correspond encore, sinon aucune sélection automatique
+    if (previousValue && Array.from(select.options).some(o => o.value === previousValue)) {
+        select.value = previousValue;
+    } else {
+        select.selectedIndex = -1;
+    }
+
+    onCommandeClientChange(select);
 };
 
 const showCommandeModal = (id = null) => {
@@ -3095,13 +3119,14 @@ const showCommandeModal = (id = null) => {
         const existing = DB.get('clients').find(c => c.id === commande.clientId);
         if (existing) clientOptions.push(existing);
     }
+    _commandeModalClientOptions = clientOptions.map(c => ({ id: c.id, label: c.societe || c.nom }));
 
     modal.show(id ? 'Modifier commande' : 'Nouvelle commande', `
         <form id="commandeForm">
             <div class="form-row">
                 <div class="form-group">
                     <label>Client</label>
-                    <input type="search" placeholder="Filtrer les clients…" oninput="filterClientOptions(this.value)" style="margin-bottom: 8px;">
+                    <input type="search" placeholder="Filtrer les clients…" aria-label="Filtrer les clients" oninput="filterClientOptions(this.value)" style="margin-bottom: 8px;">
                     <select name="clientId" required onchange="onCommandeClientChange(this)">
                         ${clientOptions.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                         <option value="__ponctuel__">➕ Client ponctuel (non récurrent)</option>
@@ -3166,14 +3191,6 @@ const showCommandeModal = (id = null) => {
                 <div class="commande-total-value" id="commandeTotalValue">CHF —</div>
             </div>
 
-            <div class="form-group">
-                <label>Statut</label>
-                <select name="statut">
-                    <option value="en_attente" ${commande?.statut === 'en_attente' ? 'selected' : ''}>En attente</option>
-                    <option value="produite" ${commande?.statut === 'produite' ? 'selected' : ''}>Produite</option>
-                    <option value="annulee" ${commande?.statut === 'annulee' ? 'selected' : ''}>Annulée</option>
-                </select>
-            </div>
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
@@ -3212,11 +3229,7 @@ const saveCommande = (event, id) => {
         }
 
         const formData = new FormData(form);
-        const statut = formData.get('statut');
-        if (!['en_attente', 'produite', 'annulee'].includes(statut)) {
-            showToast('Le statut « Livrée » est réservé à la confirmation de livraison', 'error');
-            return;
-        }
+        const statut = (id && commandeExistante) ? commandeExistante.statut : 'en_attente';
 
         const items = [];
         const qtyInputs = document.querySelectorAll('.item-qty-input');
