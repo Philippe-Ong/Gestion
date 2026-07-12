@@ -1918,6 +1918,9 @@ input[type="checkbox"] {
     }
 
     .inventaire-qty-controls .btn { width: 40px; }
+
+    .hist-summary { flex-direction: column; }
+    .prod-stats-kpis { flex-direction: column; gap: 8px; }
 }
 
 @media (max-width: 1024px) {
@@ -2926,6 +2929,61 @@ input[type="checkbox"] {
     font-size: 11px;
     color: var(--text-light);
     margin-top: 4px;
+}
+.hist-summary-stat-btn {
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    color: inherit;
+    cursor: pointer;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.hist-summary-stat-btn:hover {
+    box-shadow: var(--shadow-sm);
+    border-color: var(--primary-light);
+}
+.hist-summary-stat-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+.hist-summary-stat-btn:active {
+    transform: scale(0.98);
+}
+
+/* ── Production stats dashboard (modal) ────────────────────── */
+.prod-stats-dashboard {
+    padding: 2px 0;
+}
+.prod-stats-kpis {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.prod-stats-kpi {
+    flex: 1;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+    padding: 16px 12px;
+    text-align: center;
+}
+.prod-stats-kpi-val {
+    display: block;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--primary);
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+}
+.prod-stats-kpi-lbl {
+    display: block;
+    font-size: 11px;
+    color: var(--text-light);
+    margin-top: 4px;
+}
+.prod-stats-title {
+    margin: 16px 0 8px;
+    font-size: 15px;
+    font-weight: 600;
 }
 
 /* ── Historique de production : timeline ───────────────────── */

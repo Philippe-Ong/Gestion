@@ -982,7 +982,7 @@ const modal = {
         // which is what we want for confirmDialog whose body has no inputs.
         const bodyFocusables = bodyEl ? bodyEl.querySelectorAll(focusableSelector) : [];
         const footerFocusables = footerEl ? footerEl.querySelectorAll(focusableSelector) : [];
-        const target = bodyFocusables[0] || footerFocusables[0];
+        const target = bodyFocusables[0] || footerFocusables[0] || document.getElementById('modalClose');
         if (target) setTimeout(() => target.focus(), 0);
     },
     hide: () => {
@@ -1570,11 +1570,52 @@ const setHistFilter = (name, value) => {
     renderHistorique();
 };
 
+// Helpers pour le calcul des litres de production
+const resolveFormatContenance = (formatName, formats) => {
+    if (!formatName) return 0;
+    const lower = formatName.toLowerCase().trim();
+    // Exact match (case-sensitive then case-insensitive)
+    let fmt = formats.find(f => f.nom === formatName);
+    if (fmt) { const c = Number(fmt.contenanceCl); if (isFinite(c) && c > 0) return c; }
+    fmt = formats.find(f => f.nom.toLowerCase() === lower);
+    if (fmt) { const c = Number(fmt.contenanceCl); if (isFinite(c) && c > 0) return c; }
+    // No configured format matches — parse the label as a size string
+    const cleaned = lower.replace(/\s+/g, '');
+    const m = cleaned.match(/^(\d+(?:[.,]\d+)?)(cl|ml|l)$/);
+    if (m) {
+        const num = parseFloat(m[1].replace(',', '.'));
+        if (isFinite(num) && num > 0) {
+            if (m[2] === 'cl') return num;
+            if (m[2] === 'ml') return num / 10;
+            if (m[2] === 'l')  return num * 100;
+        }
+    }
+    return 0;
+};
+
+const calcProductionLitres = (quantity, formatName, formats) => {
+    const qty = Number(quantity);
+    if (!isFinite(qty) || qty <= 0) return 0;
+    const cl = resolveFormatContenance(formatName, formats);
+    return cl > 0 ? qty * cl / 100 : 0;
+};
+
 // Page dédiée : Historique de production (timeline groupée par jour + filtres)
 const renderHistorique = () => {
     const history = DB.get('history') || [];
     const aromes  = DB.get('aromes')  || [];
     const formats = DB.get('formats') || [];
+
+    // Cumul production non filtré (pour la carte « litres produits »)
+    const totalAllProductionLitres = (() => {
+        let sum = 0;
+        for (const r of history) {
+            const id = String(r.id);
+            if (id.startsWith('VENTE-') || id.startsWith('RESTAURE-')) continue;
+            sum += calcProductionLitres(r.quantity, r.format, formats);
+        }
+        return sum;
+    })();
 
     const savedQuery  = (DB.getFilter('histQuery') || '').toString().toLowerCase().trim();
     const savedType   = DB.getFilter('histType')   || ''; // '', 'prod', 'vente'
@@ -1608,7 +1649,6 @@ const renderHistorique = () => {
         return true;
     }).sort((a, b) => b.when - a.when);
 
-    const totalProd  = entries.filter(e => !e.isVente).reduce((s, e) => s + (e.quantity || 0), 0);
     const totalVente = entries.filter(e =>  e.isVente).reduce((s, e) => s + (e.quantity || 0), 0);
 
     // Regroupement par jour (entrées déjà triées du plus récent au plus ancien)
@@ -1688,10 +1728,10 @@ const renderHistorique = () => {
         ${stockSubTabs('historique')}
 
         <div class="hist-summary">
-            <div class="hist-summary-stat">
-                <span class="hist-summary-val pos">${totalProd}</span>
-                <span class="hist-summary-lbl">produites</span>
-            </div>
+            <button type="button" class="hist-summary-stat hist-summary-stat-btn" onclick="showProductionStatsModal()" aria-label="Voir les statistiques de production">
+                <span class="hist-summary-val pos">${totalAllProductionLitres.toLocaleString('fr-FR', { maximumFractionDigits: 1, minimumFractionDigits: 0 })} L</span>
+                <span class="hist-summary-lbl">litres produits</span>
+            </button>
             <div class="hist-summary-stat">
                 <span class="hist-summary-val neg">${totalVente}</span>
                 <span class="hist-summary-lbl">vendues (directes)</span>
@@ -1745,6 +1785,112 @@ const renderHistorique = () => {
     `;
 
     safeRender(html);
+};
+
+const showProductionStatsModal = () => {
+    const history = DB.get('history') || [];
+    const aromes  = DB.get('aromes')  || [];
+    const formats = DB.get('formats') || [];
+
+    // Production entries only (exclure VENTE- et RESTAURE-)
+    const prodEntries = history.filter(r => {
+        const id = String(r.id);
+        return !id.startsWith('VENTE-') && !id.startsWith('RESTAURE-');
+    });
+
+    // Normaliser chaque quantity une seule fois : Number + Number.isFinite + strictement positif
+    const validEntries = [];
+    for (const e of prodEntries) {
+        const n = Number(e.quantity);
+        const q = Number.isFinite(n) && n > 0 ? n : 0;
+        if (q > 0) validEntries.push({ ...e, _q: q });
+    }
+
+    const totalBottles = validEntries.reduce((s, e) => s + e._q, 0);
+    const totalLitres  = validEntries.reduce((s, e) => s + calcProductionLitres(e._q, e.format, formats), 0);
+    const totalMvt     = validEntries.length;
+
+    const fmtL = (v) => v.toLocaleString('fr-FR', { maximumFractionDigits: 1, minimumFractionDigits: 0 });
+
+    // Aggregations
+    const byArome  = {};
+    const byFormat = {};
+    const cross    = {};
+
+    validEntries.forEach(e => {
+        const a = e.arome || 'Inconnu';
+        const f = e.format || 'Inconnu';
+        const q = e._q;
+        const l = calcProductionLitres(q, e.format, formats);
+
+        if (!byArome[a])  byArome[a]  = { bottles: 0, litres: 0 };
+        byArome[a].bottles  += q;
+        byArome[a].litres   += l;
+
+        if (!byFormat[f]) byFormat[f] = { bottles: 0, litres: 0 };
+        byFormat[f].bottles += q;
+        byFormat[f].litres  += l;
+
+        const key = a + '\x00' + f;
+        if (!cross[key]) cross[key] = { arome: a, format: f, bottles: 0, litres: 0 };
+        cross[key].bottles += q;
+        cross[key].litres  += l;
+    });
+
+    const makeRows = (map, cols) => {
+        const keys = Object.keys(map);
+        if (keys.length === 0) {
+            return `<tr><td colspan="${cols}" class="text-center text-muted" style="padding:16px;">Aucune donnée</td></tr>`;
+        }
+        return keys.sort((a, b) => a.localeCompare(b)).map(k => {
+            const d = map[k];
+            if ('arome' in d && 'format' in d) {
+                // cross row has arome+format keys
+                return `<tr><td>${escapeHtml(d.arome)}</td><td>${escapeHtml(d.format)}</td><td>${d.bottles}</td><td>${fmtL(d.litres)} L</td></tr>`;
+            }
+            return `<tr><td>${escapeHtml(k)}</td><td>${d.bottles}</td><td>${fmtL(d.litres)} L</td></tr>`;
+        }).join('');
+    };
+
+    const aromeRows  = makeRows(byArome, 3);
+    const formatRows = makeRows(byFormat, 3);
+    const crossRows  = makeRows(cross, 4);
+
+    const body = `
+        <div class="prod-stats-dashboard">
+            <div class="prod-stats-kpis">
+                <div class="prod-stats-kpi"><span class="prod-stats-kpi-val">${fmtL(totalLitres)} L</span><span class="prod-stats-kpi-lbl">Litres produits</span></div>
+                <div class="prod-stats-kpi"><span class="prod-stats-kpi-val">${totalBottles}</span><span class="prod-stats-kpi-lbl">Bouteilles produites</span></div>
+                <div class="prod-stats-kpi"><span class="prod-stats-kpi-val">${totalMvt}</span><span class="prod-stats-kpi-lbl">Mouvements</span></div>
+            </div>
+
+            <h4 class="prod-stats-title">Par arôme</h4>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Arôme</th><th>Bouteilles</th><th>Litres</th></tr></thead>
+                    <tbody>${aromeRows}</tbody>
+                </table>
+            </div>
+
+            <h4 class="prod-stats-title">Par format / taille</h4>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Format</th><th>Bouteilles</th><th>Litres</th></tr></thead>
+                    <tbody>${formatRows}</tbody>
+                </table>
+            </div>
+
+            <h4 class="prod-stats-title">Par arôme et format</h4>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Arôme</th><th>Format</th><th>Bouteilles</th><th>Litres</th></tr></thead>
+                    <tbody>${crossRows}</tbody>
+                </table>
+            </div>
+        </div>
+    `;
+
+    modal.show('Statistiques de production cumulées', body, '', 'large');
 };
 
 const deleteHistoryRecord = (recordId) => {

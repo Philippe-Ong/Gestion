@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v6.16
+**Current Version:** v10.8
 
 ## 1. Build, Lint, and Test Commands
 
@@ -179,4 +179,4 @@ The app is wrapped with Capacitor 8 for Android/iOS. The source stays at the roo
 - **Build APK**: `npm run sync && cd android && .\gradlew.bat assembleDebug`
 - **app ID**: `ch.thecol.gestion` (in `capacitor.config.json`)
 - See `MOBILE.md` for full instructions.
-- The `ALL_TABLES` constant (11 tables) is the single source for DB.init, export, and import — never hardcode table lists.
+- The `ALL_TABLES` constant (12 tables) is the single source for DB.init, export, and import — never hardcode table lists.
