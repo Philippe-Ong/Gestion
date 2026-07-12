@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v10.9**
+**v11.1**
 
 ## Adresse
 
@@ -47,7 +47,10 @@ Application de gestion pour votre entreprise de thé froid.
 - Saisie des caisses IFCO vertes/noires livrées
 
 ### Production
-- Planificateur de production
+- Planificateur de production avec sélection optionnelle des commandes à produire
+  - Panneau dépliant listant toutes les commandes éligibles (non livrées, non annulées)
+  - Cases à cocher individuelles par commande
+  - Boutons « Tout sélectionner » / « Tout désélectionner »
 - Calcul automatique des litres par arôme
 - Ingrédients nécessaires selon les recettes
 - Répartition par récipients: cuves 25L, casserole 9L et casserole 4L

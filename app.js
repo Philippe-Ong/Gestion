@@ -4835,6 +4835,10 @@ const exportBLExcel = (livraisonId) => {
 };
 
 let productionPlannerState = null;
+let productionSelectedCommandes = null; // null = toutes les commandes éligibles (jamais personnalisé)
+let productionSelectionCustomized = false; // true dès que l'utilisateur modifie la sélection
+let productionSelectorOpen = false;
+let productionFocusTarget = null; // 'selectAll' | 'deselectAll' | commandeId
 
 const roundHalfLiter = (value) => Math.round((parseFloat(value) || 0) * 2) / 2;
 
@@ -4893,12 +4897,21 @@ const renderProduction = () => {
     const formats = DB.get('formats');
     const recettes = DB.get('recettes');
     const lots = DB.get('lots') || [];
+    const clients = DB.get('clients') || [];
 
     // All non-cancelled, non-delivered orders
-    const commandesPeriode = commandes.filter(c =>
+    const commandesDisponibles = commandes.filter(c =>
         c.statut !== 'annulee' &&
         c.statut !== 'livrée'
     );
+
+    // In-memory selection state (null = all eligible, never customized)
+    if (productionSelectedCommandes === null || !productionSelectionCustomized) {
+        productionSelectedCommandes = new Set(commandesDisponibles.map(c => c.id));
+    }
+    // When NOT customized, all eligible commandes are included dynamically.
+    // When customized, only the Set governs (new commandes stay unchecked until user checks them).
+    const commandesAInclure = commandesDisponibles.filter(c => productionSelectedCommandes.has(c.id));
 
     const now = new Date();
     const stockDisponible = calculateAvailableStock(lots, now);
@@ -4906,7 +4919,7 @@ const renderProduction = () => {
     // Calculate totals by arome and format (using names from commands)
     const besoins = {};
 
-    commandesPeriode.forEach(cmd => {
+    commandesAInclure.forEach(cmd => {
         (cmd.items || []).forEach(item => {
             const arome = aromes.find(a => a.id === item.aromeId);
             const format = formats.find(f => f.id === item.formatId);
@@ -4975,7 +4988,7 @@ const renderProduction = () => {
                 <div class="stat-icon blue">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/></svg>
                 </div>
-                <div class="stat-content"><h3>${commandesPeriode.length}</h3><p>Commandes à produire</p></div>
+                <div class="stat-content"><h3>${commandesAInclure.length}</h3><p>Commandes à produire</p></div>
             </div>
             <div class="stat-card">
                 <div class="stat-icon green">
@@ -5099,7 +5112,50 @@ const renderProduction = () => {
         </div>
 
         <div style="margin-top: 24px; padding: 16px; background: var(--bg-secondary); border-radius: var(--radius);">
-            <strong>Résumé:</strong> ${commandesPeriode.length} commande(s) à produire - Stock déduit automatiquement
+            <strong>Résumé:</strong> ${commandesAInclure.length} commande(s) incluse(s) - Stock déduit automatiquement
+        </div>
+    `;
+
+    // Build checkbox selector for eligible commandes
+    const selectorItemsHtml = commandesDisponibles.map(cmd => {
+        const client = clients.find(cl => cl.id === cmd.clientId);
+        const clientName = client ? getClientLabel(client) : 'N/A';
+        const totalBt = (cmd.items || []).reduce((s, i) => {
+            const q = parseFloat(i.quantite);
+            return s + (Number.isFinite(q) && q >= 0 ? q : 0);
+        }, 0);
+        let totalL = 0;
+        (cmd.items || []).forEach(item => {
+            const fmt = formats.find(f => f.id === item.formatId);
+            const q = parseFloat(item.quantite);
+            const safeQ = Number.isFinite(q) && q >= 0 ? q : 0;
+            totalL += ((fmt?.contenanceCl || 0) * safeQ) / 100;
+        });
+        const checked = commandesAInclure.some(c => c.id === cmd.id) ? 'checked' : '';
+        return `
+            <label class="production-commande-item">
+                <input type="checkbox" data-commande-id="${escapeHtml(cmd.id)}" ${checked}>
+                <span class="production-commande-info">
+                    <span class="production-commande-numero">#${escapeHtml(getCommandeNumero(cmd))}</span>
+                    <span class="production-commande-client">${escapeHtml(clientName)}</span>
+                </span>
+                <span class="production-commande-details">${totalBt} bt · ${totalL.toFixed(1)}L · ${formatDate(cmd.dateLivraison)}</span>
+            </label>
+        `;
+    }).join('');
+
+    const selectorHtml = `
+        <div class="production-commande-selector${productionSelectorOpen ? ' open' : ''}" id="productionCommandeSelector" role="region" aria-label="Sélection des commandes">
+            <div class="production-commande-selector-header">
+                <span class="text-muted" style="font-size:13px;">${commandesDisponibles.length} commande(s) éligible(s)</span>
+                <div>
+                    <button type="button" class="btn btn-sm btn-text" id="productionSelectAllBtn">Tout sélectionner</button>
+                    <button type="button" class="btn btn-sm btn-text" id="productionDeselectAllBtn">Tout désélectionner</button>
+                </div>
+            </div>
+            <div class="production-commande-selector-list">
+                ${selectorItemsHtml}
+            </div>
         </div>
     `;
 
@@ -5108,13 +5164,19 @@ const renderProduction = () => {
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Planificateur de production</h3>
+                <button type="button" class="btn btn-sm btn-text production-commande-toggle${productionSelectorOpen ? ' active' : ''}" id="productionCommandeToggle" aria-expanded="${productionSelectorOpen}" aria-controls="productionCommandeSelector" aria-label="Choisir les commandes">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    Choisir les commandes (${commandesAInclure.length})
+                </button>
             </div>
+            ${selectorHtml}
             ${resultHtml}
         </div>
     `;
 
     safeRender(html);
     attacherSliderEvents();
+    attacherCommandeSelectorEvents();
 };
 
 const attacherSliderEvents = () => {
@@ -5126,6 +5188,74 @@ const attacherSliderEvents = () => {
             rebalanceRecipients(aromeNom, recipientIndex, nouvelleValeur);
         });
     });
+};
+
+const attacherCommandeSelectorEvents = () => {
+    const toggle = document.getElementById('productionCommandeToggle');
+    if (toggle) {
+        toggle.addEventListener('click', toggleProductionCommandeSelector);
+    }
+    document.getElementById('productionSelectAllBtn')?.addEventListener('click', productionSelectAll);
+    document.getElementById('productionDeselectAllBtn')?.addEventListener('click', productionDeselectAll);
+    document.querySelectorAll('.production-commande-item input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', (e) => {
+            const id = e.target.dataset.commandeId;
+            if (id) toggleProductionCommande(id);
+        });
+    });
+
+    // Restore focus after re-render (dataset-based, no fragile id selectors)
+    if (productionFocusTarget === 'selectAll') {
+        document.getElementById('productionSelectAllBtn')?.focus();
+    } else if (productionFocusTarget === 'deselectAll') {
+        document.getElementById('productionDeselectAllBtn')?.focus();
+    } else if (productionFocusTarget) {
+        const targetCb = Array.from(document.querySelectorAll('.production-commande-item input[type="checkbox"]'))
+            .find(c => c.dataset.commandeId === productionFocusTarget);
+        if (targetCb) targetCb.focus();
+    }
+    productionFocusTarget = null;
+};
+
+// Command selector helpers for production planner
+const toggleProductionCommandeSelector = () => {
+    productionSelectorOpen = !productionSelectorOpen;
+    const panel = document.getElementById('productionCommandeSelector');
+    if (panel) panel.classList.toggle('open', productionSelectorOpen);
+    const toggleBtn = document.getElementById('productionCommandeToggle');
+    if (toggleBtn) {
+        toggleBtn.classList.toggle('active', productionSelectorOpen);
+        toggleBtn.setAttribute('aria-expanded', String(productionSelectorOpen));
+    }
+};
+
+const toggleProductionCommande = (id) => {
+    if (!productionSelectedCommandes || !id) return;
+    productionSelectionCustomized = true;
+    productionFocusTarget = id;
+    if (productionSelectedCommandes.has(id)) {
+        productionSelectedCommandes.delete(id);
+    } else {
+        productionSelectedCommandes.add(id);
+    }
+    renderProduction();
+};
+
+const productionSelectAll = () => {
+    const commandes = DB.get('commandes');
+    const disponibles = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
+    productionSelectedCommandes = new Set(disponibles.map(c => c.id));
+    productionSelectionCustomized = true;
+    productionFocusTarget = 'selectAll';
+    renderProduction();
+};
+
+const productionDeselectAll = () => {
+    if (!productionSelectedCommandes) return;
+    productionSelectionCustomized = true;
+    productionSelectedCommandes.clear();
+    productionFocusTarget = 'deselectAll';
+    renderProduction();
 };
 
 const rebalanceRecipients = (aromeNom, recipientIndex, nouvelleValeur) => {

@@ -6,6 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage  
+**Version:** v11.1  
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -206,6 +207,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 
 ### 3.5 Planificateur de Production
 - Sélectionner période (commandes à produire)
+- **Sélection optionnelle** des commandes à inclure (panneau dépliant avec cases à cocher, « Tout sélectionner » / « Tout désélectionner »)
 - Calcul automatique:
   - Litres par arôme nécessaires
   - Ingrédients nécessaires par recette
@@ -254,22 +256,23 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 
 ### Production Planner
 1. Sélectionner date de commande(start/end)
-2. Agréger toutes les commandes de la période
-3. Pour chaque arôme:
+2. **Sélection optionnelle des commandes :** panneau dépliant listant toutes les commandes éligibles (non livrées, non annulées) avec cases à cocher individuelles, boutons « Tout sélectionner » / « Tout désélectionner ». Par défaut, toutes les commandes éligibles sont incluses.
+3. Agréger les commandes sélectionnées de la période
+4. Pour chaque arôme:
    - Calculer total bouteilles par format
    - Convertir en litres
    - Appliquer recette pour ingrédients
-4. Répartir les litres par récipients:
+5. Répartir les litres par récipients:
    - Jusqu'à 25L: cuve 25L partielle ou pleine
    - Reste jusqu'à 4L: casserole 4L
    - Reste jusqu'à 9L: casserole 9L
    - Reste supérieur à 9L: cuves 25L équilibrées
-5. Afficher résumé:
+6. Afficher résumé:
    - Bouteilles par arôme/format
    - Litres totaux par arôme
    - Ingrédients requis
 
-6. **Déduction des bouchons :** Lors de la confirmation de production, les bouchons sont déduits de l'inventaire par taille :
+7. **Déduction des bouchons :** Lors de la confirmation de production, les bouchons sont déduits de l'inventaire par taille :
    - **"Bouchons 25cl"** pour les formats dont la contenance est < 50 cl
    - **"Bouchons 50cl/100cl"** pour les formats ≥ 50 cl
    - Une marge de 5 % est ajoutée au nombre de bouchons déduits
