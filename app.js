@@ -33,11 +33,16 @@ const parseHHMM = (str) => {
 
 // Calcule la durée en minutes d'un pointage, en gérant les pointages de nuit
 // (fin < début = la fin est le lendemain, ex. 22:00→02:00 = 240 min).
+// Le passage à minuit doit être résolu AVANT de soustraire la pause : sinon
+// un pointage court avec une pause supérieure à la durée travaillée (ex.
+// 09:00→09:15, pause 30min) devient artificiellement négatif et se voit
+// ajouter 24h, affichant 23h45 au lieu d'être rejeté.
 const computePointageMinutes = (debutMin, finMin, pause = 0) => {
     if (debutMin === null || finMin === null) return null;
-    let diff = finMin - debutMin - pause;
-    if (diff < 0) diff += 1440; // franchit minuit
-    return diff;
+    let worked = finMin - debutMin;
+    if (worked < 0) worked += 1440; // franchit minuit
+    const diff = worked - pause;
+    return diff >= 0 ? diff : null;
 };
 
 // Null-safe accessor for command/order line items.
@@ -2354,7 +2359,7 @@ const renderPointage = (_tabIgnored) => {
                         const isLive = !!pointageEnCoursParEmp[e.id];
                         return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" onclick="event.preventDefault(); pointageSelectEmployee('${e.id}'); return false;">
                             <div class="avatar ${isLive ? 'avatar-live' : ''}">${escapeHtml(initiales(e))}</div>
-                            <div>
+                            <div class="employee-info">
                                 <div class="employee-name">${escapeHtml(e.prenom)} ${escapeHtml(e.nom || '')}</div>
                                 <div class="employee-sub">${isLive ? '● en cours' : 'libre'}</div>
                             </div>
@@ -5517,6 +5522,39 @@ const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
     }
 };
 
+// Consommables « contenants » toujours attendus (bouteilles + bouchons)
+const CONTAINER_CONSOMMABLES = [
+    { nom: 'Bouteilles vides 25cl', unite: 'pcs', seuilAlerte: 0 },
+    { nom: 'Bouteilles vides 50cl', unite: 'pcs', seuilAlerte: 0 },
+    { nom: 'Bouteilles vides 1L', unite: 'pcs', seuilAlerte: 0 },
+    { nom: 'Bouchons 25cl', unite: 'pcs', seuilAlerte: 0 },
+    { nom: 'Bouchons 50cl/100cl', unite: 'pcs', seuilAlerte: 0 }
+];
+
+// Migration unique : garantit la présence des bouteilles et bouchons dans un inventaire existant
+const ensureContainerConsommables = (items) => {
+    if (localStorage.getItem('thecol_migr_contenants') === '1') return items;
+    let changed = false;
+
+    // Héritage : un ancien article « Capsules » devient « Bouchons 50cl/100cl »
+    const capsulesAncien = items.find(item => normalizeName(item.nom).includes('capsule'));
+    if (capsulesAncien && !findInventaireItemByName(items, 'Bouchons 50cl/100cl')) {
+        capsulesAncien.nom = 'Bouchons 50cl/100cl';
+        changed = true;
+    }
+
+    CONTAINER_CONSOMMABLES.forEach(c => {
+        if (!findInventaireItemByName(items, c.nom)) {
+            items.push({ id: generateId(), categorie: 'consommable', quantite: 0, ...c });
+            changed = true;
+        }
+    });
+
+    if (changed) DB.set('inventaire', items);
+    localStorage.setItem('thecol_migr_contenants', '1');
+    return items;
+};
+
 // Inventaire
 const renderInventaire = () => {
     // Initialize default consumables if list is empty
@@ -5530,7 +5568,8 @@ const renderInventaire = () => {
         { nom: 'Poire à botzi', unite: 'kg', seuilAlerte: 0 },
         { nom: 'Sureau', unite: 'kg', seuilAlerte: 0 },
         { nom: 'Herbes des alpes', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Capsules', unite: 'pcs', seuilAlerte: 0 },
+        { nom: 'Bouchons 25cl', unite: 'pcs', seuilAlerte: 0 },
+        { nom: 'Bouchons 50cl/100cl', unite: 'pcs', seuilAlerte: 0 },
         { nom: 'Étiquettes', unite: 'pcs', seuilAlerte: 0 },
         { nom: 'Bouteilles vides 25cl', unite: 'pcs', seuilAlerte: 0 },
         { nom: 'Bouteilles vides 50cl', unite: 'pcs', seuilAlerte: 0 },
@@ -5547,6 +5586,8 @@ const renderInventaire = () => {
         }));
         DB.set('inventaire', items);
     }
+    // Ajoute bouteilles + bouchons aux inventaires existants qui ne les ont pas encore (une seule fois)
+    items = ensureContainerConsommables(items);
 
     const savedSearch = DB.getFilter('inventaire_search');
     const savedType = DB.getFilter('inventaire_type') || 'tous';
