@@ -1066,10 +1066,16 @@ const v11FlushQueue = async () => {
                     return { isConflict };
                 });
 
-                // Conflict notification once per session per record
+                // Notification de conflit (une fois par session par enregistrement).
+                // Cas bénin : écriture locale sans version de base connue (1re sync, ou
+                // migration au boot avant chargement des versions V11) → LWW local, pas
+                // d'alerte utilisateur (console seulement). Seul un vrai conflit concurrent
+                // (version de base connue mais divergente à distance) alerte l'utilisateur.
                 if (result.isConflict) {
                     const key = `${op.table}/${op.recordId}`;
-                    if (!V11._conflictNotified.has(key)) {
+                    if (op.knownVersion === null) {
+                        console.warn(`[V11] « ${op.table} »/${op.recordId} écrit sans version de base connue — version locale conservée (bénin).`);
+                    } else if (!V11._conflictNotified.has(key)) {
                         V11._conflictNotified.add(key);
                         showToast(`Conflit sur « ${op.table} »/${op.recordId} : version locale conservée.`, 'warning');
                     }
@@ -1785,14 +1791,15 @@ const v11StartListener = (table) => {
                 if (op.type === 'upsert' && op.recordId) {
                     const remoteVersion = remoteVersions[op.recordId];
                     const conflictKey = `${table}/${op.recordId}`;
-                    if (remoteVersion !== undefined && !V11._conflictNotified.has(conflictKey)) {
-                        const isConflict = (op.knownVersion === null) || (op.knownVersion !== remoteVersion);
-                        if (isConflict) {
+                    if (remoteVersion !== undefined) {
+                        if (op.knownVersion === null) {
+                            // Bénin : écriture locale sans version de base connue (1re sync /
+                            // migration au boot). LWW local — console seulement, pas de toast.
+                            console.warn(`[V11] « ${table} »/${op.recordId} : écriture locale sans version de base connue (distante ${remoteVersion}), version locale conservée (bénin).`);
+                        } else if (op.knownVersion !== remoteVersion && !V11._conflictNotified.has(conflictKey)) {
+                            // Vrai conflit concurrent : version de base connue mais divergente à distance.
                             V11._conflictNotified.add(conflictKey);
-                            const msg = op.knownVersion === null
-                                ? `[V11] Conflit (version inconnue) sur « ${table} »/${op.recordId}: version distante ${remoteVersion} mais version locale inconnue. Version locale conservée.`
-                                : `[V11] Conflit détecté sur « ${table} »/${op.recordId}: version distante ${remoteVersion} ≠ version connue ${op.knownVersion}. Conservation de la version locale.`;
-                            console.warn(msg);
+                            console.warn(`[V11] Conflit détecté sur « ${table} »/${op.recordId}: version distante ${remoteVersion} ≠ version connue ${op.knownVersion}. Conservation de la version locale.`);
                             showToast(`Conflit sur un enregistrement de « ${table} » : version locale conservée.`, 'warning');
                         }
                     }
