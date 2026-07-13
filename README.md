@@ -96,10 +96,60 @@ Application de gestion pour votre entreprise de thé froid.
   - Export JSON complet de toutes les données
   - Import depuis un fichier JSON
 
-### Synchronisation Cloud
-- Synchronisation avec Firebase Firestore
-- Bouton "Sync" pour synchroniser manuellement
-- Sauvegarde automatique des données non-vides
+### Synchronisation Cloud (v11.0 — collaborative)
+
+La synchronisation Firestore a été migrée en **v11.0** d'un modèle « document unique par table » (`data/<table>`) vers un modèle **« un document Firestore par enregistrement métier »** (`tables/<table>/records/<recordId>`).
+
+- **Architecture :** chaque enregistrement (lot, commande, employé…) possède son propre document Firestore, avec un champ `_version` (timestamp) pour la détection de conflit.
+- **Migration one-shot :** au démarrage, l'application vérifie l'état de migration dans `syncMeta/schema`. Si non migrée, elle pousse d'abord les modifications locales en attente (legacy `data/<table>`), valide l'intégrité des IDs, puis copie toutes les données vers la nouvelle structure par batches de 500. Les anciens documents `data/<table>` sont conservés intacts (legacy).
+- **Verrou de migration :** un lock transactionnel (`syncMeta/migrationLock`, 30 s d'expiration) empêche deux clients de migrer simultanément. Le document contient les champs `locked` (booléen), `owner` (ID de session unique, généré par `generateId()`), `lockedAt` (ISO datetime) et `version` (11). Le champ `owner` permet la libération sécurisée du lock : seules les requêtes du même `_sessionId` peuvent le libérer ou en renouveler le bail (« lease »).
+- **Opérations hors-ligne :** les modifications sont persistées dans une file d'attente localStorage (`thecol_v11_queue`) avec sémantique de fusion (upsert après delete, delete après upsert). En ligne, la file est vidée transactionnellement avec détection de conflit par `_version`.
+- **Écoute temps réel :** un `onSnapshot` est attaché à chaque collection `tables/{table}/records`. Les modifications distantes sont appliquées à localStorage sans boucle de synchronisation (`DB._applyRemoteSnapshot`), et les opérations locales en attente sont ré-appliquées par-dessus. Le re-rendu est anti-rebond à 300 ms.
+- **Bouton "Sync" :** après migration, `forceFirebaseSync()` vide la file, recharge tous les enregistrements depuis Firestore, redémarre les listeners et nettoie les anciens flags `dirty_tables`.
+- **Fonctionnement hybride :** avant migration (ou si Firebase est indisponible), le comportement legacy (tableau complet, `dirty_tables`) reste actif. Une fois V11 activé (`V11._isReady = true`), toutes les écritures passent par la file d'attente différentielle — plus jamais de remplacement de tableau complet.
+- **Débogage :** `window.v11Debug` expose `getQueue()`, `flushQueue()`, `mergeOp()`, `runMigration()`, et `status()`.
+
+### Procédure : première migration v11.0
+
+La migration est automatique au démarrage, mais **ne doit être exécutée que sur un seul appareil à la fois** :
+
+1. Ouvrir l'application sur **un seul** appareil (bureau, mobile — le premier à démarrer avec v11.0).
+2. Vérifier que la connexion Firebase est active (bouton 🔄 Sync visible dans l'en-tête).
+3. La migration s'exécute automatiquement :
+   - Push des tables locales modifiées vers l'ancien format `data/<table>`.
+   - Validation de tous les IDs (absence d'ID vide, pas de doublon).
+   - Fusion des données legacy cloud + locales (legacy sert de base).
+   - Écriture par batches de 500 docs dans `tables/{table}/records/{recordId}`.
+   - Marquage `syncMeta/schema` comme `ready: true`.
+4. **Attendre la fin** (toast « Migration v11 terminée avec succès »). Ne pas fermer l'app pendant la migration.
+5. Une fois terminée, les autres appareils peuvent se connecter : ils détecteront `syncMeta/schema.ready = true` et chargeront directement les données depuis la nouvelle structure, sans ré-exécuter la migration.
+6. En cas d'échec (ID invalide, erreur batch), un toast d'erreur s'affiche. Les données locales et legacy cloud restent intactes. Corriger les données puis recharger la page (ou exécuter `window.v11Debug.runMigration()` dans la console).
+
+### ⚠️ Règles Firestore requises — accès ouvert temporaire (non sécurisé)
+
+> **Décision explicite du propriétaire :** Firebase reste temporairement en accès ouvert, **sans authentification**. Ce choix est volontaire pour la phase actuelle, mais **la base est accessible à quiconque connaît l'URL du projet Firebase**. L'authentification (Firebase Auth, anonyme ou par utilisateur) sera ajoutée ultérieurement (voir `PLAN_DELEGATION.md` A3).
+
+L'application **n'importe pas `firebase-auth`** et **n'appelle pas `signInAnonymously`**. La migration et la synchronisation collaborative fonctionnent uniquement si les règles Firestore le permettent.
+
+Les règles Firestore déployées dans la console Firebase doivent couvrir **au minimum** les chemins suivants :
+
+```
+// Nouvelle structure v11 — un document par enregistrement
+tables/{table}/records/{record}    // allow read, write
+
+// Métadonnées de synchronisation (migration, schéma)
+syncMeta/{document}                // allow read, write
+
+// Legacy — nécessaire temporairement pour la migration v11
+// Permet de lire les données cloud legacy (base de fusion) et de pousser
+// les tables modifiées localement (dirty) avant la migration one-shot.
+// Cette collection n'est plus utilisée après migration réussie.
+data/{table}                       // allow read, write
+```
+
+Si les règles actuelles ne couvrent que `data/{table}` (legacy), la migration échouera et le verrou (`syncMeta/migrationLock`) ne pourra pas être posé. **Les règles exactes déployées n'ont pas été inspectées** — elles doivent être vérifiées et mises à jour manuellement dans la console Firebase (ce fichier ne les déploie pas).
+
+> **⚠️ Insecure — temporaire :** tant que l'authentification n'est pas activée, les règles doivent rester en mode ouvert (`allow read, write: if true;`). C'est un choix délibéré pour la phase v11.0. L'authentification sera ajoutée plus tard (voir `PLAN_DELEGATION.md` A3). Aucun audit utilisateur n'est présent dans l'application.
 
 ### Build mobile (Android / iOS)
 

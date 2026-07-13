@@ -104,11 +104,36 @@ The `DB` object wraps `localStorage`. All keys are prefixed `thecol_` (e.g., `th
 - **Read:** `DB.get('lots')` — returns parsed array, defaults to `[]` on error.
 - **Write:** `DB.set('lots', data)` — serializes to JSON, auto-syncs to Firebase if connected.
 
-### Firebase (Optional Cloud Sync)
+### Firebase (Optional Cloud Sync) — v11.0
+
 Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync is manual.
-- **Sync to Firebase:** `DB.syncToFirebase(key, data)` — called automatically on `DB.set()`
-- **Load from Firebase:** `DB.loadFromFirebase(showNotification)` — manual sync with backup
-- **Force sync button:** `window.forceFirebaseSync()` — available when Firebase is connected
+
+#### Legacy path (pre-migration)
+- **Sync to Firebase:** `DB.syncToFirebase(key, data)` — writes to `data/<table>` (single doc with full array)
+- **Load from Firebase:** `DB.loadFromFirebase(showNotification, skipTables)` — reads all `data/*` docs
+- **Dirty tracking:** `markDirty(key)` / `unmarkDirty(key)` / `getDirtyTables()` — tables changed while offline
+
+#### V11 collaborative path (after migration)
+- **Per-record storage:** `tables/<table>/records/<recordId>` — one Firestore doc per application record
+- **Offline queue:** `v11GetQueue()` / `v11SetQueue()` — localStorage queue at key `thecol_v11_queue`
+- **Differential writes:** `DB.set()` computes diffs with previous state and enqueues per-record upsert/delete operations
+- **Queue flush:** `v11FlushQueue()` — transactional per-record flush with `_version` conflict detection (local wins)
+- **Real-time listeners:** `v11StartAllListeners()` / `v11StopAllListeners()` — `onSnapshot` per table, debounced re-render at 300 ms
+- **Migration:** `v11RunMigration()` — one-shot migration from `data/<table>` to `tables/<table>/records/<recordId>`, guarded by `syncMeta/migrationLock` (30 s expiry)
+- **Config constants:** `V11` object at line 330 of `app.js` — see `V11.TABLES_COLLECTION`, `V11.RECORDS_SUBCOLLECTION`, `V11.SYNC_META_COLLECTION`, etc.
+- **Force sync:** `window.forceFirebaseSync()` — in V11 mode, flushes queue, reloads records, restarts listeners
+- **Debug:** `window.v11Debug` exposes `getQueue()`, `flushQueue()`, `mergeOp()`, `runMigration()`, `status()`
+
+#### Firestore rules requirement — temporary open access (insecure)
+
+> **Owner's explicit decision:** Firebase is kept with open access, **no authentication**, temporarily. This is deliberate for the current phase, but **the database is accessible to anyone who knows the Firebase project ID**. Auth (anonymous or user-based) will be added later — see `PLAN_DELEGATION.md` A3.
+
+The app has no authentication (`firebase-auth` not imported, no `signInAnonymously`). The migration and real-time sync require Firestore rules that allow read/write on:
+- `tables/{table}/records/{record}` — v11 per-record storage
+- `syncMeta/{document}` — migration lock + schema status
+- `data/{table}` — **temporairement nécessaire** pour la migration legacy : lecture des données cloud legacy (base de fusion) et push des tables modifiées localement (dirty) avant la migration one-shot
+
+Rules must be updated manually in the Firebase console — this repo does not deploy them.
 
 ### Unit System
 Standardized unit handling for ingredients and inventory:

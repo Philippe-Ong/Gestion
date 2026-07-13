@@ -1535,6 +1535,104 @@ input[type="checkbox"] {
     }
 }
 
+/* ── Production : bascule de mode + saisie manuelle ──────── */
+.production-mode-toggle {
+    background: var(--bg-secondary);
+}
+
+.production-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 8px;
+}
+
+.production-manual {
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+}
+
+.production-manual-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.production-manual-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.production-manual-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--border-light);
+    background: var(--white);
+}
+
+.production-manual-arome {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    flex: 1 1 140px;
+    min-width: 140px;
+}
+
+.production-manual-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.production-manual-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.production-manual-field input {
+    width: 78px;
+    padding: 7px 8px;
+    border: 1.5px solid var(--border);
+    border-radius: calc(var(--radius) - 2px);
+    background: var(--bg-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+}
+
+@media (max-width: 768px) {
+    .production-manual-arome {
+        flex-basis: 100%;
+    }
+    .production-manual-fields {
+        width: 100%;
+    }
+    .production-manual-field {
+        flex: 1;
+    }
+    .production-manual-field input {
+        width: 100%;
+    }
+}
+
 /* ── Tabs ────────────────────────────────────────────────── */
 .tabs {
     display: flex;

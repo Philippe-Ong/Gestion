@@ -154,17 +154,24 @@
         </a>
     </div>
 
+    <!-- JSZip & XLSX : utilisés par exportBLExcel / exportArchivesExcel / importClients -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <!-- Firebase SDK
-         SECURITY: Firebase client keys are public by design. Firestore security rules
-         MUST restrict read/write to authenticated users only. Do NOT add server keys here. -->
+    <!-- Firebase SDK (v10.8.0) — seuls les symboles réellement appelés sont exposés
+         SÉCURITÉ (décision explicite propriétaire) : accès Firestore ouvert, AUCUNE
+         authentification pour l'instant — phase temporaire délibérée, la base est
+         accessible à quiconque connaît l'ID du projet. L'auth sera ajoutée plus tard.
+         Les clés Firebase côté client sont publiques par conception.
+         N'ajoutez PAS de clés serveur ici. -->
     <script>
         window.firebaseReady = false;
     </script>
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
-        import { getFirestore, doc, setDoc, getDoc, getDocs, collection } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
+        import {
+            getFirestore, doc, setDoc, getDoc, getDocs, collection,
+            onSnapshot, deleteDoc, writeBatch, runTransaction
+        } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
         
         const firebaseConfig = {
             apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
@@ -182,17 +189,20 @@
             db = getFirestore(app);
             // Expose une seule fois : app.js ne doit jamais ré-importer le SDK au runtime
             // (un import dynamique échoue hors-ligne).
-            window.firebaseApi = { doc, setDoc, getDoc, getDocs, collection };
+            window.firebaseApi = {
+                doc, setDoc, getDoc, getDocs, collection,
+                onSnapshot, deleteDoc, writeBatch, runTransaction
+            };
             window.firebaseDb = db;
             window.firebaseReady = true;
-            console.log('Firebase connected');
+            console.log('Firebase connecté');
             window.showSyncButton = () => {
                 const btn = document.getElementById('syncBtn');
                 if(btn) btn.style.display = 'inline-flex';
             };
             window.showSyncButton();
         } catch(e) {
-            console.log('Firebase error:', e);
+            console.log('Erreur Firebase:', e);
             window.firebaseReady = false;
         }
     </script>

@@ -5,7 +5,7 @@
 **Nom:** ThéCol Gestion  
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
-**Stockage:** localStorage  
+**Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
 **Version:** v11.1  
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
@@ -15,7 +15,7 @@
 Les 12 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
 `employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`, `todos`.
 
-### Tables modifiées localement (non synchronisées)
+### Tables modifiées localement (legacy, pré-v11)
 Clé localStorage hors `ALL_TABLES` : `thecol_dirty_tables`.
 
 Stocke un tableau JSON des noms de tables qui ont été modifiées localement mais pas encore synchronisées avec Firebase Firestore. Gérée par les helpers :
@@ -23,7 +23,87 @@ Stocke un tableau JSON des noms de tables qui ont été modifiées localement ma
 - `markDirty(key)` — ajoute une table à la liste si elle n'y est pas déjà
 - `unmarkDirty(key)` — retire une table de la liste
 
-Ces helpers sont appelés automatiquement par `DB.set()` et `DB.forceSet()` lors des écritures locales, et par les fonctions de synchronisation Firestore une fois l'envoi réussi.
+Ces helpers sont utilisés uniquement avant la migration v11 (légacy). Après migration, le suivi local se fait via la file d'attente `thecol_v11_queue`.
+
+### V11 — File d'opérations hors-ligne (`thecol_v11_queue`)
+Clé localStorage : `thecol_v11_queue`.
+
+Tableau JSON d'opérations en attente de synchronisation Firestore. Chaque opération :
+```json
+{
+  "id": "string (generateId())",
+  "table": "string (nom de table ALL_TABLES)",
+  "type": "upsert|delete",
+  "recordId": "string (ID de l'enregistrement)",
+  "record": "object|null (données complètes pour upsert, null pour delete)",
+  "timestamp": "number (Date.now())",
+  "knownVersion": "number|null (_version distant au moment du queuing)"
+}
+```
+
+**Sémantique de fusion** (v11MergeOp) :
+- `upsert` après `delete` pour le même `recordId` → remplace le delete par l'upsert
+- `delete` après `upsert` → conserve le delete
+- `upsert` après `upsert` → conserve le dernier
+- `delete` après `delete` → no-op (déjà supprimé)
+
+### V11 — Structure Firestore (après migration)
+
+#### Collection `tables/{table}/records/{recordId}`
+Un document par enregistrement métier. Chaque document contient :
+```json
+{
+  "record": { "id": "string", ... /* les champs métier */ },
+  "updatedAt": "string (ISO datetime)",
+  "_version": "number (timestamp, utilisé pour le conflit)"
+}
+```
+
+#### Collection `syncMeta/schema`
+Document unique indiquant l'état de la migration :
+```json
+{
+  "version": 11,
+  "ready": true,
+  "migratedAt": "string (ISO datetime)",
+  "tables": ["employees", "aromes", ...]
+}
+```
+
+#### Collection `syncMeta/migrationLock`
+Verrou transactionnel pour éviter les migrations concurrentes. Chaque client génère un `_sessionId` unique via `generateId()` :
+```json
+{
+  "locked": true,
+  "owner": "string (_sessionId du client qui détient le lock)",
+  "lockedAt": "string (ISO datetime)",
+  "version": 11
+}
+```
+- `owner` : identifiant de session unique (généré par `V11._sessionId`). Seul le propriétaire du lock peut le libérer ou en renouveler le bail (lease). Les autres clients reçoivent une erreur `LOCKED`.
+- Expiration après 30 secondes (`V11.LOCK_EXPIRY_MS`). Si le bail expire, un autre client (ou le même) peut ré-acquérir le lock.
+
+### Clés localStorage v11
+| Clé | Rôle |
+|-----|------|
+| `thecol_v11_queue` | File d'opérations hors-ligne (tableau JSON) |
+| `thecol_v11_ready` | Flag local `'1'` si migration v11 confirmée |
+| `thecol_dirty_tables` | Flag legacy (pré-v11) des tables modifiées hors-ligne |
+| `thecol_backup_pre_sync` | Backup avant tout pull legacy |
+
+### Architecture de synchronisation
+```
+DB.set(key, data)
+  ├─ V11._isReady ? oui → compute diff → v11EnqueueOp() → setTimeout(v11FlushQueue)
+  │                     → v11FlushQueue() → runTransaction() par op → conflit _version
+  └─ V11._isReady ? non → DB.syncToFirebase(data/<table>) → markDirty/unmarkDirty
+
+v11BootFirebase() → waitForFirebase → check syncMeta/schema
+  ├─ non migré → push dirty legacy → v11RunMigration()
+  │               (lock → valider IDs → merge legacy+local → batch write → schema.ready)
+  └─ migré     → v11LoadTableRecords() → v11OverlayQueueOnCache() → v11FlushQueue()
+                 → v11StartAllListeners() (onSnapshot par table)
+```
 
 ### Employés
 ```json
@@ -301,6 +381,14 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 
 - HTML5, CSS3, Vanilla JavaScript (ES6+)
 - Pas de framework (simplicité)
-- localStorage pour persistance
+- localStorage pour persistance locale
+- Firebase Firestore v10.8.0 pour synchronisation cloud optionnelle
+- **Pas d'authentification (temporaire, non sécurisé) :** `firebase-auth.js` non importé, pas de `signInAnonymously`. C'est un choix délibéré du propriétaire pour la phase v11.0 — la base est accessible à quiconque connaît l'ID du projet Firebase. L'authentification sera ajoutée ultérieurement (voir `PLAN_DELEGATION.md` A3).
+- **Règles Firestore requises (mises à jour manuellement dans la console) :**
+  - `tables/{table}/records/{record}` — accès en lecture/écriture (v11 per-record)
+  - `syncMeta/{document}` — accès en lecture/écriture (verrou migration + statut schéma)
+  - `data/{table}` — **nécessaire temporairement** pour la migration legacy : lecture des données cloud legacy (base de fusion) et push des tables modifiées localement (dirty) avant la migration one-shot
+  - Les règles doivent être déployées manuellement dans la console Firebase. Ce dépôt ne les déploie pas.
+- **Capacitor 8** pour emballage mobile Android/iOS
 - Responsive (mobile first)
-- Works offline après premier chargement
+- Works offline après premier chargement (les opérations hors-ligne sont mises en file d'attente dans `thecol_v11_queue`)
