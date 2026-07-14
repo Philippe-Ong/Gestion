@@ -109,9 +109,14 @@ const toLocalDayKey = (ms) => {
 };
 
 const csvCell = (v) => {
+    // Preserve legitimate JS numbers as-is (no formula risk from numeric type)
+    if (typeof v === 'number') return String(v);
     const s = String(v ?? '');
-    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-    return s;
+    // Neutralize CSV formula injection: prefix ' when first non-whitespace char
+    // is one of = + - @.  Preserves leading whitespace in the final value.
+    const neutralized = /^[=+\-@]/.test(s.trim()) ? "'" + s : s;
+    if (/[",\n]/.test(neutralized)) return '"' + neutralized.replace(/"/g, '""') + '"';
+    return neutralized;
 };
 
 const getNextCommandeNumero = () => {
@@ -481,6 +486,10 @@ const v11ValidateId = (id, seen) => {
     if (/^__.*__$/.test(trimmed)) {
         return `L'ID « ${trimmed} » utilise le préfixe réservé __`;
     }
+    // Allow-list : lettres, chiffres, _, :, -, . (1-128 caractères)
+    if (!/^[a-zA-Z0-9_:\-.]{1,128}$/.test(trimmed)) {
+        return `L'ID « ${trimmed} » contient des caractères non autorisés. Seuls les lettres, chiffres, _, :, -, . sont acceptés (1-128 caractères). Données conservées localement mais synchronisation bloquée.`;
+    }
     if (seen) {
         if (seen.has(trimmed)) {
             return `ID dupliqué « ${trimmed} »`;
@@ -687,6 +696,11 @@ const DB = {
 
     // Called by real-time listeners — updates localStorage WITHOUT triggering sync
     _applyRemoteSnapshot: (key, records) => {
+        // Ne jamais écraser localStorage d'une table invalidée
+        if (v11GetInvalidTables().includes(key)) {
+            console.warn('[V11] _applyRemoteSnapshot refusé pour table invalidée', key);
+            return;
+        }
         const prevFlag = DB._skipSync;
         DB._skipSync = true;
         try {
@@ -766,6 +780,170 @@ const DB = {
         await DB.loadFromFirebase();
     }
 };
+
+// =============================================================================
+// Central Event Delegation — DRY, XSS-safe, works on rerendered content + modals
+// =============================================================================
+// Replaces all inline onclick/onchange/oninput/onkeydown that interpolate
+// business data.  Elements carry a data-click / data-change attribute whose
+// value is a dotted action key; the handlers below read data-* attributes for
+// parameters.  The document-level listener catches events from rerendered HTML
+// and modal content alike.
+// =============================================================================
+
+const CLICK_HANDLERS = {};
+
+// Register a document-level click delegation listener.
+// Reads data-click + optional data-prevent / data-stop flags.
+const _onClick = (e) => {
+    const el = e.target.closest('[data-click]');
+    if (!el) return;
+    const action = el.getAttribute('data-click');
+    if (!action) return;
+    if (el.hasAttribute('data-prevent')) e.preventDefault();
+    if (el.hasAttribute('data-stop')) e.stopPropagation();
+    const fn = CLICK_HANDLERS[action];
+    if (fn) fn(el, e);
+};
+
+const CHANGE_HANDLERS = {};
+
+const _onChange = (e) => {
+    const el = e.target.closest('[data-change]');
+    if (!el) return;
+    const action = el.getAttribute('data-change');
+    if (!action) return;
+    if (el.hasAttribute('data-prevent')) e.preventDefault();
+    if (el.hasAttribute('data-stop')) e.stopPropagation();
+    const fn = CHANGE_HANDLERS[action];
+    if (fn) fn(el, e);
+};
+
+const initEventDelegation = () => {
+    if (window.__delegationReady) return;
+    window.__delegationReady = true;
+    document.addEventListener('click', _onClick);
+    document.addEventListener('change', _onChange);
+};
+
+// ---------------------------------------------------------------------------
+// Action: set-filter — called by segmented-filter buttons
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['set-filter'] = (el) => {
+    const name = el.getAttribute('data-name');
+    const value = el.getAttribute('data-value') || '';
+    const renderFn = el.getAttribute('data-render');
+    DB.setFilter(name, value);
+    if (renderFn) {
+        // Whitelist explicite — jamais window[renderFn]
+        const RENDER_WHITELIST = {
+            renderInventaire: renderInventaire
+        };
+        const fn = RENDER_WHITELIST[renderFn] || renderCurrentView;
+        fn();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Action: global-search-result
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['global-search-result'] = (el) => {
+    openGlobalSearchResult(el.getAttribute('data-type'), el.getAttribute('data-id'));
+};
+
+// ---------------------------------------------------------------------------
+// Dash todos
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['toggle-todo'] = (el) => toggleTodo(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-todo'] = (el) => deleteTodo(el.getAttribute('data-id'));
+
+// ---------------------------------------------------------------------------
+// Stock / Historique
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['toggle-stock-arome-filter'] = (el) => toggleStockAromeFilter(el.getAttribute('data-value'));
+CLICK_HANDLERS['toggle-stock-format-filter'] = (el) => toggleStockFormatFilter(el.getAttribute('data-value'));
+CLICK_HANDLERS['toggle-stock-statut-filter'] = (el) => toggleStockStatutFilter(el.getAttribute('data-value'));
+CLICK_HANDLERS['show-lot-trace'] = (el) => showLotTraceModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['sell-lot'] = (el) => showVendreModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['edit-lot'] = (el) => showEditLotModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['edit-lot-save'] = (el, e) => saveEditLot(e, el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-lot'] = (el) => deleteLot(el.getAttribute('data-id'));
+CLICK_HANDLERS['set-hist-filter'] = (el) => setHistFilter(el.getAttribute('data-key'), el.getAttribute('data-value'));
+CLICK_HANDLERS['delete-hist-record'] = (el) => deleteHistoryRecord(el.getAttribute('data-id'));
+
+// ---------------------------------------------------------------------------
+// Vente directe / Vendre
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['vendre-lot'] = (el) => vendreLot(el.getAttribute('data-id'));
+
+// ---------------------------------------------------------------------------
+// Pointage
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['pointage-select-employee'] = (el) => pointageSelectEmployee(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-pointage'] = (el) => deletePointage(el.getAttribute('data-id'));
+
+// ---------------------------------------------------------------------------
+// Commandes
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['select-week-day'] = (el) => selectWeekDay(el.getAttribute('data-date'));
+CLICK_HANDLERS['toggle-pill-statut'] = (el) => togglePillStatut(el.getAttribute('data-value'));
+CLICK_HANDLERS['show-commande-details'] = (el) => showCommandeDetails(el.getAttribute('data-id'));
+CLICK_HANDLERS['save-commande'] = (el, e) => saveCommande(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['edit-commande'] = (el) => editCommande(el.getAttribute('data-id'));
+CLICK_HANDLERS['duplicate-commande'] = (el) => duplicateCommande(el.getAttribute('data-id'));
+CLICK_HANDLERS['marquer-commande-produite'] = (el) => marquerCommandeProduite(el.getAttribute('data-id'));
+CLICK_HANDLERS['confirm-annuler-commande'] = (el) => confirmAnnulerCommande(el.getAttribute('data-id'));
+CLICK_HANDLERS['livrer-commande'] = (el) => showLivraisonBouteillesModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['restaurer-commande'] = (el) => restaurerCommande(el.getAttribute('data-id'));
+
+// ---------------------------------------------------------------------------
+// Livraisons / BL
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['show-livraison-details'] = (el) => showLivraisonDetails(el.getAttribute('data-id'));
+CLICK_HANDLERS['prepare-bl-export'] = (el) => showPrepareBLExportModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-livraison'] = (el) => deleteLivraison(el.getAttribute('data-id'));
+
+// ---------------------------------------------------------------------------
+// Production
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['confirmer-production-arome'] = (el) => confirmerProductionArome(el.getAttribute('data-arome'));
+CLICK_HANDLERS['confirmer-production'] = (el) => confirmerProduction(el.getAttribute('data-arome'), Number(el.getAttribute('data-index')));
+CLICK_HANDLERS['valider-production'] = (el, e) => validerProduction(e, el.getAttribute('data-arome'), Number(el.getAttribute('data-index')));
+CLICK_HANDLERS['valider-production-arome'] = (el, e) => validerProductionArome(e, el.getAttribute('data-arome'));
+
+// ---------------------------------------------------------------------------
+// Inventaire
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['update-inventaire-qty'] = (el) => updateInventaireQty(el.getAttribute('data-id'), Number(el.getAttribute('data-delta')));
+CLICK_HANDLERS['show-inventaire-modal'] = (el) => showInventaireModal(el.getAttribute('data-type'), el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-inventaire-item'] = (el) => deleteInventaireItem(el.getAttribute('data-id'));
+CLICK_HANDLERS['save-inventaire-item'] = (el, e) => saveInventaireItem(e, el.getAttribute('data-id') || '');
+
+CHANGE_HANDLERS['set-inventaire-qty'] = (el) => setInventaireQty(el.getAttribute('data-id'), el.value);
+CHANGE_HANDLERS['import-clients-excel'] = (el, e) => importClientsExcel(e);
+
+// ---------------------------------------------------------------------------
+// Paramètres CRUD
+// ---------------------------------------------------------------------------
+CLICK_HANDLERS['show-employe-modal'] = (el) => showEmployeModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-employe'] = (el) => deleteEmploye(el.getAttribute('data-id'));
+CLICK_HANDLERS['show-arome-modal'] = (el) => showAromeModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-arome'] = (el) => deleteArome(el.getAttribute('data-id'));
+CLICK_HANDLERS['show-format-modal'] = (el) => showFormatModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-format'] = (el) => deleteFormat(el.getAttribute('data-id'));
+CLICK_HANDLERS['show-recette-modal'] = (el) => showRecetteModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-recette'] = (el) => deleteRecette(el.getAttribute('data-id'));
+CLICK_HANDLERS['show-client-modal'] = (el) => showClientModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['delete-client'] = (el) => deleteClient(el.getAttribute('data-id'));
+CLICK_HANDLERS['save-employe'] = (el, e) => saveEmploye(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['save-arome'] = (el, e) => saveArome(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['save-format'] = (el, e) => saveFormat(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['save-recette'] = (el, e) => saveRecette(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['save-client'] = (el, e) => saveClient(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['sync-recettes-inventaire'] = () => syncRecettesInventaire();
+CLICK_HANDLERS['export-clients-excel'] = () => exportClientsExcel();
+CLICK_HANDLERS['trigger-import-clients'] = () => document.getElementById('importClientsFile').click();
+CLICK_HANDLERS['reset-clients'] = () => resetClients();
 
 const calculateAvailableStock = (lots, referenceDate = new Date()) => {
     const stock = {};
@@ -1188,6 +1366,11 @@ const v11LoadTableRecords = async (table) => {
     // Skip memory-protected tables (queue persistence failed)
     if (V11._memoryProtectedTables.has(table)) {
         console.warn('[V11] Table protégée en mémoire, pull refusé pour', table);
+        return null;
+    }
+    // Skip invalidated tables — réactivation possible via DB.set valide
+    if (v11GetInvalidTables().includes(table)) {
+        console.warn('[V11] Table invalidée, pull refusé pour', table);
         return null;
     }
     try {
@@ -1745,16 +1928,32 @@ const v11RunMigration = async () => {
 // --- V11 Real-time listeners ---
 const v11StartListener = (table) => {
     if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return null;
-    if (V11._listeners[table]) return V11._listeners[table]; // Already listening
+    // If a listener already exists, unsubscribe first (idempotent relogin/restart)
+    if (V11._listeners[table]) {
+        const old = V11._listeners[table];
+        delete V11._listeners[table];
+        if (typeof old === 'function') {
+            try { old(); } catch (e) { /* ignore unsubscribe error */ }
+        }
+    }
     // Skip memory-protected tables (queue persistence failed)
     if (V11._memoryProtectedTables.has(table)) {
         console.warn('[V11] Table protégée en mémoire, listener refusé pour', table);
+        return null;
+    }
+    // Skip invalidated tables — réactivation possible via DB.set valide
+    if (v11GetInvalidTables().includes(table)) {
+        console.warn('[V11] Table invalidée, listener refusé pour', table);
         return null;
     }
     try {
         const { onSnapshot } = window.firebaseApi;
         const collRef = v11GetRecordsCollRef(table);
         const unsubscribe = onSnapshot(collRef, (snapshot) => {
+            // Guard: discard snapshot if session changed (logout/login)
+            const sessionGen = _appSessionGen;
+            if (!window.firebaseReady || !window._appStarted) return;
+
             // Buffer ALL docs first, then validate before any apply
             const docList = [];
             let isEmptyStore = true;
@@ -1811,8 +2010,12 @@ const v11StartListener = (table) => {
             Object.assign(V11._versions[table], remoteVersions);
             v11SaveVersions();
 
+            // Guard: discard if session changed after validation
+            if (sessionGen !== _appSessionGen) return;
+
             // Apply remote snapshot to localStorage (without triggering sync loop)
             DB._applyRemoteSnapshot(table, records);
+            if (sessionGen !== _appSessionGen) return;
 
             // Re-apply pending queue operations for this table (local wins unconditionally)
             const current = DB.get(table);
@@ -1825,10 +2028,12 @@ const v11StartListener = (table) => {
                 }
             }
             DB._applyRemoteSnapshot(table, Array.from(resultMap.values()));
+            if (sessionGen !== _appSessionGen) return;
 
             // Debounced re-render of current view
             if (V11._debounceTimer) clearTimeout(V11._debounceTimer);
             V11._debounceTimer = setTimeout(() => {
+                if (sessionGen !== _appSessionGen) { V11._debounceTimer = null; return; }
                 const hash = window.location.hash.slice(1) || 'dashboard';
                 const page = hash.split('?')[0];
                 // Only re-render if still on the same page
@@ -1859,6 +2064,7 @@ const v11StartAllListeners = () => {
 };
 
 const v11StopAllListeners = () => {
+    if (V11._debounceTimer) { clearTimeout(V11._debounceTimer); V11._debounceTimer = null; }
     for (const [table, unsubscribe] of Object.entries(V11._listeners)) {
         if (typeof unsubscribe === 'function') {
             try { unsubscribe(); } catch (e) { /* ignore */ }
@@ -1878,6 +2084,8 @@ const v11OverlayQueueOnCache = () => {
         byTable[op.table].push(op);
     }
     for (const [table, ops] of Object.entries(byTable)) {
+        // Skip invalidated tables — ne jamais écraser leur localStorage
+        if (v11GetInvalidTables().includes(table)) continue;
         const current = DB.get(table);
         const resultMap = new Map(current.map(r => [r.id, r]));
         for (const op of ops) {
@@ -1892,15 +2100,24 @@ const v11OverlayQueueOnCache = () => {
 };
 
 // --- Dynamic Firebase init (retryable) ---
+// Fallback utilisé quand le module script d'index.html n'a pas pu se charger
+// (réseau lent, cache manquant). Configure à la fois Firestore et Auth pour
+// garantir que le callback onAuthStateChanged restaure la session persistée.
+// N'appelle JAMAIS initializeApp si une app existe déjà (getApps/getApp).
+// Ne montre JAMAIS le bouton Sync — seul le callback auth le fait.
 window.initFirebase = async (maxRetries = 3) => {
     if (window.firebaseReady && window.firebaseDb) return true;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js');
+            const { initializeApp, getApps, getApp } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js');
             const {
                 getFirestore, doc, setDoc, getDoc, getDocs, collection,
                 onSnapshot, deleteDoc, writeBatch, runTransaction
             } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+            const {
+                getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged,
+                setPersistence, browserLocalPersistence
+            } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js');
 
             const firebaseConfig = {
                 apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
@@ -1912,16 +2129,50 @@ window.initFirebase = async (maxRetries = 3) => {
                 measurementId: "G-E67CGE3Y57"
             };
 
-            const app = initializeApp(firebaseConfig);
+            // Éviter double initializeApp si le module script a déjà créé l'app
+            const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
             const db = getFirestore(app);
+            const auth = getAuth(app);
+            setPersistence(auth, browserLocalPersistence).catch(() => {});
+
             window.firebaseApi = {
                 doc, setDoc, getDoc, getDocs, collection,
                 onSnapshot, deleteDoc, writeBatch, runTransaction
             };
             window.firebaseDb = db;
-            window.firebaseReady = true;
-            console.log('Firebase connecté (dynamique)');
-            window.showSyncButton?.();
+
+            // Exposer l'auth si pas déjà fait
+            if (!window.firebaseAuth) {
+                window.firebaseAuth = {
+                    signIn: (password) => signInWithEmailAndPassword(auth, 'gestion@thecol.ch', password),
+                    signOut: () => signOut(auth)
+                };
+            }
+
+            // Restaurer la session persistée — ce callback est essentiel pour
+            // que firebaseReady ne devienne true qu'après authentification.
+            // Sans lui, initFirebase contournerait l'écran de verrouillage.
+            // Le bouton Sync n'est affiché que par ce callback, jamais ici.
+            onAuthStateChanged(auth, (user) => {
+                const loginScreen = document.getElementById('loginScreen');
+                const loginLoading = document.getElementById('loginLoading');
+                const loginForm = document.getElementById('loginForm');
+
+                if (user) {
+                    window.firebaseReady = true;
+                    if (loginScreen) { loginScreen.style.display = 'none'; unlockShell(); }
+                    const pwdField = document.getElementById('loginPassword');
+                    if (pwdField) pwdField.value = '';
+                    document.getElementById('loginError')?.removeAttribute('style');
+                    if (typeof window.startApp === 'function') {
+                        window.startApp();
+                    }
+                } else {
+                    resetAppSession();
+                }
+            });
+
+            console.log('Firebase connecté (dynamique avec Auth)');
             return true;
         } catch (e) {
             console.error('[initFirebase] Tentative ' + (attempt + 1) + '/' + maxRetries + ' échouée:', e);
@@ -2103,9 +2354,20 @@ const calculateDates = (productionDate) => {
     return { dlv: addCalendarMonths(1), dlc: addCalendarMonths(6) };
 };
 
-const escapeHtml = (str) => {
-    if (!str) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const escapeHtml = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+// Safe numeric helper for HTML attribute interpolation.
+// Returns the number as a string if finite, otherwise '0'.
+const safeNumAttr = (v) => { const n = Number(v); return Number.isFinite(n) ? String(n) : '0'; };
+
+// Allow-list for hex colour values used inline in style attributes.
+// Accepts 3/4/6/8 hex digits with optional leading #. Returns the value with
+// a leading #, or a safe fallback (#cccccc) when the input is not valid.
+const safeColor = (v) => {
+    if (!v) return '#cccccc';
+    const s = String(v).trim();
+    const m = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.exec(s);
+    return m ? '#' + m[1] : '#cccccc';
 };
 
 const dateOnly = (d) => {
@@ -2140,10 +2402,21 @@ const isLotDateRangeValid = (dateProduction, dlv, dlc) => {
 };
 
 const isLotSellable = (lot, referenceDate = new Date()) => {
-    if (!lot?.dlc) return false;
-    const dlcDate = dateOnly(lot.dlc);
+    if (!lot) return false;
     const refDate = dateOnly(referenceDate);
-    return !Number.isNaN(dlcDate.getTime()) && !Number.isNaN(refDate.getTime()) && dlcDate >= refDate;
+    if (Number.isNaN(refDate.getTime())) return false;
+
+    // DLV (Date Limite de Vente) est la date de vente primaire
+    // Si DLV est présente, elle doit être >= aujourd'hui
+    if (lot.dlv) {
+        const dlvDate = dateOnly(lot.dlv);
+        if (Number.isNaN(dlvDate.getTime()) || dlvDate < refDate) return false;
+    }
+
+    // DLC (Date Limite de Consommation) — toujours requise
+    if (!lot.dlc) return false;
+    const dlcDate = dateOnly(lot.dlc);
+    return !Number.isNaN(dlcDate.getTime()) && dlcDate >= refDate;
 };
 
 const getStatus = (dlc) => {
@@ -2381,7 +2654,7 @@ const showCommandeMontantDiagModal = (commandeId) => {
 const renderSegmentedFilter = (name, currentValue, options, renderFnName) => `
     <div class="segmented-filter" role="group" aria-label="${escapeHtml(name)}">
         ${options.map(opt => `
-            <button type="button" class="segment ${currentValue === opt.value ? 'active' : ''}" onclick="DB.setFilter('${name}', '${opt.value}'); ${renderFnName}()">
+            <button type="button" class="segment ${currentValue === opt.value ? 'active' : ''}" data-click="set-filter" data-name="${escapeHtml(name)}" data-value="${escapeHtml(opt.value)}" data-render="${escapeHtml(renderFnName)}">
                 ${escapeHtml(opt.label)}
             </button>
         `).join('')}
@@ -2455,7 +2728,7 @@ const renderGlobalSearchResults = () => {
     }
 
     resultsEl.innerHTML = matches.map(match => `
-        <button type="button" class="global-search-result" onclick="openGlobalSearchResult('${match.type}', '${match.id}')">
+        <button type="button" class="global-search-result" data-click="global-search-result" data-type="${escapeHtml(match.type)}" data-id="${escapeHtml(match.id)}">
             <span>${escapeHtml(match.label)}</span>
             <small>${escapeHtml(match.meta)}</small>
         </button>
@@ -2499,6 +2772,8 @@ const openGlobalSearchResult = (type, id) => {
 };
 
 const initGlobalSearch = () => {
+    if (window._initGlobalSearchDone) return;
+    window._initGlobalSearchDone = true;
     const input = document.getElementById('globalSearchInput');
     const resultsEl = document.getElementById('globalSearchResults');
     if (!input || !resultsEl) return;
@@ -2610,8 +2885,13 @@ let pointageClockInterval = null;
 let weekCalendarSelectedDate = '';
 let _commandeModalClientOptions = [];
 
+// Session generation counter — incremented on each successful login/logout
+// so that async callbacks (snapshots, debounce) from a prior session are inert.
+let _appSessionGen = 0;
+
 // Navigation
 const router = () => {
+    if (!window.firebaseReady || !window._appStarted) return;
     const hash = window.location.hash.slice(1) || 'dashboard';
     const page = hash.split('?')[0];
     navigateTo(page);
@@ -2671,6 +2951,7 @@ const navigateTo = (page) => {
 
 // Render Current View dynamically
 const renderCurrentView = () => {
+    if (!window.firebaseReady || !window._appStarted) return;
     const hash = window.location.hash.slice(1) || 'dashboard';
     const page = hash.split('?')[0];
     navigateTo(page);
@@ -2687,6 +2968,7 @@ window.addEventListener('unhandledrejection', (e) => {
 
 // Cross-tab synchronization
 window.addEventListener('storage', (e) => {
+    if (!window.firebaseReady || !window._appStarted) return;
     if (e.key && e.key.startsWith('thecol_')) {
         renderCurrentView();
     }
@@ -2799,10 +3081,10 @@ const renderDashboard = () => {
             </div>
             <div class="dash-todo-list">
                 ${todos.length === 0 ? '<p style="color: var(--text-light); font-size: 13px; padding: 8px 0;">Aucune tâche. Ajoute-en une ci-dessus.</p>' : todos.map(t => `
-                    <div class="dash-todo-item ${t.done ? 'done' : ''}" style="cursor:pointer;" onclick="toggleTodo('${t.id}')">
+                    <div class="dash-todo-item ${t.done ? 'done' : ''}" style="cursor:pointer;" data-click="toggle-todo" data-id="${escapeHtml(t.id)}">
                         <span class="dash-todo-check" style="${t.done ? 'display:flex;align-items:center;justify-content:center;color:white;font-size:12px;' : ''}">${t.done ? '✓' : ''}</span>
                         <span class="dash-todo-label">${escapeHtml(t.text)}</span>
-                        <button class="btn-bare" style="color: var(--text-lighter); font-size: 16px; padding: 0 4px;" onclick="event.stopPropagation(); deleteTodo('${t.id}')" aria-label="Supprimer">✕</button>
+                        <button class="btn-bare" style="color: var(--text-lighter); font-size: 16px; padding: 0 4px;" data-click="delete-todo" data-id="${escapeHtml(t.id)}" data-stop aria-label="Supprimer">✕</button>
                     </div>
                 `).join('')}
             </div>
@@ -2843,7 +3125,7 @@ const renderDashboard = () => {
                     const format = formats.find(f => f.id === b.formatId);
                     const formatLitres = format?.contenanceCl ? `${(format.contenanceCl / 100).toFixed(2).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')}l` : b.formatNom;
                     return `<div class="flex-between" style="padding: 10px 0; ${index < arr.length - 1 ? 'border-bottom: 1px solid var(--border-light);' : ''}">
-                        <span style="display: inline-flex; align-items: center; gap: 8px;"><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}; width: 10px; height: 10px; border-radius: 50%; display: inline-block;"></span>${escapeHtml(b.aromeNom)} ${escapeHtml(formatLitres)}</span>
+                        <span style="display: inline-flex; align-items: center; gap: 8px;"><span class="color-dot" style="background: ${safeColor(arome?.couleur)}; width: 10px; height: 10px; border-radius: 50%; display: inline-block;"></span>${escapeHtml(b.aromeNom)} ${escapeHtml(formatLitres)}</span>
                         <div style="text-align: right;">
                             <div style="font-size: 12px; color: var(--text-light);">Stock : ${b.disponible}</div>
                             <strong style="color: var(--primary);">À produire : ${b.aProduire}</strong>
@@ -2928,16 +3210,15 @@ const renderStock = () => {
     const formatsActifs = formats.filter(f => f.actif);
 
     const aromaTilesHtml = `
-        <a href="#stock" class="aroma-tile aroma-all ${!savedArome ? 'active' : ''}" onclick="event.preventDefault(); toggleStockAromeFilter(''); return false;">
+        <a href="#stock" class="aroma-tile aroma-all ${!savedArome ? 'active' : ''}" data-click="toggle-stock-arome-filter" data-value="" data-prevent>
             <div class="aroma-tile-header"><span class="aroma-tile-dot"></span><span class="aroma-tile-name">Tous</span></div>
             <div class="aroma-tile-value">${sellableBottles}</div>
             <div class="aroma-tile-sub">btl vendables</div>
         </a>
         ${tileAromas.map(a => `
-            <a href="#stock" class="aroma-tile ${savedArome === a.nom ? 'active' : ''}"
-               onclick="event.preventDefault(); toggleStockAromeFilter('${escapeHtml(a.nom).replace(/'/g, '\\\'')}'); return false;">
+            <a href="#stock" class="aroma-tile ${savedArome === a.nom ? 'active' : ''}" data-click="toggle-stock-arome-filter" data-value="${escapeHtml(a.nom)}" data-prevent>
                 <div class="aroma-tile-header">
-                    <span class="aroma-tile-dot" style="background:${escapeHtml(a.couleur || '#ccc')}"></span>
+                    <span class="aroma-tile-dot" style="background:${safeColor(a.couleur)}"></span>
                     <span class="aroma-tile-name">${escapeHtml(a.nom)}</span>
                 </div>
                 <div class="aroma-tile-value">${sellableByAroma[a.nom] || 0}</div>
@@ -2946,8 +3227,8 @@ const renderStock = () => {
         `).join('')}
     `;
 
-    const fmtPill = (val, label) => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" onclick="toggleStockFormatFilter('${escapeHtml(val).replace(/'/g, '\\\'')}')">${escapeHtml(label)}</button>`;
-    const statPill = (val, label) => `<button type="button" class="status-pill ${savedStatut === val ? 'active' : ''}" onclick="toggleStockStatutFilter('${val}')">${escapeHtml(label)}</button>`;
+    const fmtPill = (val, label) => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" data-click="toggle-stock-format-filter" data-value="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
+    const statPill = (val, label) => `<button type="button" class="status-pill ${savedStatut === val ? 'active' : ''}" data-click="toggle-stock-statut-filter" data-value="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
 
     // Traçabilité : retrouver les lots épuisés (disparus du stock) via la recherche
     let archivedLotsHtml = '';
@@ -2984,7 +3265,7 @@ const renderStock = () => {
                             <span class="badge badge-default">Épuisé</span>
                         </div>
                         <div class="lot-card-aroma">
-                            <span class="aroma-tile-dot" style="background:${escapeHtml(arome?.couleur || '#ccc')}"></span>
+                            <span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>
                             <span class="lot-card-aroma-name">${escapeHtml(l.arome || '?')}</span>
                             <span class="lot-card-aroma-format">• ${escapeHtml(l.format || '?')}</span>
                         </div>
@@ -2993,7 +3274,7 @@ const renderStock = () => {
                             ${l.dlc ? `<span>DLC <strong>${formatDate(l.dlc)}</strong></span>` : ''}
                         </div>
                         <div class="lot-card-actions">
-                            <button class="btn btn-sm btn-ghost" onclick="showLotTraceModal('${escapeHtml(l.id)}')">Tracer</button>
+                            <button class="btn btn-sm btn-ghost" data-click="show-lot-trace" data-id="${escapeHtml(l.id)}">Tracer</button>
                         </div>
                     </div>`;
                 }).join('')}
@@ -3014,20 +3295,20 @@ const renderStock = () => {
                     <span class="badge ${badgeClass}">${statusLabel}</span>
                 </div>
                 <div class="lot-card-aroma">
-                    <span class="aroma-tile-dot" style="background:${escapeHtml(arome?.couleur || '#ccc')}"></span>
+                    <span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>
                     <span class="lot-card-aroma-name">${escapeHtml(lot.arome || '?')}</span>
                     <span class="lot-card-aroma-format">• ${escapeHtml(lot.format || '?')}</span>
                 </div>
                 <div class="lot-card-meta">
-                    <span><strong class="lot-card-qty">${lot.quantite}</strong> bt</span>
+                    <span><strong class="lot-card-qty">${escapeHtml(String(lot.quantite))}</strong> bt</span>
                     <span>Prod. <strong>${formatDate(lot.dateProduction)}</strong></span>
                     <span>DLC <strong>${formatDate(lot.dlc)}</strong></span>
                 </div>
                 <div class="lot-card-actions">
-                    ${status !== 'expired' ? `<button class="btn btn-sm btn-success" onclick="showVendreModal('${lot.id}')">Vendre</button>` : ''}
-                    <button class="btn btn-sm btn-ghost" onclick="showLotTraceModal('${lot.id}')">Tracer</button>
-                    <button class="btn btn-sm btn-ghost" onclick="showEditLotModal('${lot.id}')">Modifier</button>
-                    <button class="btn btn-sm btn-ghost" style="color: var(--danger);" onclick="deleteLot('${lot.id}')">Supprimer</button>
+                    ${status !== 'expired' ? `<button class="btn btn-sm btn-success" data-click="sell-lot" data-id="${escapeHtml(lot.id)}">Vendre</button>` : ''}
+                    <button class="btn btn-sm btn-ghost" data-click="show-lot-trace" data-id="${escapeHtml(lot.id)}">Tracer</button>
+                    <button class="btn btn-sm btn-ghost" data-click="edit-lot" data-id="${escapeHtml(lot.id)}">Modifier</button>
+                    <button class="btn btn-sm btn-ghost" style="color: var(--danger);" data-click="delete-lot" data-id="${escapeHtml(lot.id)}">Supprimer</button>
                 </div>
             </div>`;
         }).join('');
@@ -3251,10 +3532,10 @@ const renderHistorique = () => {
         return lbl.charAt(0).toUpperCase() + lbl.slice(1);
     };
 
-    const typePill   = (val, label) => `<button type="button" class="status-pill ${savedType   === val ? 'active' : ''}" onclick="setHistFilter('Type', '${val}')">${label}</button>`;
-    const aromePill  = (val)        => `<button type="button" class="status-pill ${savedArome  === val ? 'active' : ''}" onclick="setHistFilter('Arome', '${escapeHtml(val).replace(/'/g, "\\'")}')">${escapeHtml(val)}</button>`;
-    const formatPill = (val)        => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" onclick="setHistFilter('Format', '${escapeHtml(val).replace(/'/g, "\\'")}')">${escapeHtml(val)}</button>`;
-    const periodPill = (val, label) => `<button type="button" class="status-pill ${savedPeriod === val ? 'active' : ''}" onclick="setHistFilter('Period', '${val}')">${label}</button>`;
+    const typePill   = (val, label) => `<button type="button" class="status-pill ${savedType   === val ? 'active' : ''}" data-click="set-hist-filter" data-key="Type" data-value="${escapeHtml(val)}">${label}</button>`;
+    const aromePill  = (val)        => `<button type="button" class="status-pill ${savedArome  === val ? 'active' : ''}" data-click="set-hist-filter" data-key="Arome" data-value="${escapeHtml(val)}">${escapeHtml(val)}</button>`;
+    const formatPill = (val)        => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" data-click="set-hist-filter" data-key="Format" data-value="${escapeHtml(val)}">${escapeHtml(val)}</button>`;
+    const periodPill = (val, label) => `<button type="button" class="status-pill ${savedPeriod === val ? 'active' : ''}" data-click="set-hist-filter" data-key="Period" data-value="${escapeHtml(val)}">${label}</button>`;
 
     const aromesActifs  = aromes.filter(a => a.actif);
     const formatsActifs = formats.filter(f => f.actif);
@@ -3274,21 +3555,21 @@ const renderHistorique = () => {
                 </div>
                 <div class="hist-day-list">
                     ${dayEntries.map(e => {
-                        const lotNum = e.lotId ? `#${String(e.numLot || e.lotId).padStart(6, '0')}` : 'Lot ?';
-                        const color = aromeColor[e.arome] || '#ccc';
+                        const lotNum = e.lotId ? '#' + escapeHtml(String(e.numLot || e.lotId).padStart(6, '0')) : 'Lot ?';
+                        const color = safeColor(aromeColor[e.arome]);
                         return `
                         <div class="hist-entry ${e.isVente ? 'is-vente' : 'is-prod'}">
-                            <span class="hist-entry-dot" style="background:${escapeHtml(color)}"></span>
+                            <span class="hist-entry-dot" style="background:${color}"></span>
                             <div class="hist-entry-main">
                                 <div class="hist-entry-title">${escapeHtml(e.arome || '?')} <span class="hist-entry-format">${escapeHtml(e.format || '')}</span></div>
                                 <div class="hist-entry-sub">
                                     <span class="hist-entry-tag ${e.isVente ? 'tag-vente' : 'tag-prod'}">${e.isVente ? 'Vente directe' : 'Production'}</span>
-                                    <button type="button" class="hist-entry-lot" onclick="showLotTraceModal('${escapeHtml(String(e.lotId))}')">${lotNum}</button>
+                                    <button type="button" class="hist-entry-lot" data-click="show-lot-trace" data-id="${escapeHtml(String(e.lotId))}">${lotNum}</button>
                                     ${e.isVente && e.productionDate ? `<span class="hist-entry-note">prod. ${formatDate(e.productionDate)}</span>` : ''}
                                 </div>
                             </div>
                             <div class="hist-entry-qty ${e.isVente ? 'neg' : 'pos'}">${e.isVente ? '−' : '+'}${e.quantity}</div>
-                            <button type="button" class="hist-entry-del" title="Supprimer" aria-label="Supprimer cet enregistrement" onclick="deleteHistoryRecord('${e.id}')">✕</button>
+                            <button type="button" class="hist-entry-del" title="Supprimer" aria-label="Supprimer cet enregistrement" data-click="delete-hist-record" data-id="${escapeHtml(e.id)}">✕</button>
                         </div>`;
                     }).join('')}
                 </div>
@@ -3576,18 +3857,22 @@ const showVendreModal = (lotId) => {
     const lots = DB.get('lots');
     const lot = lots.find(l => l.id === lotId);
     if (!lot) return;
+    if (!isLotSellable(lot)) {
+        showToast('Ce lot ne peut pas être vendu (DLV/DLC expirée ou absente).', 'error');
+        return;
+    }
 
     modal.show('Vendre des bouteilles', `
         <form id="vendreForm">
             <div class="form-group">
                 <label>Quantité à vendre</label>
-                <input type="number" name="quantite" min="1" max="${lot.quantite}" step="1" value="1" required>
-                <small class="text-muted">Stock disponible: ${lot.quantite}</small>
+                <input type="number" name="quantite" min="1" max="${safeNumAttr(lot.quantite)}" step="1" value="1" required>
+                <small class="text-muted">Stock disponible: ${escapeHtml(String(lot.quantite))}</small>
             </div>
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-success" onclick="vendreLot('${lotId}')">Vendre</button>
+        <button class="btn btn-success" data-click="vendre-lot" data-id="${escapeHtml(lotId)}">Vendre</button>
     `);
 };
 
@@ -3601,6 +3886,13 @@ const vendreLot = (lotId) => {
     }
 
     const lot = lots[lotIndex];
+
+    // Vérifier que le lot est vendable (DLV/DLC valide)
+    if (!isLotSellable(lot)) {
+        showToast('Ce lot ne peut plus être vendu (DLV/DLC expirée).', 'error');
+        return;
+    }
+
     const quantite = Number(document.querySelector('#vendreForm input[name="quantite"]')?.value);
     const stockDisponible = Number(lot.quantite);
     if (!Number.isInteger(quantite) || quantite <= 0 || !Number.isFinite(stockDisponible) || quantite > stockDisponible) {
@@ -3791,26 +4083,26 @@ const showEditLotModal = (lotId) => {
             </div>
             <div class="form-group">
                 <label>Quantité</label>
-                <input type="number" name="quantite" value="${lot.quantite}" min="1" required>
+                <input type="number" name="quantite" value="${escapeHtml(safeNumAttr(lot.quantite))}" min="1" required>
             </div>
             <div class="form-group">
                 <label>Date de production</label>
-                <input type="date" name="dateProduction" value="${lot.dateProduction}" onchange="updateEditLotDates()" required>
+                <input type="date" name="dateProduction" value="${escapeHtml(lot.dateProduction)}" onchange="updateEditLotDates()" required>
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>Date limite de vente (DLV)</label>
-                    <input type="date" name="dlv" value="${lot.dlv}" required>
+                    <input type="date" name="dlv" value="${escapeHtml(lot.dlv)}" required>
                 </div>
                 <div class="form-group">
                     <label>Date limite de consommation (DLC)</label>
-                    <input type="date" name="dlc" value="${lot.dlc}" required>
+                    <input type="date" name="dlc" value="${escapeHtml(lot.dlc)}" required>
                 </div>
             </div>
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveEditLot(event, '${lotId}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="edit-lot-save" data-id="${escapeHtml(lotId)}">Enregistrer</button>
     `);
 };
 
@@ -3938,7 +4230,7 @@ const showPointageStatsModal = () => {
                 <label>Employé</label>
                 <select id="statsEmploye" onchange="refreshPointageStatsModal()">
                     <option value="">Tous</option>
-                    ${employesActifs.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
+${employesActifs.map(e => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group">
@@ -4010,7 +4302,7 @@ const showPointageHistoriqueModal = () => {
         `<div class="filters" style="margin-bottom: 12px;">
             <select id="filterEmploye" onchange="refreshPointageHistoriqueModal()">
                 <option value="">Tous les employés</option>
-                ${employesActifs.map(e => `<option value="${e.id}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
+                ${employesActifs.map(e => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
             </select>
             <input type="date" id="filterDateFrom" placeholder="Du" onchange="refreshPointageHistoriqueModal()">
             <input type="date" id="filterDateTo" placeholder="Au" onchange="refreshPointageHistoriqueModal()">
@@ -4111,7 +4403,7 @@ const renderPointage = (_tabIgnored) => {
                     ${employesActifs.map(e => {
                         const isSelected = e.id === selectedEmpId;
                         const isLive = !!pointageEnCoursParEmp[e.id];
-                        return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" onclick="event.preventDefault(); pointageSelectEmployee('${e.id}'); return false;">
+                        return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" data-click="pointage-select-employee" data-id="${escapeHtml(e.id)}" data-prevent>
                             <div class="avatar ${isLive ? 'avatar-live' : ''}">${escapeHtml(initiales(e))}</div>
                             <div class="employee-info">
                                 <div class="employee-name">${escapeHtml(e.prenom)} ${escapeHtml(e.nom || '')}</div>
@@ -4133,7 +4425,7 @@ const renderPointage = (_tabIgnored) => {
                         <label>Employé</label>
                         <select name="employeId" required>
                             ${employesActifs.length === 0 ? '<option value="">Aucun employé</option>' :
-                              employesActifs.map(e => `<option value="${e.id}" ${e.id === selectedEmpId ? 'selected' : ''}>${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
+                              employesActifs.map(e => `<option value="${escapeHtml(e.id)}" ${e.id === selectedEmpId ? 'selected' : ''}>${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
                         </select>
                     </div>
                     <div class="form-group">
@@ -4249,7 +4541,7 @@ const renderHistoriqueTable = (pointages, employes) => {
                 <td>${p.pause || 0} min</td>
                 <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
                 <td>
-                    <button class="btn btn-sm btn-danger" onclick="deletePointage('${p.id}')">Supprimer</button>
+                    <button class="btn btn-sm btn-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
                 </td>
             </tr>
         `;
@@ -4497,8 +4789,7 @@ const renderWeekCalendar = (commandesByDate) => {
                 const isSelected = dStr === weekCalendarSelectedDate;
                 const hasOrders = (commandesByDate[dStr] || 0) > 0;
                 const dayLetter = ['L', 'M', 'M', 'J', 'V', 'S', 'D'][(d.getDay() + 6) % 7];
-                return `<button type="button" class="week-day ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}"
-                    onclick="selectWeekDay('${dStr}')">
+                return `<button type="button" class="week-day ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}" data-click="select-week-day" data-date="${escapeHtml(dStr)}">
                     <span class="week-day-name">${dayLetter}</span>
                     <span class="week-day-num">${d.getDate()}</span>
                     ${hasOrders ? '<span class="week-day-dot"></span>' : ''}
@@ -4554,8 +4845,7 @@ const renderCommandes = () => {
     filtered.sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
 
     const pillBtn = (key, label) => `
-        <button type="button" class="status-pill ${savedFilterStatut === key ? 'active' : ''}"
-            onclick="togglePillStatut('${key}')">
+        <button type="button" class="status-pill ${savedFilterStatut === key ? 'active' : ''}" data-click="toggle-pill-statut" data-value="${escapeHtml(key)}">
             ${label}
             <span class="pill-count">${countByStatut[key] || 0}</span>
         </button>`;
@@ -4580,8 +4870,8 @@ const renderCommandes = () => {
                 'livrée':      'badge-livree',
                 'annulee':    'badge-annulee'
             };
-            const cardClass = `commande-card statut-${cmd.statut === 'livrée' ? 'livree' : cmd.statut}`;
-            return `<a href="#commandes" class="${cardClass}" onclick="event.preventDefault(); showCommandeDetails('${cmd.id}'); return false;">
+            const cardClass = `commande-card statut-${escapeHtml(cmd.statut === 'livrée' ? 'livree' : cmd.statut)}`;
+            return `<a href="#commandes" class="${cardClass}" data-click="show-commande-details" data-id="${escapeHtml(cmd.id)}" data-prevent>
                 <div class="commande-card-header">
                     <span class="commande-card-numero">#${escapeHtml(getCommandeNumero(cmd))}</span>
                     <span class="badge ${badgeMap[cmd.statut] || 'badge-default'}">${escapeHtml(getCommandeStatutLabel(cmd.statut))}</span>
@@ -4624,7 +4914,7 @@ const renderCommandes = () => {
 
         ${!showArchives && weekCalendarSelectedDate ? `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background: var(--bg-secondary); border-radius: var(--radius-md); margin-bottom: 12px; font-size: 12px;">
             <span>📅 Filtre : livraisons du ${formatDate(weekCalendarSelectedDate)}</span>
-            <button type="button" class="btn-bare" style="color: var(--primary); font-size: 12px; padding: 0;" onclick="selectWeekDay('${weekCalendarSelectedDate}')">Effacer ✕</button>
+            <button type="button" class="btn-bare" style="color: var(--primary); font-size: 12px; padding: 0;" data-click="select-week-day" data-date="${escapeHtml(weekCalendarSelectedDate)}">Effacer ✕</button>
         </div>` : ''}
         ${!showArchives && savedFilterClient && clientFiltre ? `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background: var(--bg-secondary); border-radius: var(--radius-md); margin-bottom: 12px; font-size: 12px;">
             <span>👤 Filtre : ${escapeHtml(clientFiltre.societe || clientFiltre.nom || 'Client')}</span>
@@ -4729,13 +5019,13 @@ const showCommandeModal = (id = null) => {
                     <label>Client</label>
                     <input type="search" placeholder="Filtrer les clients…" aria-label="Filtrer les clients" oninput="filterClientOptions(this.value)" style="margin-bottom: 8px;">
                     <select name="clientId" required onchange="onCommandeClientChange(this)">
-                        ${clientOptions.map(c => `<option value="${c.id}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
+                        ${clientOptions.map(c => `<option value="${escapeHtml(c.id)}" ${commande?.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                         <option value="__ponctuel__">➕ Client ponctuel (non récurrent)</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Date de livraison</label>
-                    <input type="date" name="dateLivraison" value="${commande?.dateLivraison || ''}" required>
+                    <input type="date" name="dateLivraison" value="${escapeHtml(commande?.dateLivraison || '')}" required>
                 </div>
             </div>
             <div id="ponctuelFields" style="display: none;">
@@ -4775,7 +5065,7 @@ const showCommandeModal = (id = null) => {
                                     ${formats.map(f => {
                                         const item = commande?.items?.find(i => i.aromeId === a.id && i.formatId === f.id);
                                         const qty = item ? item.quantite : '';
-                                        return `<td><input type="number" name="items[${a.id}][${f.id}]" value="${qty}" min="0" placeholder="0" class="item-qty-input" oninput="onMatrixCellInput(this)"></td>`;
+                                        const safeName = `items[${escapeHtml(a.id)}][${escapeHtml(f.id)}]`; return `<td><input type="number" name="${safeName}" value="${escapeHtml(String(qty ?? ''))}" min="0" placeholder="0" class="item-qty-input" oninput="onMatrixCellInput(this)"></td>`;
                                     }).join('')}
                                 </tr>
                             `).join('')}
@@ -4795,7 +5085,7 @@ const showCommandeModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveCommande(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-commande" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 
     // Visibilité des champs ponctuels + recalcul initial du total
@@ -4994,8 +5284,10 @@ const restaurerCommande = (id) => {
                         format: entry.format,
                         quantite: entry.quantite,
                         dlc: entry.dlc,
-                        dlv: entry.dlc,
-                        dateProduction: prodEntry ? (prodEntry.productionDate || '') : ''
+                        // Utiliser dlv distant s'il est présent (v11 transaction), fallback sur dlc (legacy)
+                        dlv: entry.dlv || entry.dlc,
+                        // Utiliser dateProduction distante si présente, fallback sur history
+                        dateProduction: entry.dateProduction || (prodEntry ? (prodEntry.productionDate || '') : '')
                     };
                     lots.push(nouveauLot);
                 }
@@ -5007,7 +5299,7 @@ const restaurerCommande = (id) => {
                     arome: entry.arome,
                     format: entry.format,
                     quantity: entry.quantite,
-                    productionDate: '',
+                    productionDate: entry.dateProduction || '',
                     dateAdded: new Date().toISOString()
                 });
             });
@@ -5027,6 +5319,310 @@ const restaurerCommande = (id) => {
         modal.hide();
         showToast(estLivree ? 'Commande restaurée — stock restitué et BL supprimé' : 'Commande restaurée');
     });
+};
+
+// =============================================================================
+// Transaction atomique de livraison — multi-documents Firestore
+// =============================================================================
+// Exécute UNE transaction Firestone pour :
+//  1. Lire la commande (exiger existence + statut « produite »)
+//  2. Lire chaque lot alloué (exiger stock, DLC, arome/format)
+//  3. Écrire commande → « livrée » avec lotsUtilises
+//  4. Mettre à jour ou supprimer les lots
+//  Toute divergence annule la transaction sans modifier aucun document.
+//
+// allocations attend : [{ lotId, quantite, expectedArome, expectedFormat }]
+// Les quantités sont agrégées en interne par lotId pour éviter double décrément.
+const deliverCommandeTransaction = async (commandeId, allocations) => {
+    // --- Guardes : exiger Firebase prêt, V11 prêt, authentifié ---
+    if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) {
+        throw new Error(
+            'Connexion requise pour garantir le stock. ' +
+            'Vérifiez votre connexion internet et réessayez. Aucune donnée locale n\'a été modifiée.'
+        );
+    }
+    if (!V11._isReady) {
+        throw new Error(
+            'La synchronisation collaborative n\'est pas encore prête. ' +
+            'Veuillez patienter quelques instants puis réessayer.'
+        );
+    }
+    if (!window.firebaseAuth) {
+        throw new Error(
+            'Authentification requise. Veuillez vous connecter puis réessayer.'
+        );
+    }
+
+    // --- Guarde réseau : refus immédiat si offline ---
+    if (navigator.onLine === false) {
+        throw new Error(
+            'Vous êtes hors ligne. La livraison nécessite une connexion réseau ' +
+            'pour garantir l\'intégrité du stock. Réessayez une fois connecté. ' +
+            'Aucune donnée locale n\'a été modifiée.'
+        );
+    }
+
+    // --- Guarde file d'attente : flusher + vérifier aucune op pendante ne cible commande/lots ---
+    await v11FlushQueue();
+    const queue = v11GetQueue();
+    const allLotIds = new Set(allocations.map(a => a.lotId));
+    const pendingOps = queue.filter(op =>
+        (op.table === 'commandes' && op.recordId === commandeId) ||
+        (op.table === 'lots' && allLotIds.has(op.recordId))
+    );
+    if (pendingOps.length > 0) {
+        throw new Error(
+            `Des modifications locales sont encore en attente de synchronisation ` +
+            `(${pendingOps.length} opération(s) sur la commande ou les lots). ` +
+            'Veuillez attendre la fin de la synchronisation puis réessayer. ' +
+            'Aucune donnée n\'a été modifiée.'
+        );
+    }
+
+    const normalize = (s) => (s || '').toString().toLowerCase().trim();
+    const { runTransaction } = window.firebaseApi;
+    const txVersion = Date.now();
+    const now = new Date().toISOString();
+
+    // Agrégation par lot (pour décrément) + par itemKey (pour validation articles)
+    // ET vérification qu'un même lot ne sert pas deux couples (arome,format) incompatibles
+    const lotsAgg = new Map();  // lotId → { totalQty, aromes: Set, formats: Set }
+    const itemAgg = new Map();  // itemKey → totalQty
+
+    for (const a of allocations) {
+        // Cumul par article
+        itemAgg.set(a.itemKey, (itemAgg.get(a.itemKey) || 0) + a.quantite);
+
+        // Cumul par lot + suivi des arome/format
+        if (!lotsAgg.has(a.lotId)) {
+            lotsAgg.set(a.lotId, { totalQty: 0, aromes: new Set(), formats: new Set() });
+        }
+        const la = lotsAgg.get(a.lotId);
+        la.totalQty += a.quantite;
+        la.aromes.add(normalize(a.expectedArome));
+        la.formats.add(normalize(a.expectedFormat));
+    }
+
+    // Vérification : un lot ne doit servir qu'à un seul couple (arome, format)
+    for (const [lotId, la] of lotsAgg) {
+        if (la.aromes.size > 1 || la.formats.size > 1) {
+            throw new Error(
+                `Le lot #${String(lotId).slice(-6)} est alloué à des articles incompatibles ` +
+                '(arômes ou formats différents). Corrigez les allocations et réessayez.'
+            );
+        }
+    }
+
+    // Transaction Firestore multi-documents
+    const result = await runTransaction(window.firebaseDb, async (transaction) => {
+        // --- 1. Lecture et validation de la commande distante ---
+        const cmdRef = v11GetRecordRef('commandes', commandeId);
+        const cmdSnap = await transaction.get(cmdRef);
+        if (!cmdSnap.exists()) {
+            throw new Error('Commande introuvable sur le serveur. Livraison annulée.');
+        }
+        const cmdData = cmdSnap.data();
+        const commande = cmdData && cmdData.record;
+        if (!commande || commande.statut !== 'produite') {
+            throw new Error(
+                'Cette commande a déjà été livrée ou son statut a changé. ' +
+                'Aucune modification effectuée. Rechargez la page et vérifiez l\'état de la commande.'
+            );
+        }
+
+        // --- 2. Validation des ARTICLES distants : totaux alloués ≈ totaux commandés ---
+        const remoteItems = getItems(commande);
+        const remoteItemsMap = new Map(); // "aromeId|formatId" → quantite total
+        for (const item of remoteItems) {
+            const key = `${item.aromeId}|${item.formatId}`;
+            remoteItemsMap.set(key, (remoteItemsMap.get(key) || 0) + Number(item.quantite));
+        }
+
+        // Vérifier que chaque article alloué existe dans la commande distante avec le bon total
+        for (const [itemKey, allocatedQty] of itemAgg) {
+            const remoteQty = remoteItemsMap.get(itemKey);
+            if (remoteQty === undefined) {
+                throw new Error(
+                    `L'article (${itemKey}) a été retiré de la commande distante. Livraison annulée.`
+                );
+            }
+            if (allocatedQty !== remoteQty) {
+                throw new Error(
+                    `Quantité allouée incorrecte pour l'article (${itemKey}) : ` +
+                    `alloué ${allocatedQty}, requis ${remoteQty} d'après la commande distante. ` +
+                    'Livraison annulée.'
+                );
+            }
+        }
+        // Vérifier qu'aucun article distant n'est oublié
+        for (const [itemKey, remoteQty] of remoteItemsMap) {
+            const allocatedQty = itemAgg.get(itemKey) || 0;
+            if (allocatedQty !== remoteQty) {
+                throw new Error(
+                    `L'article (${itemKey}) est absent ou mal alloué dans cette livraison ` +
+                    `(alloué ${allocatedQty}, requis ${remoteQty} d'après la commande distante). ` +
+                    'Livraison annulée.'
+                );
+            }
+        }
+
+        // --- 3. Lecture et validation de chaque lot distant ---
+        const lotsUtilises = [];
+        const updatedLots = [];
+
+        for (const [lotId, la] of lotsAgg) {
+            const lotRef = v11GetRecordRef('lots', lotId);
+            const lotSnap = await transaction.get(lotRef);
+            if (!lotSnap.exists()) {
+                throw new Error(
+                    `Lot introuvable sur le serveur (#${String(lotId).slice(-6)}). ` +
+                    'La commande n\'a pas été modifiée.'
+                );
+            }
+            const lotData = lotSnap.data();
+            const lot = lotData && lotData.record;
+            if (!lot) {
+                throw new Error(
+                    `Données de lot corrompues (#${String(lotId).slice(-6)}). Livraison annulée.`
+                );
+            }
+
+            // Vérification arome/format depuis les données DISTANTES
+            const remoteNorm = normalize(lot.arome) + '|' + normalize(lot.format);
+            const expectedNorm = [...la.aromes][0] + '|' + [...la.formats][0];
+            if (remoteNorm !== expectedNorm) {
+                throw new Error(
+                    `Le lot #${String(lot.numLot || lotId).slice(-6)} ne correspond plus à l'article commandé ` +
+                    `(attendu « ${expectedNorm} », trouvé « ${remoteNorm} » à distance). Livraison annulée.`
+                );
+            }
+
+            // Vérification DLV (Date Limite de Vente) — si présente
+            const today = dateOnly(new Date());
+            if (lot.dlv) {
+                const dlvDate = dateOnly(lot.dlv);
+                if (Number.isNaN(dlvDate.getTime()) || dlvDate < today) {
+                    throw new Error(
+                        `Le lot #${String(lot.numLot || lotId).slice(-6)} a une DLV expirée ` +
+                        `(${lot.dlv}). Livraison annulée.`
+                    );
+                }
+            }
+
+            // Vérification DLC (Date Limite de Consommation)
+            if (!lot.dlc) {
+                throw new Error(
+                    `Le lot #${String(lot.numLot || lotId).slice(-6)} n'a pas de DLC ` +
+                    'et ne peut pas être livré.'
+                );
+            }
+            const dlcDate = dateOnly(lot.dlc);
+            if (Number.isNaN(dlcDate.getTime()) || dlcDate < today) {
+                throw new Error(
+                    `Le lot #${String(lot.numLot || lotId).slice(-6)} a une DLC expirée ` +
+                    `(${lot.dlc}). Livraison annulée.`
+                );
+            }
+
+            // Vérification stock suffisant depuis les données DISTANTES
+            const disponible = Number(lot.quantite);
+            if (!Number.isFinite(disponible) || disponible < la.totalQty) {
+                throw new Error(
+                    `Stock insuffisant sur le lot #${String(lot.numLot || lotId).slice(-6)} : ` +
+                    `disponible ${disponible}, requis ${la.totalQty}. Livraison annulée.`
+                );
+            }
+
+            lotsUtilises.push({
+                lotId: lot.id,
+                numLot: lot.numLot || lot.id,
+                arome: lot.arome,
+                format: lot.format,
+                dateProduction: lot.dateProduction || '',
+                dlv: lot.dlv || '',
+                dlc: lot.dlc || '',
+                quantite: la.totalQty
+            });
+            updatedLots.push({ ref: lotRef, lot, newQty: disponible - la.totalQty });
+        }
+
+        // --- 4. Écriture de la commande livrée ---
+        const updatedCommande = {
+            ...commande,
+            statut: 'livrée',
+            lotsUtilises
+        };
+        transaction.set(cmdRef, {
+            record: updatedCommande,
+            updatedAt: now,
+            _version: txVersion
+        });
+
+        // --- 5. Écriture / suppression de chaque lot ---
+        for (const { ref, lot, newQty } of updatedLots) {
+            if (newQty <= 0) {
+                transaction.delete(ref);
+            } else {
+                transaction.set(ref, {
+                    record: { ...lot, quantite: newQty },
+                    updatedAt: now,
+                    _version: txVersion + 1
+                });
+            }
+        }
+
+        return {
+            updatedCommande,
+            lotsUtilises,
+            lotResults: updatedLots.map(u => ({
+                lotId: u.lot.id,
+                numLot: u.lot.numLot || u.lot.id,
+                newQty: u.newQty
+            }))
+        };
+    });
+
+    // --- Réconciliation immédiate du localStorage / versions ---
+    // (sans passer par DB.set, sans enqueue de doublons)
+
+    // Met à jour la commande dans le cache local
+    const allCommandes = DB.get('commandes');
+    const cmdIdx = allCommandes.findIndex(c => c.id === commandeId);
+    if (cmdIdx !== -1) {
+        allCommandes[cmdIdx] = result.updatedCommande;
+    }
+    DB._applyRemoteSnapshot('commandes', allCommandes);
+
+    // Met à jour les versions commande
+    if (!V11._versions['commandes']) V11._versions['commandes'] = {};
+    V11._versions['commandes'][commandeId] = txVersion;
+
+    // Met à jour / supprime les lots dans le cache local
+    const allLots = DB.get('lots');
+    for (const info of result.lotResults) {
+        const lotIdx = allLots.findIndex(l => String(l.id) === String(info.lotId));
+        if (lotIdx !== -1) {
+            if (info.newQty <= 0) {
+                allLots.splice(lotIdx, 1);
+            } else {
+                allLots[lotIdx].quantite = info.newQty;
+            }
+        }
+    }
+    DB._applyRemoteSnapshot('lots', allLots);
+
+    // Met à jour les versions lots
+    if (!V11._versions['lots']) V11._versions['lots'] = {};
+    for (const info of result.lotResults) {
+        if (info.newQty <= 0) {
+            delete V11._versions['lots'][info.lotId];
+        } else {
+            V11._versions['lots'][info.lotId] = txVersion + 1;
+        }
+    }
+    v11SaveVersions();
+
+    return result.lotsUtilises;
 };
 
 const showLivraisonBouteillesModal = (commandeId) => {
@@ -5074,10 +5670,10 @@ const showLivraisonBouteillesModal = (commandeId) => {
             ? `<em class="text-muted">Aucun lot disponible</em>`
             : lotsDisponibles.map(lot => {
                 return `<div class="flex-between" style="padding: 4px 0;">
-                    <span style="font-size: 12px;">#${String(lot.numLot || lot.id).slice(-6)} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${lot.quantite})</em></span>
+                    <span style="font-size: 12px;">#${escapeHtml(String(lot.numLot || lot.id).slice(-6))} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${escapeHtml(String(lot.quantite))})</em></span>
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <input type="number" class="lot-qty-input" data-lot="${lot.id}" data-item="${item.aromeId}|${item.formatId}" value="0" min="0" max="${lot.quantite}" style="width: 60px;">
-                        <span style="font-size: 12px; color: var(--text-muted);">/ ${lot.quantite}</span>
+                        <input type="number" class="lot-qty-input" data-lot="${escapeHtml(lot.id)}" data-item="${escapeHtml(item.aromeId)}|${escapeHtml(item.formatId)}" value="0" min="0" max="${Number.isFinite(lot.quantite) ? lot.quantite : 0}" style="width: 60px;">
+                        <span style="font-size: 12px; color: var(--text-muted);">/ ${escapeHtml(String(lot.quantite))}</span>
                     </div>
                 </div>`;
             }).join('');
@@ -5089,16 +5685,16 @@ const showLivraisonBouteillesModal = (commandeId) => {
         return `<div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
             <div class="flex-between" style="margin-bottom: 8px;">
                 <strong>${escapeHtml(aromeNom)} ${escapeHtml(formatNom)}</strong>
-                <span style="color: var(--text-muted); font-size: 12px;">${item.quantite} commandées</span>
+                <span style="color: var(--text-muted); font-size: 12px;">${escapeHtml(String(item.quantite))} commandées</span>
             </div>
-            <div id="${totalId}" class="item-total-display" data-required="${item.quantite}">
-                <span style="font-size: 12px;">Alloué: <strong id="${totalId}-count">${filledTotal}</strong> / ${item.quantite}</span>
+            <div id="${totalId}" class="item-total-display" data-required="${Number.isFinite(item.quantite) ? item.quantite : 0}">
+                <span style="font-size: 12px;">Alloué: <strong id="${totalId}-count">${escapeHtml(String(filledTotal))}</strong> / ${escapeHtml(String(item.quantite))}</span>
             </div>
             <div style="margin-top: 8px;">${lotsRow}</div>
         </div>`;
     }).join('');
 
-    const validateAndDeliver = () => {
+    const validateAndDeliver = async () => {
         const inputs = document.querySelectorAll('.lot-qty-input');
         const allocations = {};
         const allocationsParLot = new Map();
@@ -5174,7 +5770,7 @@ const showLivraisonBouteillesModal = (commandeId) => {
             for (const { lotId } of group) {
                 const lot = lotsParId.get(String(lotId));
                 if (!lot || normalize(lot.arome) !== aromeAttendu || normalize(lot.format) !== formatAttendu) {
-                    showToast('Un lot alloué ne correspond pas à l’article commandé', 'error');
+                    showToast('Un lot alloué ne correspond pas à l\'article commandé', 'error');
                     return;
                 }
             }
@@ -5188,54 +5784,93 @@ const showLivraisonBouteillesModal = (commandeId) => {
             }
         }
 
-        const lotsUtilises = [];
-        Object.values(allocations).forEach(group => {
-            group.forEach(({ lotId, quantite }) => {
-                const lot = lotsParId.get(String(lotId));
-                lot.quantite = Number(lot.quantite) - quantite;
-                lotsUtilises.push({
-                    lotId: lot.id,
-                    numLot: lot.numLot || lot.id,
-                    arome: lot.arome,
-                    format: lot.format,
-                    dlc: lot.dlc || '',
-                    quantite
-                });
-            });
-        });
+        // --- Validation locale réussie → exécution atomique distante ---
 
-        if (allLots.some(lot => !Number.isFinite(Number(lot.quantite)) || Number(lot.quantite) < 0)) {
-            showToast('Stock invalide : livraison non effectuée', 'error');
-            return;
+        // État busy : désactiver le bouton Confirmer (anti-double-clic)
+        const btn = document.getElementById('confirm-livraison-btn');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Livraison en cours…';
         }
 
-        DB.set('lots', allLots.filter(lot => Number(lot.quantite) > 0));
-        commandesActuelles[cmdIndex].lotsUtilises = lotsUtilises;
-        DB.set('commandes', commandesActuelles);
-        updateCommandeStatut(commandeId, 'livrée', { fromLivraison: true });
-        modal.hide();
-        showToast('Commande livrée et stock déduit');
+        try {
+            // Construire le tableau d'allocations pour la transaction
+            // Chaque entrée porte l'itemKey (aromeId|formatId) pour la validation distante des articles
+            const allocationsForTx = [];
+            for (const [itemKey, group] of Object.entries(allocations)) {
+                const [aromeId, formatId] = itemKey.split('|');
+                const arome = aromes.find(a => a.id === aromeId);
+                const format = formats.find(f => f.id === formatId);
+                const expectedArome = arome?.nom || aromeId;
+                const expectedFormat = format?.nom || formatId;
+                for (const { lotId, quantite } of group) {
+                    allocationsForTx.push({ lotId, quantite, itemKey, expectedArome, expectedFormat });
+                }
+            }
 
-        confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
-            if (!ok) return;
-            prepareCommandeBLExport(commandeId);
-        });
+            // UNE transaction Firestore multi-documents atomique
+            await deliverCommandeTransaction(commandeId, allocationsForTx);
+
+            // Succès
+            modal.hide();
+            showToast('Commande livrée et stock déduit avec succès');
+
+            // Prompt de génération BL (préservé)
+            confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
+                if (!ok) return;
+                prepareCommandeBLExport(commandeId);
+            });
+        } catch (e) {
+            console.error('Échec de la transaction de livraison :', e);
+            // Détecter les erreurs réseau Firebase pour message utilisateur clair
+            const isNetworkError = e && (
+                e.code === 'unavailable' ||
+                e.code === 'deadline-exceeded' ||
+                /firestore.*(network|unavailable|timeout)/i.test(e.message || '') ||
+                /ERR_NETWORK|ERR_CONNECTION|fetch/i.test(e.message || '')
+            );
+            if (isNetworkError) {
+                showToast(
+                    'Erreur réseau : la transaction n\'a pas pu aboutir. ' +
+                    'Vérifiez votre connexion et réessayez. Aucun stock n\'a été déduit.',
+                    'error'
+                );
+            } else {
+                showToast(e.message || 'Erreur lors de la livraison. Aucune modification effectuée.', 'error');
+            }
+            // Restaurer le bouton en cas d'échec
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Confirmer la livraison';
+            }
+        }
+    };
+
+    const inputsByItemKey = () => {
+        const all = Array.from(document.querySelectorAll('.lot-qty-input'));
+        const map = {};
+        for (const inp of all) {
+            const key = inp.dataset.item;
+            if (key === undefined) continue;
+            if (!map[key]) map[key] = [];
+            map[key].push(inp);
+        }
+        return map;
     };
 
     const computeTotals = () => {
         let totalAlloueGlobal = 0;
         let ecarts = 0;
-        document.querySelectorAll('.lot-qty-input').forEach(input => {
-            const itemKey = input.dataset.item;
-            const itemInputs = document.querySelectorAll(`.lot-qty-input[data-item="${itemKey}"]`);
-            const total = Array.from(itemInputs).reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
+        const byKey = inputsByItemKey();
+        for (const [itemKey, itemInputs] of Object.entries(byKey)) {
+            const total = itemInputs.reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
             const totalEl = document.getElementById(`item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_') + '-count');
             if (totalEl) totalEl.textContent = total;
-        });
+        }
         getItems(cmd).forEach(item => {
             const itemKey = `${item.aromeId}|${item.formatId}`;
-            const itemInputs = document.querySelectorAll(`.lot-qty-input[data-item="${itemKey}"]`);
-            const total = Array.from(itemInputs).reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
+            const itemInputs = byKey[itemKey] || [];
+            const total = itemInputs.reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
             totalAlloueGlobal += total;
             if (total !== item.quantite) ecarts++;
         });
@@ -5352,17 +5987,17 @@ const showCommandeDetails = (id) => {
         return `<tr>
             <td>${escapeHtml(arome?.nom || '?')}</td>
             <td>${escapeHtml(format?.nom || '?')}</td>
-            <td>${item.quantite}</td>
+            <td>${escapeHtml(String(item.quantite))}</td>
         </tr>`;
     }).join('');
 
     const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0
         ? commande.lotsUtilises.map(lot => `
             <tr>
-                <td><a href="#" style="color: var(--primary); font-weight: 600;" onclick="event.preventDefault(); showLotTraceModal('${escapeHtml(String(lot.lotId))}')">#${String(lot.numLot || lot.lotId).slice(-6)}</a></td>
+                <td><a href="#" style="color: var(--primary); font-weight: 600;" data-click="show-lot-trace" data-id="${escapeHtml(String(lot.lotId))}" data-prevent>#${escapeHtml(String(lot.numLot || lot.lotId).slice(-6))}</a></td>
                 <td>${escapeHtml(lot.arome)}</td>
                 <td>${escapeHtml(lot.format)}</td>
-                <td>${lot.quantite}</td>
+                <td>${escapeHtml(String(lot.quantite))}</td>
             </tr>
         `).join('')
         : '';
@@ -5414,20 +6049,20 @@ const showCommandeDetails = (id) => {
 
     let actionsHtml = `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`;
     if (commande.statut === 'en_attente') {
-        actionsHtml = `<button class="btn btn-secondary" onclick="editCommande('${id}')">Modifier</button>`
-            + `<button class="btn btn-secondary" onclick="duplicateCommande('${id}')">Dupliquer</button>`
-            + `<button class="btn btn-success" onclick="marquerCommandeProduite('${id}')">Marquer produite</button>`
-            + `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
+        actionsHtml = `<button class="btn btn-secondary" data-click="edit-commande" data-id="${escapeHtml(id)}">Modifier</button>`
+            + `<button class="btn btn-secondary" data-click="duplicate-commande" data-id="${escapeHtml(id)}">Dupliquer</button>`
+            + `<button class="btn btn-success" data-click="marquer-commande-produite" data-id="${escapeHtml(id)}">Marquer produite</button>`
+            + `<button class="btn btn-danger" data-click="confirm-annuler-commande" data-id="${escapeHtml(id)}">Annuler la commande</button>` + actionsHtml;
     } else if (commande.statut === 'produite') {
-        actionsHtml = `<button class="btn btn-secondary" onclick="editCommande('${id}')">Modifier</button>`
-            + `<button class="btn btn-secondary" onclick="duplicateCommande('${id}')">Dupliquer</button>`
-            + `<button class="btn btn-success" onclick="showLivraisonBouteillesModal('${id}')">Livrer</button>`
-            + `<button class="btn btn-danger" onclick="confirmAnnulerCommande('${id}')">Annuler la commande</button>` + actionsHtml;
+        actionsHtml = `<button class="btn btn-secondary" data-click="edit-commande" data-id="${escapeHtml(id)}">Modifier</button>`
+            + `<button class="btn btn-secondary" data-click="duplicate-commande" data-id="${escapeHtml(id)}">Dupliquer</button>`
+            + `<button class="btn btn-success" data-click="livrer-commande" data-id="${escapeHtml(id)}">Livrer</button>`
+            + `<button class="btn btn-danger" data-click="confirm-annuler-commande" data-id="${escapeHtml(id)}">Annuler la commande</button>` + actionsHtml;
     } else if (commande.statut === 'livrée') {
-        actionsHtml = `<button class="btn btn-secondary" onclick="duplicateCommande('${id}')">Dupliquer</button>`
-            + `<button class="btn btn-secondary" onclick="restaurerCommande('${id}')">Restaurer</button>` + actionsHtml;
+        actionsHtml = `<button class="btn btn-secondary" data-click="duplicate-commande" data-id="${escapeHtml(id)}">Dupliquer</button>`
+            + `<button class="btn btn-secondary" data-click="restaurer-commande" data-id="${escapeHtml(id)}">Restaurer</button>` + actionsHtml;
     } else if (commande.statut === 'annulee') {
-        actionsHtml = `<button class="btn btn-secondary" onclick="restaurerCommande('${id}')">Restaurer</button>` + actionsHtml;
+        actionsHtml = `<button class="btn btn-secondary" data-click="restaurer-commande" data-id="${escapeHtml(id)}">Restaurer</button>` + actionsHtml;
     }
     modal.show(modalTitle, modalBody, actionsHtml);
 };
@@ -5521,7 +6156,7 @@ const renderArchives = () => {
                 </select>
                 <select id="filterArchiveClient" onchange="DB.setFilter('archive_client', this.value); renderArchives()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${escapeHtml(c.id)}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
                 <select id="filterArchiveStatut" onchange="DB.setFilter('archive_statut', this.value); renderArchives()">
                     <option value="">Tous les statuts</option>
@@ -5558,14 +6193,14 @@ const renderArchives = () => {
 
                                 return `
                                     <tr>
-                                        <td>${getCommandeNumero(cmd)}</td>
+                                        <td>${escapeHtml(getCommandeNumero(cmd))}</td>
                                         <td>${cmd.statut === 'annulee' ? '<span class="badge badge-annulee">Annulée</span>' : '<span class="badge badge-livree">Livrée</span>'}</td>
                                         <td>${escapeHtml(client?.societe || client?.nom || 'N/A')}</td>
                                         <td>${formatDate(cmd.dateCommande)}</td>
                                         <td>${formatDate(cmd.dateLivraison)}</td>
                                         <td>${articlesPreview}${safeItems.length > 2 ? '...' : ''} (${totalItems})</td>
                                         <td>
-                                            <button class="btn btn-sm btn-secondary" onclick="showCommandeDetails('${cmd.id}')">Détails</button>
+                                            <button class="btn btn-sm btn-secondary" data-click="show-commande-details" data-id="${escapeHtml(cmd.id)}">Détails</button>
                                         </td>
                                     </tr>
                                 `;
@@ -5668,7 +6303,7 @@ const renderLivraisons = () => {
                 </select>
                 <select id="filterLivraisonClient" onchange="DB.setFilter('livraison_client', this.value); renderLivraisons()">
                     <option value="">Tous les clients</option>
-                    ${clients.filter(c => c.actif).map(c => `<option value="${c.id}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
+                    ${clients.filter(c => c.actif).map(c => `<option value="${escapeHtml(c.id)}" ${savedFilterClient === c.id ? 'selected' : ''}>${escapeHtml(c.societe || c.nom)}</option>`).join('')}
                 </select>
                 ${(savedFilterYear || savedFilterClient || savedSearch) ? `<button class="btn btn-sm btn-secondary" onclick="resetLivraisonFilters()">Réinitialiser</button>` : ''}
             </div>
@@ -5691,7 +6326,7 @@ const renderLivraisons = () => {
 
                         return `<div class="commande-card">
                             <div class="commande-card-header">
-                                <span class="commande-card-numero">BL-${getBLNumero(liv)}</span>
+                                <span class="commande-card-numero">BL-${escapeHtml(String(getBLNumero(liv)))}</span>
                                 <span class="commande-card-date">${formatDate(liv.dateBL)}</span>
                             </div>
                             <div class="commande-card-name">${escapeHtml(client?.societe || client?.nom || 'N/A')}</div>
@@ -5701,9 +6336,9 @@ const renderLivraisons = () => {
                                 <span class="text-muted" style="font-size: 11px;">${escapeHtml(lastExport)}</span>
                             </div>
                             <div class="lot-card-actions" style="margin-top: 10px;">
-                                <button class="btn btn-sm btn-secondary" onclick="showLivraisonDetails('${liv.id}')">Détails</button>
-                                <button class="btn btn-sm btn-primary" onclick="showPrepareBLExportModal('${liv.id}')">Préparer / Exporter</button>
-                                <button class="btn btn-sm btn-danger" onclick="deleteLivraison('${liv.id}')">Supprimer</button>
+                                <button class="btn btn-sm btn-secondary" data-click="show-livraison-details" data-id="${escapeHtml(liv.id)}">Détails</button>
+                                <button class="btn btn-sm btn-primary" data-click="prepare-bl-export" data-id="${escapeHtml(liv.id)}">Préparer / Exporter</button>
+                                <button class="btn btn-sm btn-danger" data-click="delete-livraison" data-id="${escapeHtml(liv.id)}">Supprimer</button>
                             </div>
                         </div>`;
                     }).join('')}
@@ -5751,7 +6386,7 @@ const showLivraisonDetails = (id) => {
         : buildLotsTracesForCommande(commande);
     const traceHtml = lotsTraces.map(lot => `
         <tr>
-            <td>#${String(lot.numLot || lot.lotId || '').slice(-6)}</td>
+            <td>#${escapeHtml(String(lot.numLot || lot.lotId || '').slice(-6))}</td>
             <td>${escapeHtml(lot.arome || '?')}</td>
             <td>${escapeHtml(lot.format || '?')}</td>
             <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
@@ -5768,7 +6403,7 @@ const showLivraisonDetails = (id) => {
         <div class="commande-details">
             <p><strong>Client:</strong> ${escapeHtml(client?.societe || client?.nom || 'N/A')}</p>
             <p><strong>Date BL:</strong> ${formatDate(livraison.dateBL)}</p>
-            <p><strong>N° commande:</strong> #${commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5)}</p>
+            <p><strong>N° commande:</strong> #${escapeHtml(commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5))}</p>
             <p><strong>Dernier export:</strong> ${livraison.dateDernierExport ? formatDateTime(livraison.dateDernierExport) : 'Jamais exporté'}</p>
             <p><strong>Caisses IFCO:</strong> ${caissesVertes} verte(s), ${caissesNoires} noire(s)</p>
             ${livraison.notes ? `<p><strong>Notes internes:</strong> ${escapeHtml(livraison.notes)}</p>` : ''}
@@ -5806,9 +6441,9 @@ const showLivraisonDetails = (id) => {
             ` : '<p class="text-muted">Aucune trace de lot enregistrée pour ce BL.</p>'}
         </div>
     `, `
-        <button class="btn btn-danger" onclick="deleteLivraison('${id}')">Supprimer</button>
+        <button class="btn btn-danger" data-click="delete-livraison" data-id="${escapeHtml(id)}">Supprimer</button>
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
-        <button class="btn btn-primary" onclick="showPrepareBLExportModal('${id}')">Préparer / Exporter</button>
+        <button class="btn btn-primary" data-click="prepare-bl-export" data-id="${escapeHtml(id)}">Préparer / Exporter</button>
     `);
 };
 
@@ -5956,7 +6591,7 @@ const showPrepareBLExportModal = (livraisonId) => {
     const forcedCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
     const tracePreview = lotsTraces.slice(0, 4).map(lot => `
         <tr>
-            <td>#${String(lot.numLot || lot.lotId || '').slice(-6)}</td>
+            <td>#${escapeHtml(String(lot.numLot || lot.lotId || '').slice(-6))}</td>
             <td>${escapeHtml(lot.arome || '?')}</td>
             <td>${escapeHtml(lot.format || '?')}</td>
             <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
@@ -5968,7 +6603,7 @@ const showPrepareBLExportModal = (livraisonId) => {
         <div class="commande-details">
             <div class="workflow-summary">
                 <div><span>Client</span><strong>${escapeHtml(client?.societe || client?.nom || 'N/A')}</strong></div>
-                <div><span>Commande</span><strong>#${commande ? getCommandeNumero(commande) : String(livraison.commandeId).slice(-5)}</strong></div>
+                <div><span>Commande</span><strong>#${escapeHtml(commande ? getCommandeNumero(commande) : String(livraison.commandeId).slice(-5))}</strong></div>
                 <div><span>Articles</span><strong>${totalItems}</strong></div>
                 <div><span>Trace interne</span><strong>${totalTrace}</strong></div>
             </div>
@@ -6659,7 +7294,7 @@ const buildProductionResultsHtml = (plan) => {
                   Object.values(productionNecesaire).map(b => {
                       const arome = aromes.find(a => a.nom === b.aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
-                          <span><span class="color-dot" style="background: ${escapeHtml(arome?.couleur || '#ccc')}"></span>${escapeHtml(b.aromeNom)} ${escapeHtml(b.formatNom)}</span>
+                          <span><span class="color-dot" style="background: ${safeColor(arome?.couleur)}"></span>${escapeHtml(b.aromeNom)} ${escapeHtml(b.formatNom)}</span>
                           <div style="text-align: right;">
                               <div style="font-size: 12px; color: var(--text-muted);">Stock: ${b.disponible} bt</div>
                               <strong>À produire: ${b.aProduire} bt</strong>
@@ -6677,7 +7312,7 @@ const buildProductionResultsHtml = (plan) => {
                   Object.entries(litresParArome).map(([aromeNom, litres]) => {
                       const arome = aromes.find(a => a.nom === aromeNom);
                       return `<div class="flex-between" style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
-                          <span><span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>${escapeHtml(aromeNom)}</span>
+                          <span><span class="color-dot" style="background: ${safeColor(arome?.couleur)}"></span>${escapeHtml(aromeNom)}</span>
                           <strong>${litres.toFixed(1)} L</strong>
                       </div>`;
                   }).join('')}
@@ -6719,28 +7354,28 @@ const buildProductionResultsHtml = (plan) => {
                       return `
                         <div class="cuve-arome">
                           <div class="cuve-header">
-                            <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
+                            <span class="color-dot" style="background: ${safeColor(arome?.couleur)}"></span>
                             <strong>${escapeHtml(aromeNom)}</strong>
                             <span> - ${totalLitres.toFixed(1)}L (${recipients.length} récipient${recipients.length > 1 ? 's' : ''}, remplissage moyen ${remplissageMoyen.toFixed(0)}%)</span>
-                            <button class="btn btn-sm btn-success" onclick="confirmerProductionArome('${encodeURIComponent(aromeNom)}')">Produire tout l'arôme</button>
+                            <button class="btn btn-sm btn-success" data-click="confirmer-production-arome" data-arome="${escapeHtml(aromeNom)}">Produire tout l'arôme</button>
                           </div>
                           ${recipients.map((recipient, recipientIndex) => {
                               const fillPercent = recipient.capacite > 0 ? Math.round((recipient.litres / recipient.capacite) * 100) : 0;
                               return `
                             <div class="cuve-detail" data-arome="${escapeHtml(aromeNom)}" data-recipient-index="${recipientIndex}">
                               <div class="flex-between" style="margin-bottom: 8px;">
-                                <div class="cuve-title" style="margin-bottom: 0;">${escapeHtml(recipient.nom)} (${recipient.litres.toFixed(1)}L / ${recipient.capacite}L - ${fillPercent}%)</div>
-                                <button class="btn btn-sm btn-success" onclick="confirmerProduction('${encodeURIComponent(aromeNom)}', ${recipientIndex})">Produite</button>
+                                <div class="cuve-title" style="margin-bottom: 0;">${escapeHtml(recipient.nom)} (${escapeHtml(String(recipient.litres.toFixed(1)))}L / ${escapeHtml(String(recipient.capacite))}L - ${escapeHtml(String(fillPercent))}%)</div>
+                                <button class="btn btn-sm btn-success" data-click="confirmer-production" data-arome="${escapeHtml(aromeNom)}" data-index="${recipientIndex}">Produite</button>
                               </div>
                               <div class="cuve-slider-row">
-                                <input type="range" class="cuve-slider" min="0.5" max="${recipient.capacite}" step="0.5" value="${recipient.litres}" data-arome="${escapeHtml(aromeNom)}" data-recipient-index="${recipientIndex}">
+                                <input type="range" class="cuve-slider" min="0.5" max="${safeNumAttr(recipient.capacite)}" step="0.5" value="${safeNumAttr(recipient.litres)}" data-arome="${escapeHtml(aromeNom)}" data-recipient-index="${recipientIndex}">
                                 <span class="cuve-litres-display">${recipient.litres.toFixed(1)}L</span>
                               </div>
                               <ul class="ingredient-list">
                                 ${recipient.ingredients.map(ing => `
                                   <li>
                                     <span>${escapeHtml(ing.nom)}</span>
-                                    <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
+                                    <strong>${escapeHtml(String(ing.quantite))} ${escapeHtml(displayUnit(ing.unite))}</strong>
                                   </li>
                                 `).join('')}
                               </ul>
@@ -6784,7 +7419,7 @@ const buildManualGridHtml = () => {
                 ${aromesActifs.map(arome => `
                     <div class="production-manual-row">
                         <span class="production-manual-arome">
-                            <span class="color-dot" style="background: ${escapeHtml(arome.couleur || '#ccc')}"></span>
+                            <span class="color-dot" style="background: ${safeColor(arome.couleur)}"></span>
                             ${escapeHtml(arome.nom)}
                         </span>
                         <div class="production-manual-fields">
@@ -7198,9 +7833,8 @@ const getBottleInventoryItem = (items, format) => {
     return null;
 };
 
-const confirmerProduction = (encodedAromeNom, recipientIndex) => {
+const confirmerProduction = (aromeNom, recipientIndex) => {
     try {
-        const aromeNom = decodeURIComponent(encodedAromeNom || '');
         const formats = DB.get('formats') || [];
         const state = productionPlannerState;
 
@@ -7229,7 +7863,7 @@ const confirmerProduction = (encodedAromeNom, recipientIndex) => {
             return `
                 <div class="form-group" style="margin-bottom: 10px;">
                     <label>${escapeHtml(format.nom)}</label>
-                    <input type="number" min="0" step="1" name="format_${format.id}" value="${prefill}">
+                    <input type="number" min="0" step="1" data-format-id="${escapeHtml(String(format.id))}" value="${Number.isFinite(prefill) ? prefill : 0}">
                 </div>
             `;
         }).join('');
@@ -7256,7 +7890,7 @@ const confirmerProduction = (encodedAromeNom, recipientIndex) => {
             </form>
         `, `
             <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-            <button class="btn btn-success" onclick="validerProduction(event, '${encodeURIComponent(aromeNom)}', ${recipientIndex})">Confirmer la production</button>
+            <button class="btn btn-success" data-click="valider-production" data-arome="${escapeHtml(aromeNom)}" data-index="${recipientIndex}">Confirmer la production</button>
         `);
     } catch (e) {
         console.error('Error opening production modal:', e);
@@ -7264,9 +7898,8 @@ const confirmerProduction = (encodedAromeNom, recipientIndex) => {
     }
 };
 
-const confirmerProductionArome = (encodedAromeNom) => {
+const confirmerProductionArome = (aromeNom) => {
     try {
-        const aromeNom = decodeURIComponent(encodedAromeNom || '');
         const formats = DB.get('formats') || [];
         const aromes = DB.get('aromes') || [];
         const recettes = DB.get('recettes') || [];
@@ -7289,7 +7922,7 @@ const confirmerProductionArome = (encodedAromeNom) => {
             return `
                 <div class="form-group" style="margin-bottom: 10px;">
                     <label>${escapeHtml(format.nom)}</label>
-                    <input type="number" min="0" step="1" name="format_${format.id}" value="${prefill}">
+                    <input type="number" min="0" step="1" data-format-id="${escapeHtml(String(format.id))}" value="${Number.isFinite(prefill) ? prefill : 0}">
                 </div>
             `;
         }).join('');
@@ -7322,7 +7955,7 @@ const confirmerProductionArome = (encodedAromeNom) => {
             </form>
         `, `
             <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-            <button class="btn btn-success" onclick="validerProductionArome(event, '${encodeURIComponent(aromeNom)}')">Confirmer tout l'arôme</button>
+            <button class="btn btn-success" data-click="valider-production-arome" data-arome="${escapeHtml(aromeNom)}">Confirmer tout l'arôme</button>
         `, 'large');
     } catch (e) {
         console.error('Error opening grouped production modal:', e);
@@ -7460,10 +8093,9 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
     return { warnings };
 };
 
-const validerProductionArome = async (event, encodedAromeNom) => {
+const validerProductionArome = async (event, aromeNom) => {
     const reenable = disableSaveBtn(event);
     try {
-        const aromeNom = decodeURIComponent(encodedAromeNom || '');
         const form = document.getElementById('productionAromeForm');
         if (!form) {
             showToast('Données de production introuvables', 'error');
@@ -7476,7 +8108,7 @@ const validerProductionArome = async (event, encodedAromeNom) => {
         let litresProduit = 0;
 
         formats.forEach(format => {
-            const input = form.querySelector(`input[name="format_${format.id}"]`);
+            const input = [...form.querySelectorAll('[data-format-id]')].find(el => el.dataset.formatId === format.id);
             const quantite = Math.max(0, parseInt(input?.value, 10) || 0);
             if (quantite > 0) {
                 producedByFormat.push({ format, quantite });
@@ -7507,10 +8139,9 @@ const validerProductionArome = async (event, encodedAromeNom) => {
     }
 };
 
-const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
+const validerProduction = async (event, aromeNom, recipientIndex) => {
     const reenable = disableSaveBtn(event);
     try {
-        const aromeNom = decodeURIComponent(encodedAromeNom || '');
         const state = productionPlannerState;
         const form = document.getElementById('productionRecipientForm');
         if (!form || !state || !state.recipientsParArome || !state.recipientsParArome[aromeNom]) {
@@ -7530,7 +8161,7 @@ const validerProduction = async (event, encodedAromeNom, recipientIndex) => {
         let litresProduit = 0;
 
         formats.forEach(format => {
-            const input = form.querySelector(`input[name="format_${format.id}"]`);
+            const input = [...form.querySelectorAll('[data-format-id]')].find(el => el.dataset.formatId === format.id);
             const quantite = Math.max(0, parseInt(input?.value, 10) || 0);
             if (quantite > 0) {
                 producedByFormat.push({ format, quantite });
@@ -7679,7 +8310,7 @@ const renderInventaire = () => {
             <div class="flex-between">
                 <div>
                     <strong>Articles sous seuil</strong>
-                    <p style="margin-top: 4px; color: var(--text-light);">${alertItems.slice(0, 4).map(item => `${escapeHtml(item.nom)} (${item.quantite} ${displayUnit(item.unite)})`).join(', ')}${alertItems.length > 4 ? ` +${alertItems.length - 4}` : ''}</p>
+                    <p style="margin-top: 4px; color: var(--text-light);">${alertItems.slice(0, 4).map(item => `${escapeHtml(item.nom)} (${escapeHtml(String(item.quantite))} ${escapeHtml(displayUnit(item.unite))})`).join(', ')}${alertItems.length > 4 ? ` +${alertItems.length - 4}` : ''}</p>
                 </div>
                 <button class="btn btn-sm btn-secondary" onclick="DB.setFilter('inventaire_type', 'alerte'); renderInventaire()">Voir</button>
             </div>
@@ -7716,14 +8347,14 @@ const renderInventaire = () => {
                             <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
                                 <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
                                 <div class="inventaire-qty-controls">
-                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
-                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${item.quantite}" onchange="setInventaireQty('${item.id}', this.value)">
+                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="-1">−</button>
+                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${escapeHtml(item.id)}">
                                     <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
-                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', 1)">+</button>
+                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="1">+</button>
                                 </div>
                                 <div class="inventaire-item-actions">
-                                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('consommable', '${item.id}')">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteInventaireItem('${item.id}')">×</button>
+                                    <button class="btn btn-sm btn-secondary" data-click="show-inventaire-modal" data-type="consommable" data-id="${escapeHtml(item.id)}">✏️</button>
+                                    <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
                                 </div>
                             </div>
                             ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
@@ -7748,14 +8379,14 @@ const renderInventaire = () => {
                             <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
                                 <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
                                 <div class="inventaire-qty-controls">
-                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', -1)">−</button>
-                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${item.quantite}" onchange="setInventaireQty('${item.id}', this.value)">
+                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="-1">−</button>
+                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${escapeHtml(item.id)}">
                                     <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
-                                    <button class="btn btn-sm btn-secondary" onclick="updateInventaireQty('${item.id}', 1)">+</button>
+                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="1">+</button>
                                 </div>
                                 <div class="inventaire-item-actions">
-                                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('equipement', '${item.id}')">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteInventaireItem('${item.id}')">×</button>
+                                    <button class="btn btn-sm btn-secondary" data-click="show-inventaire-modal" data-type="equipement" data-id="${escapeHtml(item.id)}">✏️</button>
+                                    <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
                                 </div>
                             </div>
                             ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
@@ -7803,7 +8434,7 @@ const showInventaireModal = (categorie, id = null) => {
             <div class="form-row">
                 <div class="form-group">
                     <label>Quantité</label>
-                    <input type="number" name="quantite" value="${item?.quantite || 0}" min="0" required>
+                    <input type="number" name="quantite" value="${escapeHtml(safeNumAttr(item?.quantite))}" min="0" required>
                 </div>
                 <div class="form-group">
                     <label>Unité</label>
@@ -7820,7 +8451,7 @@ const showInventaireModal = (categorie, id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveInventaireItem(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-inventaire-item" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
@@ -7928,7 +8559,7 @@ const renderParametres = () => {
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Employés</h3>
-                    <button class="btn btn-sm btn-primary" onclick="showEmployeModal()">+ Ajouter</button>
+                    <button class="btn btn-sm btn-primary" data-click="show-employe-modal">+ Ajouter</button>
                 </div>
                 <ul class="settings-list">
                     ${employes.length === 0 ? '<li class="settings-item text-muted">Aucun employé</li>' :
@@ -7940,8 +8571,8 @@ const renderParametres = () => {
                                 <span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
-                                <button class="btn btn-sm btn-secondary" onclick="showEmployeModal('${e.id}')">Modifier</button>
-                                <button class="btn btn-sm btn-danger" onclick="deleteEmploye('${e.id}')">Supprimer</button>
+                                 <button class="btn btn-sm btn-secondary" data-click="show-employe-modal" data-id="${escapeHtml(e.id)}">Modifier</button>
+                                 <button class="btn btn-sm btn-danger" data-click="delete-employe" data-id="${escapeHtml(e.id)}">Supprimer</button>
                             </div>
                         </li>
                       `).join('')}
@@ -7951,20 +8582,20 @@ const renderParametres = () => {
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Arômes</h3>
-                    <button class="btn btn-sm btn-primary" onclick="showAromeModal()">+ Ajouter</button>
+                     <button class="btn btn-sm btn-primary" data-click="show-arome-modal">+ Ajouter</button>
                 </div>
                 <ul class="settings-list">
                     ${aromes.length === 0 ? '<li class="settings-item text-muted">Aucun arôme</li>' :
                       aromes.map(a => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <span class="color-dot" style="background: ${escapeHtml(a.couleur || '#ccc')}"></span>
+                                <span class="color-dot" style="background: ${safeColor(a.couleur)}"></span>
                                 <span>${escapeHtml(a.nom)}</span>
                                 <span class="badge ${a.actif ? 'badge-success' : 'badge-default'}">${a.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
-                                <button class="btn btn-sm btn-secondary" onclick="showAromeModal('${a.id}')">Modifier</button>
-                                <button class="btn btn-sm btn-danger" onclick="deleteArome('${a.id}')">Supprimer</button>
+                                 <button class="btn btn-sm btn-secondary" data-click="show-arome-modal" data-id="${escapeHtml(a.id)}">Modifier</button>
+                                 <button class="btn btn-sm btn-danger" data-click="delete-arome" data-id="${escapeHtml(a.id)}">Supprimer</button>
                             </div>
                         </li>
                       `).join('')}
@@ -7974,7 +8605,7 @@ const renderParametres = () => {
             <div class="settings-card">
                 <div class="settings-card-header">
                     <h3>Formats</h3>
-                    <button class="btn btn-sm btn-primary" onclick="showFormatModal()">+ Ajouter</button>
+                     <button class="btn btn-sm btn-primary" data-click="show-format-modal">+ Ajouter</button>
                 </div>
                 <ul class="settings-list">
                     ${formats.length === 0 ? '<li class="settings-item text-muted">Aucun format</li>' :
@@ -7986,8 +8617,8 @@ const renderParametres = () => {
                                 <span class="badge ${f.actif ? 'badge-success' : 'badge-default'}">${f.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
-                                <button class="btn btn-sm btn-secondary" onclick="showFormatModal('${f.id}')">Modifier</button>
-                                <button class="btn btn-sm btn-danger" onclick="deleteFormat('${f.id}')">Supprimer</button>
+                                 <button class="btn btn-sm btn-secondary" data-click="show-format-modal" data-id="${escapeHtml(f.id)}">Modifier</button>
+                                 <button class="btn btn-sm btn-danger" data-click="delete-format" data-id="${escapeHtml(f.id)}">Supprimer</button>
                             </div>
                         </li>
                       `).join('')}
@@ -7998,8 +8629,8 @@ const renderParametres = () => {
                 <div class="settings-card-header">
                     <h3>Recettes</h3>
                     <div style="display: flex; gap: 8px;">
-                        <button class="btn btn-sm btn-secondary" onclick="syncRecettesInventaire()">Synchroniser inventaire</button>
-                        <button class="btn btn-sm btn-primary" onclick="showRecetteModal()">+ Ajouter</button>
+                        <button class="btn btn-sm btn-secondary" data-click="sync-recettes-inventaire">Synchroniser inventaire</button>
+                        <button class="btn btn-sm btn-primary" data-click="show-recette-modal">+ Ajouter</button>
                     </div>
                 </div>
                 <ul class="settings-list">
@@ -8009,13 +8640,13 @@ const renderParametres = () => {
                           return `
                             <li class="settings-item">
                                 <div class="settings-item-info">
-                                    <span class="color-dot" style="background: ${arome?.couleur || '#ccc'}"></span>
+                                    <span class="color-dot" style="background: ${safeColor(arome?.couleur)}"></span>
                                     <span>${escapeHtml(r.nom)}</span>
                                     <span class="text-muted">(${r.ingredients.length} ingrédient${r.ingredients.length > 1 ? 's' : ''})</span>
                                 </div>
                                 <div class="settings-item-actions">
-                                    <button class="btn btn-sm btn-secondary" onclick="showRecetteModal('${r.id}')">Modifier</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteRecette('${r.id}')">Supprimer</button>
+                                    <button class="btn btn-sm btn-secondary" data-click="show-recette-modal" data-id="${escapeHtml(r.id)}">Modifier</button>
+                                    <button class="btn btn-sm btn-danger" data-click="delete-recette" data-id="${escapeHtml(r.id)}">Supprimer</button>
                                 </div>
                             </li>
                           `;
@@ -8027,11 +8658,11 @@ const renderParametres = () => {
                 <div class="settings-card-header">
                     <h3>Clients</h3>
                     <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        <button class="btn btn-sm btn-secondary" onclick="exportClientsExcel()">Exporter Excel</button>
-                        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('importClientsFile').click()">Importer Excel</button>
-                        <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" onchange="importClientsExcel(event)">
-                        <button class="btn btn-sm btn-primary" onclick="showClientModal()">+ Ajouter</button>
-                        <button class="btn btn-sm btn-danger" onclick="resetClients()">Effacer tout</button>
+                        <button class="btn btn-sm btn-secondary" data-click="export-clients-excel">Exporter Excel</button>
+                        <button class="btn btn-sm btn-secondary" data-click="trigger-import-clients">Importer Excel</button>
+                        <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" data-change="import-clients-excel">
+                        <button class="btn btn-sm btn-primary" data-click="show-client-modal">+ Ajouter</button>
+                        <button class="btn btn-sm btn-danger" data-click="reset-clients">Effacer tout</button>
                     </div>
                 </div>
                 <ul class="settings-list">
@@ -8044,8 +8675,8 @@ const renderParametres = () => {
                                 <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : (c.ponctuel ? 'Ponctuel' : 'Inactif')}</span>
                             </div>
                             <div class="settings-item-actions">
-                                <button class="btn btn-sm btn-secondary" onclick="showClientModal('${c.id}')">Modifier</button>
-                                <button class="btn btn-sm btn-danger" onclick="deleteClient('${c.id}')">Supprimer</button>
+                                <button class="btn btn-sm btn-secondary" data-click="show-client-modal" data-id="${escapeHtml(c.id)}">Modifier</button>
+                                <button class="btn btn-sm btn-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>
                             </div>
                         </li>
                       `).join('')}
@@ -8069,17 +8700,20 @@ const renderParametres = () => {
                 </p>
             </div>
 
-            ${window.StressTest ? `
-            <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--warning);">
+            <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
-                    <h3>🔧 Outils de développement</h3>
+                    <h3>Compte</h3>
                 </div>
-                <div style="padding: 12px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
-                    <button class="btn btn-warning" onclick="window.StressTest.attachUI(); window.StressTest.run()">Lancer le stress test</button>
-                    <span style="font-size: 12px; color: var(--text-light);">Teste la performance, les workflows et la résilience de l'application. Sauvegarde automatique des données.</span>
+                <div style="padding: 12px;">
+                    <button class="btn btn-secondary" id="logoutBtnSettings" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        Déconnexion
+                    </button>
+                    <p style="margin-top: 8px; font-size: 12px; color: var(--text-light);">
+                        Fermer la session et revenir à l'écran de verrouillage.
+                    </p>
                 </div>
             </div>
-            ` : ''}
 
             <div class="settings-card" style="grid-column: 1 / -1; border: 2px solid var(--danger);">
                 <div class="settings-card-header">
@@ -8096,6 +8730,12 @@ const renderParametres = () => {
     `;
 
     safeRender(html);
+
+    // Attacher l'écouteur du bouton Déconnexion (rendu via innerHTML)
+    const logoutSettingsBtn = document.getElementById('logoutBtnSettings');
+    if (logoutSettingsBtn) {
+        logoutSettingsBtn.addEventListener('click', window.handleLogout);
+    }
 };
 
 // Settings - Counters
@@ -8132,7 +8772,7 @@ const showEmployeModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveEmploye(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-employe" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
@@ -8212,7 +8852,7 @@ const showAromeModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveArome(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-arome" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
@@ -8303,7 +8943,7 @@ const showFormatModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveFormat(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-format" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
@@ -8386,7 +9026,7 @@ const showRecetteModal = (id = null) => {
     const ingredientsHtml = recette ? recette.ingredients.map((ing, idx) => `
         <div class="ingredient-row">
             <input type="text" name="ingredients[${idx}][nom]" value="${escapeHtml(ing.nom)}" placeholder="Ingrédient" list="${suggestionsId}" required>
-            <input type="number" name="ingredients[${idx}][quantite]" value="${ing.quantite}" placeholder="Qté" step="0.01" min="0.01" required>
+            <input type="number" name="ingredients[${idx}][quantite]" value="${escapeHtml(safeNumAttr(ing.quantite))}" placeholder="Qté" step="0.01" min="0.01" required>
             <input type="text" name="ingredients[${idx}][unite]" value="${escapeHtml(displayUnit(ing.unite))}" placeholder="Unité" required>
             <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
         </div>
@@ -8411,9 +9051,9 @@ const showRecetteModal = (id = null) => {
                           if (recette && recette.aromeId === a.id) return true;
                           const existingRecipe = recettes.find(r => r.aromeId === a.id);
                           return !existingRecipe;
-                      }).map(a => `<option value="${a.id}" ${recette?.aromeId === a.id ? 'selected' : ''}>${escapeHtml(a.nom)}</option>`).join('')}
+                      }).map(a => `<option value="${escapeHtml(a.id)}" ${recette?.aromeId === a.id ? 'selected' : ''}>${escapeHtml(a.nom)}</option>`).join('')}
                 </select>
-                ${id ? '<input type="hidden" name="aromeId" value="' + recette.aromeId + '">' : ''}
+                ${id ? '<input type="hidden" name="aromeId" value="' + escapeHtml(recette.aromeId) + '">' : ''}
             </div>
             <div class="form-group">
                 <label>Ingrédients (pour 1 litre de cet arôme)</label>
@@ -8426,7 +9066,7 @@ const showRecetteModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveRecette(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-recette" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
@@ -8688,7 +9328,7 @@ const showClientModal = (id = null) => {
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" onclick="saveClient(event, '${id || ''}')">Enregistrer</button>
+        <button class="btn btn-primary" data-click="save-client" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
@@ -8914,12 +9554,23 @@ const importAllData = (event) => {
     reader.onload = (e) => {
         try {
             const data = JSON.parse(e.target.result);
-            let count = 0;
-            ALL_TABLES.forEach(table => {
-                if (data[table] && Array.isArray(data[table])) {
-                    DB.set(table, data[table]);
-                    count++;
+            const tablesToImport = ALL_TABLES.filter(table => Array.isArray(data[table]));
+
+            for (const table of tablesToImport) {
+                const validation = v11ValidateTable(table, data[table]);
+                if (!validation.valid) {
+                    showToast(
+                        `Restauration annulée : données invalides dans « ${table} » (${validation.reason}).`,
+                        'error'
+                    );
+                    return;
                 }
+            }
+
+            let count = 0;
+            tablesToImport.forEach(table => {
+                DB.set(table, data[table]);
+                count++;
             });
             showToast(`${count} tables restaurées`);
             router();
@@ -8947,12 +9598,20 @@ const closeBottomSheet = () => {
 // V11 — Online listener: s'il y a queue, bootstrap ou schéma non prêt,
 // appelle v11BootFirebase() (qui sérialise via _bootPromise), sinon flush.
 // Ne déclenche jamais loadFromFirebase legacy pour une queue v11 pending.
+// GARDE stricte : si non authentifié, sortir immédiatement sans réinitialiser
+// Firebase — le SDK est déjà chargé, c'est juste l'utilisateur qui n'est pas
+// connecté. Initialiser dynamiquement UNIQUEMENT si les objets SDK n'existent pas.
 if (!window.__v11OnlineListenerRegistered) {
     window.__v11OnlineListenerRegistered = true;
     window.addEventListener('online', async () => {
-        if (!window.firebaseReady || !window.firebaseDb) {
-            const ok = await window.initFirebase?.();
-            if (!ok) return;
+        // Si pas authentifié, rien à synchroniser
+        if (!window.firebaseReady) {
+            // SDK jamais chargé (module script a échoué) → tenter init
+            // pour permettre une reconnexion ultérieure
+            if (!window.firebaseDb && !window.firebaseAuth) {
+                await window.initFirebase?.();
+            }
+            return; // Jamais de V11 sans session
         }
         const queue = v11GetQueue();
         const needsBoot = queue.length > 0 || V11._bootstrapping || V11._migrating || !V11._isReady;
@@ -8966,8 +9625,222 @@ if (!window.__v11OnlineListenerRegistered) {
     });
 }
 
-// Initialize app
-//
+// =============================================================================
+// Authentification — Login / Logout
+// =============================================================================
+
+// Connexion : appelée depuis le formulaire de l'écran de verrouillage.
+// Lit le mot de passe saisi, appelle Firebase Auth (email technique fixe),
+// affiche les erreurs en français sans révéler l'adresse email.
+window.handleLogin = async () => {
+    const passwordInput = document.getElementById('loginPassword');
+    const errorEl = document.getElementById('loginError');
+    const busyEl = document.getElementById('loginBusy');
+    const btn = document.getElementById('loginBtn');
+
+    if (!passwordInput) return;
+
+    // Si le SDK Auth n'a jamais été chargé (module script a échoué),
+    // tenter un init dynamique avant d'abandonner
+    if (!window.firebaseAuth) {
+        try {
+            await window.initFirebase?.();
+        } catch (_) {}
+        if (!window.firebaseAuth) {
+            // Auth toujours indisponible même après tentative
+            if (errorEl) { errorEl.textContent = 'Service d\'authentification indisponible. Vérifiez votre connexion réseau.'; errorEl.style.display = 'block'; }
+            return;
+        }
+    }
+
+    const password = passwordInput.value;
+    if (!password || !password.trim()) {
+        if (errorEl) { errorEl.textContent = 'Veuillez saisir le mot de passe.'; errorEl.style.display = 'block'; }
+        passwordInput.focus();
+        return;
+    }
+
+    // État « en cours »
+    if (errorEl) { errorEl.textContent = ''; errorEl.style.display = 'none'; }
+    if (busyEl) busyEl.style.display = 'flex';
+    if (btn) btn.style.display = 'none';
+    passwordInput.disabled = true;
+
+    try {
+        await window.firebaseAuth.signIn(password);
+        // Le callback onAuthStateChanged dans le module Firebase gère la suite
+        // (masquer l'écran, lancer l'app)
+    } catch (e) {
+        // Restaurer le formulaire
+        passwordInput.disabled = false;
+        if (busyEl) busyEl.style.display = 'none';
+        if (btn) btn.style.display = 'inline-flex';
+        passwordInput.focus();
+        passwordInput.select();
+
+        // Traduire les erreurs Firebase en français sans révéler l'email technique
+        const code = e?.code || '';
+        let message = 'Erreur de connexion.';
+        if (code === 'auth/wrong-password' || code === 'auth/invalid-credential' || code === 'auth/user-not-found') {
+            message = 'Mot de passe incorrect.';
+        } else if (code === 'auth/too-many-requests') {
+            message = 'Trop de tentatives. Réessayez plus tard.';
+        } else if (code === 'auth/network-request-failed' || code === 'auth/internal-error') {
+            message = 'Erreur réseau. Vérifiez votre connexion.';
+        } else if (code === 'auth/invalid-email') {
+            message = 'Identifiant invalide.';
+        } else {
+            message = 'Erreur de connexion. Vérifiez votre mot de passe et votre réseau.';
+        }
+        if (errorEl) { errorEl.textContent = message; errorEl.style.display = 'block'; }
+        console.error('[Login]', code, e?.message);
+    }
+};
+
+// Déconnexion : délègue tout le nettoyage au callback onAuthStateChanged
+// via resetAppSession(). SignOut() déclenche le callback user=null qui
+// exécute resetAppSession (idempotent). handleLogout n'effectue aucun
+// cleanup manuel — plus de duplication ni de double incrément.
+window.handleLogout = async () => {
+    const ok = await confirmDialog('Voulez-vous vraiment vous déconnecter ?', {
+        danger: true,
+        confirmLabel: 'Se déconnecter',
+        cancelLabel: 'Annuler',
+        title: 'Déconnexion'
+    });
+    if (!ok) return;
+
+    // La déconnexion Firebase Auth déclenche onAuthStateChanged(user=null)
+    // dont le callback appelle resetAppSession() qui nettoie tout
+    // (firebaseReady, _appStarted, sessionGen, listeners, contenu, login).
+    // Aucun cleanup manuel ici — resetAppSession est idempotent.
+    if (window.firebaseAuth) {
+        try {
+            await window.firebaseAuth.signOut();
+        } catch (e) {
+            console.error('[Logout]', e);
+            showToast('Erreur lors de la déconnexion. Réessayez.', 'error');
+        }
+    } else {
+        // Pas de Firebase — réinitialisation manuelle
+        resetAppSession();
+    }
+};
+
+// Attacher les écouteurs de l'écran de connexion (appelé au démarrage)
+const initLoginListeners = () => {
+    const btn = document.getElementById('loginBtn');
+    if (btn) btn.addEventListener('click', window.handleLogin);
+
+    const passwordInput = document.getElementById('loginPassword');
+    if (passwordInput) {
+        passwordInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                window.handleLogin();
+            }
+        });
+    }
+
+    // Bouton Déconnexion dans l'en-tête
+    const logoutHeaderBtn = document.getElementById('logoutBtnHeader');
+    if (logoutHeaderBtn) {
+        logoutHeaderBtn.addEventListener('click', window.handleLogout);
+    }
+};
+
+// Exposer v11StopAllListeners pour le module Firebase Auth
+window.v11StopAllListeners = v11StopAllListeners;
+
+// =============================================================================
+// Verrouillage/déverrouillage du shell — zéro flash, zéro exposition aux
+// lecteurs d'écran avant authentification.
+// =============================================================================
+const lockShell = () => {
+    document.body.classList.add('body--locked');
+    // Inerter le shell pour les lecteurs d'écran
+    document.querySelector('.sidebar')?.setAttribute('aria-hidden', 'true');
+    document.querySelector('.main-content')?.setAttribute('aria-hidden', 'true');
+    document.querySelector('.bottom-nav')?.setAttribute('aria-hidden', 'true');
+};
+const unlockShell = () => {
+    document.body.classList.remove('body--locked');
+    document.querySelector('.sidebar')?.removeAttribute('aria-hidden');
+    document.querySelector('.main-content')?.removeAttribute('aria-hidden');
+    document.querySelector('.bottom-nav')?.removeAttribute('aria-hidden');
+};
+// Exposer pour le module Firebase et initFirebase dynamique
+window.lockShell = lockShell;
+window.unlockShell = unlockShell;
+
+// =============================================================================
+// Reset centralisé et idempotent de session — appelé par les deux callbacks
+// onAuthStateChanged (module index + fallback initFirebase) quand user === null.
+// Garantit : _appStarted=false, incrément unique de session, stop listeners,
+// nettoyage du contenu métier, verrouillage shell/login, unhide sync.
+// Le garde-fou _resetLock évite le double traitement lors d'un logout volontaire
+// où signOut() et handleLogout bis se chevaucheraient.
+// =============================================================================
+let _resetLock = false;
+const resetAppSession = () => {
+    if (_resetLock) return;
+    _resetLock = true;
+
+    // 1. Flag d'état — invalide toute session
+    window.firebaseReady = false;
+    window._appStarted = false;
+    _appSessionGen++;
+
+    // 2. Arrêt des listeners temps réel et debounce
+    v11StopAllListeners();
+    if (V11._debounceTimer) { clearTimeout(V11._debounceTimer); V11._debounceTimer = null; }
+
+    // 3. Verrouillage du shell (aria-hidden + body--locked)
+    lockShell();
+
+    // 4. Nettoyage du contenu métier
+    const content = document.getElementById('content');
+    if (content) content.innerHTML = '';
+    window.location.hash = '';
+
+    // 5. Cacher le bouton Déconnexion dans l'en-tête
+    const logoutBtn = document.getElementById('logoutBtnHeader');
+    if (logoutBtn) logoutBtn.style.display = 'none';
+
+    // 6. Afficher l'écran de verrouillage, réinitialiser le formulaire
+    const loginScreen   = document.getElementById('loginScreen');
+    const loginLoading  = document.getElementById('loginLoading');
+    const loginForm     = document.getElementById('loginForm');
+    const loginPassword = document.getElementById('loginPassword');
+    const loginError    = document.getElementById('loginError');
+    const loginBusy     = document.getElementById('loginBusy');
+    const loginBtn      = document.getElementById('loginBtn');
+
+    if (loginPassword) { loginPassword.value = ''; loginPassword.disabled = false; }
+    if (loginError)    { loginError.textContent = ''; loginError.style.display = 'none'; }
+    if (loginBusy)     loginBusy.style.display = 'none';
+    if (loginBtn)      loginBtn.style.display = 'inline-flex';
+    if (loginLoading)  loginLoading.style.display = 'none';
+    if (loginForm)     loginForm.style.display = 'block';
+    if (loginScreen)   loginScreen.style.display = 'flex';
+
+    // 7. Cacher le bouton Sync
+    const syncBtn = document.getElementById('syncBtn');
+    if (syncBtn) syncBtn.style.display = 'none';
+
+    // Libérer le verrou après un délai pour absorber un éventuel
+    // second appel dans la même séquence (ex. module + fallback)
+    setTimeout(() => { _resetLock = false; }, 500);
+};
+// Exposée pour le module Firebase (index.html) qui ne peut pas accéder
+// aux const de app.js, et pour le fallback initFirebase en cas de signOut
+// sans callback (pas de Firebase disponible).
+window.resetAppSession = resetAppSession;
+
+// =============================================================================
+// Démarrage de l'application (appelé après authentification)
+// =============================================================================
+
 // Rendu « local d'abord » : on affiche l'écran immédiatement à partir des données
 // locales (localStorage), SANS attendre le réseau. Sinon, quand Firebase est lent
 // (réseau mobile) le premier rendu est retardé et l'app démarre sur un dashboard
@@ -8980,18 +9853,22 @@ const bootLocal = () => {
     try { migrateClientTarifs(); } catch (e) { console.warn('[migration] initiale', e); }
     // Renumérote les anciens lots « _ab12… » en numéros séquentiels (idempotent)
     try { migrateLotNumeros(); } catch (e) { console.warn('[migration] lots', e); }
-    // Bottom sheet listeners
-    document.getElementById('moreNavBtn')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        toggleBottomSheet();
-    });
-    document.getElementById('bottomSheetOverlay')?.addEventListener('click', closeBottomSheet);
-    document.querySelectorAll('.bottom-sheet-item').forEach(item => {
-        item.addEventListener('click', closeBottomSheet);
-    });
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeBottomSheet();
-    });
+    // Bottom sheet listeners (idempotent au relogin)
+    if (!window._bottomSheetListenersDone) {
+        window._bottomSheetListenersDone = true;
+        document.getElementById('moreNavBtn')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            toggleBottomSheet();
+        });
+        document.getElementById('bottomSheetOverlay')?.addEventListener('click', closeBottomSheet);
+        document.querySelectorAll('.bottom-sheet-item').forEach(item => {
+            item.addEventListener('click', closeBottomSheet);
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeBottomSheet();
+        });
+    }
+    initEventDelegation();
     router();
 };
 
@@ -9000,15 +9877,46 @@ const bootFirebaseSync = async () => {
     await v11BootFirebase();
 };
 
-// app.js s'exécute pendant le parsing du HTML : le shell (#content, nav, header) est
-// déjà présent (défini plus haut dans index.html), on rend donc tout de suite — avant
-// même que le module Firebase (chargé en différé) ne bloque DOMContentLoaded.
-bootLocal();
+// Fonction idempotente appelée par le module Firebase après authentification
+// restaurée (session persistante) ou réussie (login). Exécute le rendu local
+// puis la synchronisation Firebase en arrière-plan.
+window.startApp = () => {
+    // Éviter le double démarrage
+    if (window._appStarted) return;
+    window._appStarted = true;
 
-// La synchronisation Firebase attend que le module se soit exécuté : DOMContentLoaded
-// se déclenche après les scripts différés (dont le module Firebase).
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootFirebaseSync, { once: true });
-} else {
+    // Attacher les écouteurs de connexion/déconnexion si pas déjà fait
+    if (!window._loginListenersInitialized) {
+        initLoginListeners();
+        window._loginListenersInitialized = true;
+    }
+
+    // Rendre visible le bouton Déconnexion dans l'en-tête
+    const logoutBtn = document.getElementById('logoutBtnHeader');
+    if (logoutBtn) logoutBtn.style.display = 'inline-flex';
+
+    // Boot local d'abord (rendu immédiat depuis localStorage)
+    bootLocal();
+
+    // Boot Firebase / V11 en arrière-plan
     bootFirebaseSync();
+};
+
+// --- Amorçage initial : attacher les écouteurs de connexion ---
+// On les attache dès que le DOM est prêt pour que le formulaire soit
+// fonctionnel quand le module Firebase le révèle.
+// Le flag _loginListenersInitialized évite les doublons si startApp
+// est appelé avant DOMContentLoaded (session persistée).
+if (!window._loginListenersInitialized) {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!window._loginListenersInitialized) {
+                initLoginListeners();
+                window._loginListenersInitialized = true;
+            }
+        }, { once: true });
+    } else {
+        initLoginListeners();
+        window._loginListenersInitialized = true;
+    }
 }

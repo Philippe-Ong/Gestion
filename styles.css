@@ -2144,6 +2144,159 @@ input[type="checkbox"] {
     }
 }
 
+/* ── Verrouillage du shell (écran de connexion actif) ──────── */
+.body--locked .sidebar,
+.body--locked .main-content,
+.body--locked .bottom-nav {
+    display: none;
+}
+
+.body--locked .login-screen {
+    display: flex; /* toujours visible quand body est locked */
+}
+
+/* ── Écran de connexion / verrouillage ────────────────────── */
+.login-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    padding: 20px;
+}
+
+.login-card {
+    background: var(--white);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    padding: 40px 36px 32px;
+    width: 100%;
+    max-width: 380px;
+    text-align: center;
+}
+
+.login-logo {
+    margin-bottom: 28px;
+}
+
+.login-logo h1 {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--primary-darker);
+    letter-spacing: -0.5px;
+    line-height: 1.1;
+}
+
+.login-logo span {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-light);
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    margin-top: 4px;
+}
+
+.login-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 20px 0;
+    color: var(--text-light);
+    font-size: 14px;
+}
+
+.login-loading .spinner {
+    width: 20px;
+    height: 20px;
+    border-width: 2.5px;
+}
+
+.login-form {
+    text-align: left;
+}
+
+.login-form .form-group {
+    margin-bottom: 20px;
+}
+
+.login-password-input {
+    text-align: center;
+    font-size: 18px;
+    letter-spacing: 0.15em;
+    padding: 12px 14px;
+    font-weight: 600;
+}
+
+.login-password-input::placeholder {
+    letter-spacing: 0;
+    font-weight: 500;
+    font-size: 14px;
+}
+
+.btn-login {
+    width: 100%;
+    height: 44px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}
+
+.login-busy {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px 0;
+    color: var(--text-light);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.login-error {
+    display: none;
+    background: var(--bg-danger);
+    color: var(--danger-dark);
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    line-height: 1.4;
+    border: 1px solid var(--danger-light);
+}
+
+.login-error:empty {
+    display: none;
+}
+
+/* ── Login screen : responsive mobile ─────────────────────── */
+@media (max-width: 768px) {
+    .login-card {
+        padding: 32px 24px 28px;
+        max-width: 100%;
+        box-shadow: var(--shadow-md);
+    }
+
+    .login-logo h1 {
+        font-size: 28px;
+    }
+
+    .login-password-input {
+        font-size: 16px;
+        padding: 14px 12px;
+    }
+
+    .btn-login {
+        height: 48px;
+        font-size: 16px;
+    }
+}
+
 /* Print */
 @media print {
     .sidebar, .header, .modal-overlay, .toast-container { display: none !important; }

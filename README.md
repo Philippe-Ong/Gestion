@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.1**
+**v11.3**
 
 ## Adresse
 
@@ -96,6 +96,20 @@ Application de gestion pour votre entreprise de thé froid.
   - Export JSON complet de toutes les données
   - Import depuis un fichier JSON
 
+### Nouveautés v11.3
+
+- **Validation des restaurations JSON** — Le fichier est contrôlé dans son intégralité avant toute écriture. Un ID non conforme annule la restauration, sans modification partielle des données locales.
+
+### Nouveautés v11.2
+
+- **🔒 Authentification Firebase Email/Password** — L'application utilise un compte technique `gestion@thecol.ch` avec mot de passe partagé. L'email n'est jamais affiché dans l'UI ; le mot de passe est saisi via un écran de verrouillage et n'est jamais stocké dans le dépôt. Session persistée (IndexedDB). Bouton Déconnexion dans l'en-tête et dans Paramètres > Compte.
+- **📦 Livraison transactionnelle** — `deliverCommandeTransaction()` exécute une transaction atomique Firestore multi-documents (commande + lots). Exige connexion réseau, session active, et file d'attente vide. Anti-double-clic intégré. En cas d'échec, aucun document n'est modifié.
+- **🔧 Délégation des événements** — Tous les gestionnaires `onclick`/`onchange` interpolant des données métier ont été remplacés par des attributs `data-click`/`data-change` avec gestion centralisée. Pas d'interpolation XSS dans les chaînes d'attributs JS.
+- **📅 Correction DLV** — `isLotSellable()` vérifie désormais d'abord la DLV (Date Limite de Vente) avant la DLC. Un lot avec DLV expirée est invendable même si sa DLC est encore valide.
+- **❌ Stress test retiré** — `stress-test.js` n'est plus copié vers `www/` ni chargé. Il n'est plus disponible dans l'application.
+- **🆔 Validation des IDs V11** — Les IDs contenant des caractères non autorisés (hors lettres, chiffres, `_`, `:`, `-`, `.`) sont bloqués à la synchronisation. Les données restent en localStorage.
+- **🎨 `safeColor()`** — Nouvelle fonction de validation des couleurs hexadécimales avant interpolation dans `style` (prévient l'injection CSS).
+
 ### Synchronisation Cloud (v11.0 — collaborative)
 
 La synchronisation Firestore a été migrée en **v11.0** d'un modèle « document unique par table » (`data/<table>`) vers un modèle **« un document Firestore par enregistrement métier »** (`tables/<table>/records/<recordId>`).
@@ -105,16 +119,17 @@ La synchronisation Firestore a été migrée en **v11.0** d'un modèle « docume
 - **Verrou de migration :** un lock transactionnel (`syncMeta/migrationLock`, 30 s d'expiration) empêche deux clients de migrer simultanément. Le document contient les champs `locked` (booléen), `owner` (ID de session unique, généré par `generateId()`), `lockedAt` (ISO datetime) et `version` (11). Le champ `owner` permet la libération sécurisée du lock : seules les requêtes du même `_sessionId` peuvent le libérer ou en renouveler le bail (« lease »).
 - **Opérations hors-ligne :** les modifications sont persistées dans une file d'attente localStorage (`thecol_v11_queue`) avec sémantique de fusion (upsert après delete, delete après upsert). En ligne, la file est vidée transactionnellement avec détection de conflit par `_version`.
 - **Écoute temps réel :** un `onSnapshot` est attaché à chaque collection `tables/{table}/records`. Les modifications distantes sont appliquées à localStorage sans boucle de synchronisation (`DB._applyRemoteSnapshot`), et les opérations locales en attente sont ré-appliquées par-dessus. Le re-rendu est anti-rebond à 300 ms.
-- **Bouton "Sync" :** après migration, `forceFirebaseSync()` vide la file, recharge tous les enregistrements depuis Firestore, redémarre les listeners et nettoie les anciens flags `dirty_tables`.
+- **Bouton "Sync" :** après migration et authentification, `forceFirebaseSync()` vide la file, recharge tous les enregistrements depuis Firestore, redémarre les listeners et nettoie les anciens flags `dirty_tables`.
 - **Fonctionnement hybride :** avant migration (ou si Firebase est indisponible), le comportement legacy (tableau complet, `dirty_tables`) reste actif. Une fois V11 activé (`V11._isReady = true`), toutes les écritures passent par la file d'attente différentielle — plus jamais de remplacement de tableau complet.
 - **Débogage :** `window.v11Debug` expose `getQueue()`, `flushQueue()`, `mergeOp()`, `runMigration()`, et `status()`.
+- **Authentification :** Depuis v11.2, Firebase Auth (Email/Password) est requis. `window.firebaseReady` ne devient `true` qu'après une session active. Voir `SPEC.md` §7 pour les détails de configuration.
 
 ### Procédure : première migration v11.0
 
 La migration est automatique au démarrage, mais **ne doit être exécutée que sur un seul appareil à la fois** :
 
 1. Ouvrir l'application sur **un seul** appareil (bureau, mobile — le premier à démarrer avec v11.0).
-2. Vérifier que la connexion Firebase est active (bouton 🔄 Sync visible dans l'en-tête).
+2. Vérifier que la connexion Firebase est active (bouton 🔄 Sync visible dans l'en-tête après connexion).
 3. La migration s'exécute automatiquement :
    - Push des tables locales modifiées vers l'ancien format `data/<table>`.
    - Validation de tous les IDs (absence d'ID vide, pas de doublon).
@@ -125,31 +140,42 @@ La migration est automatique au démarrage, mais **ne doit être exécutée que 
 5. Une fois terminée, les autres appareils peuvent se connecter : ils détecteront `syncMeta/schema.ready = true` et chargeront directement les données depuis la nouvelle structure, sans ré-exécuter la migration.
 6. En cas d'échec (ID invalide, erreur batch), un toast d'erreur s'affiche. Les données locales et legacy cloud restent intactes. Corriger les données puis recharger la page (ou exécuter `window.v11Debug.runMigration()` dans la console).
 
-### ⚠️ Règles Firestore requises — accès ouvert temporaire (non sécurisé)
+### ⚠️ Authentification et règles Firestore (v11.2)
 
-> **Décision explicite du propriétaire :** Firebase reste temporairement en accès ouvert, **sans authentification**. Ce choix est volontaire pour la phase actuelle, mais **la base est accessible à quiconque connaît l'URL du projet Firebase**. L'authentification (Firebase Auth, anonyme ou par utilisateur) sera ajoutée ultérieurement (voir `PLAN_DELEGATION.md` A3).
+Depuis v11.2, l'application utilise **Firebase Auth Email/Password** avec un compte technique fixe `gestion@thecol.ch`. Le mot de passe est saisi par l'utilisateur (écran de verrouillage) et **n'est jamais stocké dans le dépôt**. La session est persistée via `browserLocalPersistence` (IndexedDB).
 
-L'application **n'importe pas `firebase-auth`** et **n'appelle pas `signInAnonymously`**. La migration et la synchronisation collaborative fonctionnent uniquement si les règles Firestore le permettent.
+**Configuration manuelle obligatoire** dans la console Firebase (avant tout déploiement) — voir la procédure complète dans `SPEC.md` §7 :
 
-Les règles Firestore déployées dans la console Firebase doivent couvrir **au minimum** les chemins suivants :
+1. Activer **Email/Password** dans Authentication > Sign-in method.
+2. Créer l'utilisateur `gestion@thecol.ch` avec un mot de passe fort.
+3. Récupérer l'UID depuis la liste des utilisateurs.
+4. Publier des règles Firestore limitées à cet UID.
+5. **(Recommandé)** Activer **App Check** pour une défense complémentaire.
 
+**Règles Firestore minimales** (déployées manuellement dans la console Firebase — ce dépôt ne les déploie pas) :
+
+```firestore
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /tables/{table}/records/{record} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    }
+    match /syncMeta/{document} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    }
+    // À SUPPRIMER après migration legacy terminée
+    match /data/{table} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    }
+  }
+}
 ```
-// Nouvelle structure v11 — un document par enregistrement
-tables/{table}/records/{record}    // allow read, write
 
-// Métadonnées de synchronisation (migration, schéma)
-syncMeta/{document}                // allow read, write
-
-// Legacy — nécessaire temporairement pour la migration v11
-// Permet de lire les données cloud legacy (base de fusion) et de pousser
-// les tables modifiées localement (dirty) avant la migration one-shot.
-// Cette collection n'est plus utilisée après migration réussie.
-data/{table}                       // allow read, write
-```
-
-Si les règles actuelles ne couvrent que `data/{table}` (legacy), la migration échouera et le verrou (`syncMeta/migrationLock`) ne pourra pas être posé. **Les règles exactes déployées n'ont pas été inspectées** — elles doivent être vérifiées et mises à jour manuellement dans la console Firebase (ce fichier ne les déploie pas).
-
-> **⚠️ Insecure — temporaire :** tant que l'authentification n'est pas activée, les règles doivent rester en mode ouvert (`allow read, write: if true;`). C'est un choix délibéré pour la phase v11.0. L'authentification sera ajoutée plus tard (voir `PLAN_DELEGATION.md` A3). Aucun audit utilisateur n'est présent dans l'application.
+⚠️ **Configuration manuelle indispensable** : sans ces étapes, la connexion échouera ou les règles resteront ouvertes.
 
 ### Build mobile (Android / iOS)
 
@@ -163,9 +189,9 @@ L'appli web est emballée via **Capacitor 8**. Le code source reste à la racine
 
 | Fichier | Rôle |
 |---------|------|
-| `index.html` | Structure HTML, conteneurs modals/toasts, init Firebase SDK |
-| `app.js` | Toute la logique applicative: routing, vues, data layer, CRUD |
-| `styles.css` | Styles CSS, variables de thème, responsive |
+| `index.html` | Structure HTML, conteneurs modals/toasts, écran de connexion, init Firebase SDK (App + Auth + Firestore) |
+| `app.js` | Toute la logique applicative: routing, vues, data layer, CRUD, auth, V11 sync, event delegation |
+| `styles.css` | Styles CSS, variables de thème, responsive, écran de connexion |
 | `SPEC.md` | Schémas de données et spécifications |
 | `templates/bl_template.xlsx` | Template Excel pour export Bulletin de Livraison (BL) |
 | `capacitor.config.json` | Configuration Capacitor (appId, webDir) |
@@ -193,13 +219,4 @@ Pour restaurer:
 
 ## Tests
 
-Aucune CI ; le filet de sécurité est `stress-test.js` (≈850 lignes). Il s'exécute depuis l'UI :
-
-1. Ouvrez **Paramètres** → encadré **🔧 Outils de développement**
-2. Cliquez sur **"Lancer le stress test"**
-
-Le runner couvre :
-- Phase 1 : rendu de toutes les vues + alerte si > 2 s
-- Phase 2-5 : CRUD massif (création / mise à jour / suppression / opérations en lot)
-
-Une sauvegarde automatique des données est faite avant l'exécution.
+Aucune CI. Le stress test (`stress-test.js`) a été retiré en **v11.2** — il n'est plus copié vers `www/` ni chargé en localhost. La validation se fait manuellement en vérifiant les données dans `localStorage` et la console.

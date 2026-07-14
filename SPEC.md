@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.1  
+**Version:** v11.3
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -383,12 +383,75 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - Pas de framework (simplicité)
 - localStorage pour persistance locale
 - Firebase Firestore v10.8.0 pour synchronisation cloud optionnelle
-- **Pas d'authentification (temporaire, non sécurisé) :** `firebase-auth.js` non importé, pas de `signInAnonymously`. C'est un choix délibéré du propriétaire pour la phase v11.0 — la base est accessible à quiconque connaît l'ID du projet Firebase. L'authentification sera ajoutée ultérieurement (voir `PLAN_DELEGATION.md` A3).
-- **Règles Firestore requises (mises à jour manuellement dans la console) :**
-  - `tables/{table}/records/{record}` — accès en lecture/écriture (v11 per-record)
-  - `syncMeta/{document}` — accès en lecture/écriture (verrou migration + statut schéma)
-  - `data/{table}` — **nécessaire temporairement** pour la migration legacy : lecture des données cloud legacy (base de fusion) et push des tables modifiées localement (dirty) avant la migration one-shot
-  - Les règles doivent être déployées manuellement dans la console Firebase. Ce dépôt ne les déploie pas.
+- **Firebase Auth — Authentification par mot de passe partagé (Email/Password) :**
+  - L'application utilise un compte technique fixe `gestion@thecol.ch` (Email/Password).
+  - L'adresse email n'est jamais affichée dans l'interface utilisateur — elle est définie comme constante `FIREBASE_AUTH_EMAIL` dans le module Firebase d'`index.html`.
+  - Le mot de passe est saisi par l'utilisateur via l'écran de verrouillage (connexion). **Il n'est jamais stocké dans le code ni dans le dépôt.**
+  - La session est persistée via `browserLocalPersistence` (IndexedDB) : l'utilisateur reste connecté entre les visites tant que le SDK Firebase est en cache.
+  - **Limites :** mot de passe partagé, pas d'audit individuel (tous les utilisateurs partagent la même identité Firestore). L'email ne doit pas être changé sans mettre à jour la constante dans `index.html` et les règles Firestore.
+  - Un bouton « Déconnexion » est accessible dans l'en-tête et dans la page Paramètres > Compte.
+
+- **Procédure manuelle — Configuration Firebase Console (obligatoire avant mise en ligne) :**
+  1. Aller dans **Firebase Console → Authentication → Sign-in method** et activer **Email/Password**.
+  2. Aller dans **Authentication → Users** et cliquer **Ajouter un utilisateur**.
+     - Email : `gestion@thecol.ch`
+     - Mot de passe : choisir un mot de passe fort (jamais commité). Le communiquer séparément aux utilisateurs.
+  3. Après création, récupérer **l'UID** de ce compte (visible dans la liste des utilisateurs).
+  4. Aller dans **Firestore → Rules** et remplacer par les règles ci-dessous :
+     ```firestore
+     rules_version = '2';
+     // REMPLACER « UID_DU_COMPTE_TECHNIQUE » par l'UID réel récupéré à l'étape 3.
+     // Exemple : allow read, write: if request.auth.uid == 'abc123def456';
+     service cloud.firestore {
+       match /databases/{database}/documents {
+         // V11 — accès par enregistrement
+         match /tables/{table}/records/{record} {
+           allow read, write: if request.auth != null
+             && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+         }
+         // Verrou de migration et statut schéma
+         match /syncMeta/{document} {
+           allow read, write: if request.auth != null
+             && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+         }
+         // Legacy — nécessaire temporairement PENDANT la migration
+         // (lecture des données cloud legacy + push dirty avant one-shot migration).
+         // À SUPPRIMER APRÈS MIGRATION de toutes les tables.
+         match /data/{table} {
+           allow read, write: if request.auth != null
+             && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+         }
+       }
+     }
+     ```
+     ⚠️ **Ces règles ne sont pas déployées automatiquement** — ce dépôt ne contient pas de script de déploiement Firestore. La mise à jour est manuelle dans la console.
+  5. **(Recommandé)** Activer **App Check** dans Firebase Console (reCAPTCHA ou DeviceCheck) pour une défense complémentaire contre les appels non autorisés à Firestore, même avec un UID connu.
+  6. **Après migration** de toutes les tables vers le schéma V11 (`tables/{table}/records/{record}`), retirer la règle `match /data/{table}`.
+
+- **Configuration manuelle indispensable :** si les étapes 1-4 ne sont pas exécutées avant le déploiement, la connexion échouera (Email/Password désactivé) ou les règles resteront ouvertes (risque de sécurité). L'application ne fonctionnera pas sans authentification.
+
+- **Stress-test retiré :** `stress-test.js` a été exclu des fichiers copiés vers `www/` (`scripts/copy-web.js`) et n'est plus chargé même en localhost. Le stress test n'est plus disponible dans l'application.
+
+- **Livraison transactionnelle :** `deliverCommandeTransaction()` exécute une transaction atomique Firestore multi-documents (commande + lots) qui exige :
+  - Une connexion réseau active (refus immédiat si `navigator.onLine === false`)
+  - Firebase Auth authentifié (session active)
+  - V11 prêt (synchronisation collaborative active)
+  - File d'attente vide pour les documents concernés (commande + lots)
+  - La transaction valide l'intégrité des données distantes (statut commande, stock, DLV/DLC) avant toute écriture.
+  - En cas d'échec, aucun document n'est modifié et un message d'erreur explicite est affiché (français).
+
+- **Correction DLV :** la fonction `isLotSellable()` vérifie désormais d'abord la **DLV** (Date Limite de Vente) avant la DLC (Date Limite de Consommation). Si la DLV est présente et expirée, le lot est considéré invendable même si la DLC est encore valide. La DLV est la date de vente primaire ; la DLC reste la date ultime de consommation. Dans `restaurerCommande()`, le champ `dlv` est préservé depuis les données distantes (fallback sur `dlc` pour les lots legacy).
+
+- **Délégation des événements (event delegation) :** tous les `onclick`/`onchange`/`oninput`/`onkeydown` interpolant des données métier ont été migrés vers un système central de délégation au niveau document :
+  - Les éléments portent des attributs `data-click` / `data-change` avec une clé d'action.
+  - Les paramètres sont lus via `data-*` supplémentaires (jamais d'interpolation dans des chaînes d'attributs JS).
+  - Le gestionnaire `initEventDelegation()` est appelé dans `bootLocal()`.
+  - Avantages : pas de XSS par interpolation d'attributs JS, fonctionne sur le contenu re-rendu (notamment les modales), réduit les fuites mémoire.
+
+- **Validation des IDs V11 :** la fonction `v11ValidateId()` vérifie désormais que les IDs contiennent uniquement des caractères autorisés : lettres, chiffres, `_`, `:`, `-`, `.` (1-128 caractères). Un ID invalide bloque la synchronisation mais les données restent en localStorage.
+- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration.
+
 - **Capacitor 8** pour emballage mobile Android/iOS
-- Responsive (mobile first)
-- Works offline après premier chargement (les opérations hors-ligne sont mises en file d'attente dans `thecol_v11_queue`)
+- **`safeColor()`** — nouvelle fonction utilitaire qui valide les couleurs hexadécimales avant interpolation dans les attributs `style` (prévient l'injection CSS). Fallback sur `#cccccc` si la valeur est invalide.
+- **Responsive (mobile first)**
+- **Works offline après premier chargement** (les opérations hors-ligne sont mises en file d'attente dans `thecol_v11_queue`)

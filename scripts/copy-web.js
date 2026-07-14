@@ -4,10 +4,17 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const www = path.join(root, 'www');
 
-const FILES = ['index.html', 'app.js', 'styles.css', 'stress-test.js', 'manifest.webmanifest'];
+const FILES = ['index.html', 'app.js', 'styles.css', 'manifest.webmanifest'];
 const DIRS = ['templates', 'icons'];
 
 fs.mkdirSync(www, { recursive: true });
+
+// Nettoyer un éventuel stress-test.js d'une build antérieure
+const oldStressTest = path.join(www, 'stress-test.js');
+if (fs.existsSync(oldStressTest)) {
+  fs.rmSync(oldStressTest);
+  console.log('cleaned www/stress-test.js');
+}
 
 for (const f of FILES) {
   const src = path.join(root, f);

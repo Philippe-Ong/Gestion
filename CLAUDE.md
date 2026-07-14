@@ -22,7 +22,7 @@ python -m http.server 8000
 npx http-server
 ```
 
-There is no linter and no CI/CD pipeline. The closest thing to a test suite is `stress-test.js` (~850 lines), exposed as `window.StressTest`; trigger it from **Paramètres → 🔧 Outils de développement → Lancer le stress test**.
+There is no linter and no CI/CD pipeline. No automated test suite exists. **Le stress test (`stress-test.js`) a été retiré** de la build (v11.2) — il n'est plus copié vers `www/` et n'est plus chargé même en localhost.
 
 ## Architecture
 
@@ -30,10 +30,9 @@ The entire app lives in these files:
 
 | File | Role |
 |------|------|
-| `index.html` | Page shell, modal/toast containers, Firebase SDK init, bottom-nav (mobile) |
-| `app.js` (~6700 lines) | All application logic: routing, views, data, modals, CRUD, helpers |
-| `styles.css` (~2670 lines) | All styling, CSS variables, responsive breakpoints |
-| `stress-test.js` (~850 lines) | Manual stress/regression runner, attached as `window.StressTest` |
+| `index.html` | Page shell, modal/toast containers, Firebase SDK init (App + Auth + Firestore), login screen, bottom-nav (mobile) |
+| `app.js` (~10000 lines) | All application logic: routing, views, data, modals, CRUD, helpers, event delegation, auth (login/logout), V11 sync, transactional delivery |
+| `styles.css` (~2800 lines) | All styling, CSS variables, responsive breakpoints, login screen styles |
 | `capacitor.config.json` | Capacitor config (appId: ch.thecol.gestion, webDir: www) |
 | `scripts/copy-web.js` | Copies root files into www/ for Capacitor sync |
 | `android/` `ios/` | Native scaffolds (Capacitor 8) — committed, not edited manually |
@@ -45,7 +44,15 @@ Hash-based SPA routing (`#dashboard`, `#stock`, `#pointage`, `#commandes`, `#pro
 
 ### Data Layer
 
-The `DB` object wraps localStorage with `get(key)` / `set(key, value)` methods. All keys are prefixed `thecol_`. The 11 synchronized tables are defined in `ALL_TABLES`: employees, aromes, formats, recettes, clients, lots, commandes, pointages, inventaire, livraisons, history. Firebase sync uses `window.firebaseApi` (exposed in index.html before `firebaseReady`) — no dynamic SDK imports at runtime. Sync is manual via a sync button; `loadFromFirebase` treats empty arrays as valid data (propagates deletions). UI filter persistence goes through `DB.getFilter(name)` / `DB.setFilter(name, value)` which prefix keys with `thecol_filter_`.
+The `DB` object wraps localStorage with `get(key)` / `set(key, value)` methods. All keys are prefixed `thecol_`. The 12 synchronized tables are defined in `ALL_TABLES`: employees, aromes, formats, recettes, clients, lots, commandes, pointages, inventaire, livraisons, history, todos.
+
+**Firebase Auth (v11.2) :** L'authentification utilise un compte technique fixe `gestion@thecol.ch` (Email/Password). L'email n'est pas affiché dans l'UI ; le mot de passe est saisi via l'écran de verrouillage et n'est jamais stocké dans le code. La session est persistée via `browserLocalPersistence` (IndexedDB). `window.firebaseReady` ne devient `true` qu'après authentification réussie. Le shell (`body--locked`) est invisible aux lecteurs d'écran tant que l'utilisateur n'est pas connecté. Voir `SPEC.md` §7 pour les règles Firestore et la procédure de configuration.
+
+**Firebase Firestore (v11.0+) :** Sync cloud optionnelle. `window.firebaseApi` expose `doc`, `setDoc`, `getDoc`, `getDocs`, `collection`, `onSnapshot`, `deleteDoc`, `writeBatch`, `runTransaction`. Sync est manuelle (bouton Sync, affiché seulement après auth). `loadFromFirebase` traite les tableaux vides comme des données valides (propage les suppressions). La file d'attente hors-ligne V11 (`thecol_v11_queue`) gère les `upsert`/`delete` avec détection de conflit `_version`.
+
+**Livraison transactionnelle (v11.2) :** `deliverCommandeTransaction()` exécute une transaction atomique Firestore multi-documents. L'opération exige : connexion réseau active, Firebase Auth, V11 ready, file d'attente vide pour les documents concernés. En cas d'échec, aucun document n'est modifié.
+
+UI filter persistence goes through `DB.getFilter(name)` / `DB.setFilter(name, value)` which prefix keys with `thecol_filter_`.
 
 ### View Pattern
 
@@ -54,7 +61,8 @@ Each page has a `render<Page>()` function (e.g., `renderStock()`, `renderCommand
 ### Helpers
 
 Top-of-file utilities to prefer over ad-hoc patterns:
-- `escapeHtml(str)` — always wrap user-controlled text in template literals
+- `escapeHtml(v)` — always wrap user-controlled text in template literals (now also escapes single quotes)
+- `safeColor(v)` — validate hex colour before inline `style` interpolation (fallback `#cccccc`)
 - `getItems(cmd)` — null-safe `cmd.items || []` accessor
 - `getActive(table)` — equivalent to `DB.get(table).filter(r => r.actif)`
 - `parseHHMM(str)` — parse `"HH:MM"` to minutes-since-midnight, returns `null` if invalid
@@ -74,7 +82,7 @@ Defined in `SPEC.md`. Key entities: employees, aromes, formats, recettes (recipe
 
 ## Mobile Build (Capacitor)
 
-The same codebase builds an Android/iOS app via Capacitor 8. The source files stay at the root (`index.html`, `app.js`, `styles.css`, `stress-test.js`, `templates/`). A script copies them into `www/`, which Capacitor syncs to the native projects.
+The same codebase builds an Android/iOS app via Capacitor 8. The source files stay at the root (`index.html`, `app.js`, `styles.css`, `templates/`). A script (`scripts/copy-web.js`) copies them into `www/`, which Capacitor syncs to the native projects. **`stress-test.js` a été retiré** de la liste des fichiers copiés (v11.2).
 
 - **Never edit `www/`** — it is generated by `npm run sync` and gitignored.
 - **Workflow**: edit root files → `npm run sync` → `cd android && .\gradlew.bat assembleDebug` for APK.

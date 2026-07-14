@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v11.1
+**Current Version:** v11.3
 
 ## 1. Build, Lint, and Test Commands
 
@@ -69,6 +69,15 @@ Every page has a top-level `const render<Page> = () => { ... }` arrow function t
 3. Writes it to `document.getElementById('content').innerHTML`.
 4. Attaches event listeners **after** rendering.
 
+### Event Delegation (v11.2)
+Tous les gestionnaires d'événements dans le HTML rendu utilisent un système de délégation centralisé au niveau document :
+- Les éléments portent des attributs `data-click` / `data-change` (ex. `data-click="show-commande-details"`) au lieu d'attributs `onclick`.
+- Les paramètres sont passés via `data-*` séparés (ex. `data-id="..."`).
+- Les gestionnaires sont enregistrés dans `CLICK_HANDLERS` et `CHANGE_HANDLERS` au début de `app.js`.
+- `initEventDelegation()` est appelée dans `bootLocal()`.
+- Avantages : pas d'interpolation XSS dans les chaînes d'attributs JS, fonctionne sur le contenu re-rendu (modales), pas de fuites mémoire.
+- Les rares `onclick` restants (modal.hide, modal.show) sont sûrs car ils n'interpolent pas de données métier.
+
 ### UI Components
 - **Modals:** `modal.show(title, bodyHtml, footerHtml)` / `modal.hide()`
 - **Toasts:** `showToast(message, type)` where type is `'success'` | `'error'` | `'warning'`
@@ -104,9 +113,10 @@ The `DB` object wraps `localStorage`. All keys are prefixed `thecol_` (e.g., `th
 - **Read:** `DB.get('lots')` — returns parsed array, defaults to `[]` on error.
 - **Write:** `DB.set('lots', data)` — serializes to JSON, auto-syncs to Firebase if connected.
 
-### Firebase (Optional Cloud Sync) — v11.0
+### Firebase (Optional Cloud Sync) — v11.0 (Auth v11.2)
 
 Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync is manual.
+**Depuis v11.2, l'accès à Firebase exige une authentification Email/Password.** Voir `SPEC.md` §7 pour les détails.
 
 #### Legacy path (pre-migration)
 - **Sync to Firebase:** `DB.syncToFirebase(key, data)` — writes to `data/<table>` (single doc with full array)
@@ -124,16 +134,52 @@ Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync
 - **Force sync:** `window.forceFirebaseSync()` — in V11 mode, flushes queue, reloads records, restarts listeners
 - **Debug:** `window.v11Debug` exposes `getQueue()`, `flushQueue()`, `mergeOp()`, `runMigration()`, `status()`
 
-#### Firestore rules requirement — temporary open access (insecure)
+#### Authentification Firebase (v11.2)
 
-> **Owner's explicit decision:** Firebase is kept with open access, **no authentication**, temporarily. This is deliberate for the current phase, but **the database is accessible to anyone who knows the Firebase project ID**. Auth (anonymous or user-based) will be added later — see `PLAN_DELEGATION.md` A3.
+L'application utilise Firebase Auth avec la méthode **Email/Password** et un compte technique fixe `gestion@thecol.ch` :
+- L'email est défini comme constante dans `index.html` (`FIREBASE_AUTH_EMAIL`), jamais affiché dans l'UI.
+- Le mot de passe est saisi par l'utilisateur via l'écran de verrouillage — **jamais stocké dans le dépôt**.
+- La session est persistée via `browserLocalPersistence` (IndexedDB).
+- `window.firebaseReady` ne devient `true` qu'après une session active.
+- Le shell est verrouillé par la classe CSS `body--locked` tant que l'utilisateur n'est pas connecté.
+- Fonctions exposées : `window.firebaseAuth.signIn(password)`, `window.firebaseAuth.signOut()`.
+- Bouton Déconnexion : en-tête + Paramètres > Compte.
 
-The app has no authentication (`firebase-auth` not imported, no `signInAnonymously`). The migration and real-time sync require Firestore rules that allow read/write on:
-- `tables/{table}/records/{record}` — v11 per-record storage
-- `syncMeta/{document}` — migration lock + schema status
-- `data/{table}` — **temporairement nécessaire** pour la migration legacy : lecture des données cloud legacy (base de fusion) et push des tables modifiées localement (dirty) avant la migration one-shot
+**Procédure de configuration manuelle** (console Firebase — voir détails complets dans `SPEC.md` §7) :
+1. Activer Email/Password dans Authentication > Sign-in method.
+2. Créer l'utilisateur `gestion@thecol.ch` avec un mot de passe fort.
+3. Récupérer l'UID depuis la liste des utilisateurs.
+4. Publier des règles Firestore limitées à cet UID (ne pas inventer l'UID — utiliser le placeholder `UID_DU_COMPTE_TECHNIQUE`).
 
-Rules must be updated manually in the Firebase console — this repo does not deploy them.
+#### Firestore rules — authentification Email/Password
+
+Les règles Firestore doivent être mises à jour manuellement dans la console Firebase — ce dépôt ne les déploie pas :
+
+```firestore
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // V11 per-record storage
+    match /tables/{table}/records/{record} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    }
+    // Migration lock + schema status
+    match /syncMeta/{document} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    }
+    // Legacy — nécessaire temporairement PENDANT la migration
+    // À SUPPRIMER après migration de toutes les tables
+    match /data/{table} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    }
+  }
+}
+```
+
+⚠️ **Configuration manuelle indispensable** : sans ces étapes, la connexion échouera ou les règles resteront ouvertes.
 
 ### Unit System
 Standardized unit handling for ingredients and inventory:
@@ -158,6 +204,8 @@ Delivery note generation and export:
 - **Arome mapping:** `AROME_BL_NAMES` — maps internal names to BL template format
 - **Excel export:** `exportBLExcel(livraisonId)` — fills `templates/bl_template.xlsx` with data
 - **Row mapping:** `ROW_MAP` — positions data in specific template cells by arome/format
+- **Transactional delivery (v11.2) :** `deliverCommandeTransaction(commandeId, allocations)` exécute une transaction atomique Firestore multi-documents (commande + lots). Exige : connexion réseau (`navigator.onLine`), Firebase Auth, V11 ready, file d'attente vide pour les documents ciblés. En cas d'échec, aucun document n'est modifié.
+- **Guards :** livraison impossible sans connexion ; anti-double-clic sur le bouton Confirmer ; validation de l'intégrité des données distantes (statut, stock, DLV/DLC) avant écriture.
 
 ### Production Planner (`#production`)
 Advanced production planning with cuve management:
@@ -192,7 +240,7 @@ Separate view for delivered orders:
 - **Zero Dependencies:** Do not introduce frameworks (React, Vue), build tools (Webpack, Vite), or npm packages.
 - **Never commit secrets:** Firebase config in `index.html` is public (client-side SDK); do not add server keys.
 - **Preserve the data schema:** Defined in `SPEC.md` — any new fields should be added as optional properties.
-- **Stock Status Logic:** Auto-computed from DLC dates: `ok`, `warning` (< 1 month), `expired` (past).
+- **Stock Status Logic:** Auto-computed from DLC dates: `ok`, `warning` (< 1 month), `expired` (past). Depuis v11.2, `isLotSellable()` vérifie d'abord la **DLV** (Date Limite de Vente) avant la DLC — si la DLV est présente et expirée, le lot est invendable même si la DLC est encore valide.
 - **Version Bump & Push:** After every functional change that affects the application, always increment the version badge in `index.html` (e.g. `v6.15` → `v6.16`), update the `app.js` cache-buster query string (`app.js?v=X.Y`), and push to the remote branch immediately. Never leave a completed feature or bugfix uncommitted or unpushed.
 - **Never edit `www/`**: it is generated by `npm run sync`. Edit root files only.
 

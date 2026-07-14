@@ -17,9 +17,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=11.1">
+    <link rel="stylesheet" href="styles.css?v=11.3">
 </head>
-<body>
+<body class="body--locked">
     <aside class="sidebar">
         <div class="sidebar-header">
             <div class="logo">
@@ -79,9 +79,13 @@
                 <div class="global-search-results" id="globalSearchResults" role="listbox"></div>
             </div>
             <div class="header-actions" id="headerActions">
-                <span style="font-size: 11px; color: var(--text-lighter);">v11.1</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v11.3</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
+                </button>
+                <button id="logoutBtnHeader" class="btn btn-sm btn-secondary" title="Déconnexion" style="display:none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    Quitter
                 </button>
             </div>
         </header>
@@ -154,15 +158,46 @@
         </a>
     </div>
 
+    <!-- Écran de verrouillage / connexion (visible tant que non authentifié) -->
+    <div class="login-screen" id="loginScreen">
+        <div class="login-card">
+            <div class="login-logo">
+                <h1>ThéCol</h1>
+                <span>Gestion</span>
+            </div>
+            <!-- État chargement (affiché pendant la vérification de la session) -->
+            <div class="login-loading" id="loginLoading">
+                <span class="spinner" aria-hidden="true"></span>
+                <p>Vérification de la session…</p>
+            </div>
+            <!-- Formulaire de connexion (affiché si aucune session) -->
+            <div class="login-form" id="loginForm" style="display:none">
+                <div class="login-error" id="loginError" role="alert" style="display:none"></div>
+                <div class="form-group">
+                    <label for="loginPassword">Mot de passe</label>
+                    <input type="password" id="loginPassword" class="login-password-input"
+                           placeholder="Mot de passe" autocomplete="current-password"
+                           aria-label="Mot de passe">
+                </div>
+                <button id="loginBtn" class="btn btn-primary btn-login" type="button">Connexion</button>
+                <div class="login-busy" id="loginBusy" style="display:none">
+                    <span class="spinner" aria-hidden="true"></span>
+                    Connexion en cours…
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- JSZip & XLSX : utilisés par exportBLExcel / exportArchivesExcel / importClients -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <!-- Firebase SDK (v10.8.0) — seuls les symboles réellement appelés sont exposés
-         SÉCURITÉ (décision explicite propriétaire) : accès Firestore ouvert, AUCUNE
-         authentification pour l'instant — phase temporaire délibérée, la base est
-         accessible à quiconque connaît l'ID du projet. L'auth sera ajoutée plus tard.
+    <!-- Firebase SDK (v10.8.0) — App, Firestore, Auth
          Les clés Firebase côté client sont publiques par conception.
-         N'ajoutez PAS de clés serveur ici. -->
+         N'ajoutez PAS de clés serveur ici.
+         L'authentification utilise un compte technique fixe gestion@thecol.ch
+         (Email/Password). Le mot de passe est saisi par l'utilisateur, jamais
+         stocké dans le code. La session est persistée via browserLocalPersistence
+         pour un démarrage hors ligne quand le SDK est déjà chargé. -->
     <script>
         window.firebaseReady = false;
     </script>
@@ -172,6 +207,12 @@
             getFirestore, doc, setDoc, getDoc, getDocs, collection,
             onSnapshot, deleteDoc, writeBatch, runTransaction
         } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
+        import {
+            getAuth, signInWithEmailAndPassword, signOut,
+            onAuthStateChanged, setPersistence, browserLocalPersistence
+        } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js';
+
+        const FIREBASE_AUTH_EMAIL = 'gestion@thecol.ch';
         
         const firebaseConfig = {
             apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
@@ -182,45 +223,107 @@
             appId: "1:882272705805:web:542b45499ff27b12a4e444",
             measurementId: "G-E67CGE3Y57"
         };
-        
-        let app, db;
+
+        let app, db, auth;
         try {
             app = initializeApp(firebaseConfig);
             db = getFirestore(app);
-            // Expose une seule fois : app.js ne doit jamais ré-importer le SDK au runtime
-            // (un import dynamique échoue hors-ligne).
+            auth = getAuth(app);
+
+            // Persister la session dans IndexedDB (permet le démarrage hors ligne
+            // si le SDK est déjà chargé)
+            setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+            // Exposer Firestore (une seule fois — app.js ne doit jamais
+            // ré-importer le SDK au runtime car un import dynamique échoue hors-ligne)
             window.firebaseApi = {
                 doc, setDoc, getDoc, getDocs, collection,
                 onSnapshot, deleteDoc, writeBatch, runTransaction
             };
             window.firebaseDb = db;
-            window.firebaseReady = true;
-            console.log('Firebase connecté');
+
+            // Exposer Auth de façon minimale : aucune fuite de l'email technique
+            // ni du mot de passe. Seules les fonctions nécessaires sont exposées.
+            window.firebaseAuth = {
+                signIn: (password) => signInWithEmailAndPassword(auth, FIREBASE_AUTH_EMAIL, password),
+                signOut: () => signOut(auth)
+            };
+
+            // Le bouton Sync n'est visible qu'après authentification
             window.showSyncButton = () => {
                 const btn = document.getElementById('syncBtn');
-                if(btn) btn.style.display = 'inline-flex';
+                if (btn) btn.style.display = 'inline-flex';
             };
-            window.showSyncButton();
+
+            // Surveiller l'état d'authentification — firebaseReady ne devient
+            // true qu'après une session active. Tant que l'utilisateur n'est
+            // pas connecté, aucune opération Firestore ni vue métier ne démarre.
+            const loginScreen = document.getElementById('loginScreen');
+            const loginLoading = document.getElementById('loginLoading');
+            const loginForm = document.getElementById('loginForm');
+            const loginPassword = document.getElementById('loginPassword');
+            const loginError = document.getElementById('loginError');
+            const loginBusy = document.getElementById('loginBusy');
+            const loginBtn = document.getElementById('loginBtn');
+
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    // Session active (restaurée depuis la persistance ou
+                    // connexion réussie)
+                    window.firebaseReady = true;
+
+                    // Déverrouiller le shell : visible, accessible aux
+                    // lecteurs d'écran, masquer l'écran de connexion
+                    if (typeof window.unlockShell === 'function') {
+                        window.unlockShell();
+                    }
+
+                    // Masquer l'écran de verrouillage
+                    if (loginScreen) loginScreen.style.display = 'none';
+
+                    // Réinitialiser le formulaire pour la prochaine déconnexion
+                    if (loginPassword) loginPassword.value = '';
+                    if (loginError) loginError.textContent = '';
+                    if (loginError) loginError.style.display = 'none';
+                    if (loginBusy) loginBusy.style.display = 'none';
+                    if (loginBtn) loginBtn.style.display = 'inline-flex';
+
+                    // Afficher le bouton Sync dans l'en-tête
+                    window.showSyncButton?.();
+
+                    // Lancer l'application (local d'abord, puis Firebase)
+                    if (typeof window.startApp === 'function') {
+                        window.startApp();
+                    }
+
+                    console.log('Authentifié — session active');
+                } else {
+                    // Aucune session active — transition centralisée
+                    if (typeof window.resetAppSession === 'function') {
+                        window.resetAppSession();
+                    }
+                    console.log('Déconnecté — écran de verrouillage');
+                }
+            });
+
+            console.log('Firebase connecté (App + Auth + Firestore)');
         } catch(e) {
             console.log('Erreur Firebase:', e);
             window.firebaseReady = false;
+            // Verrouiller le shell (body--locked est déjà dans le HTML,
+            // mais on le ré-applique par sécurité)
+            if (typeof window.lockShell === 'function') {
+                window.lockShell();
+            }
+            // En cas d'échec, afficher le formulaire de connexion avec une erreur
+            const el = document.getElementById('loginLoading');
+            if (el) el.style.display = 'none';
+            const form = document.getElementById('loginForm');
+            if (form) form.style.display = 'block';
+            const err = document.getElementById('loginError');
+            if (err) { err.textContent = 'Erreur de connexion au service. Vérifiez votre réseau.'; err.style.display = 'block'; }
         }
     </script>
-    <script src="app.js?v=11.1"></script>
-    <script>
-        (() => {
-            const isLocalDev = ['localhost', '127.0.0.1', ''].includes(window.location.hostname);
-            if (!isLocalDev) return;
-            const script = document.createElement('script');
-            script.src = 'stress-test.js?v=9.6';
-            document.body.appendChild(script);
-        })();
-    </script>
-    <script>
-        // Backup: show sync button after load
-        setTimeout(() => {
-            if(window.firebaseReady) window.showSyncButton?.();
-        }, 1000);
-    </script>
+    <script src="app.js?v=11.3"></script>
 </body>
 </html>
