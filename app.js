@@ -155,6 +155,45 @@ const getBLNumero = (livraison) => {
     return livraison.numeroBL || livraison.id.slice(-5);
 };
 
+// Local-only timestamps for BL Excel exports. v11.7 : un export local ne doit
+// pas créer d'opération V11 ni déclencher de conflit Firestore, donc on stocke
+// la date d'export dans une clé localStorage séparée (jamais synchronisée).
+const BL_EXPORT_DATES_KEY = 'thecol_bl_export_dates';
+const readBLExportDates = () => {
+    try {
+        const raw = localStorage.getItem(BL_EXPORT_DATES_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (e) {
+        console.warn('[BL] Lecture des dates d\'export impossible :', e);
+        return {};
+    }
+};
+const writeBLExportDates = (map) => {
+    try {
+        localStorage.setItem(BL_EXPORT_DATES_KEY, JSON.stringify(map));
+        return true;
+    } catch (e) {
+        console.warn('[BL] Écriture des dates d\'export impossible :', e);
+        return false;
+    }
+};
+const recordBLExportDate = (livraisonId) => {
+    if (!livraisonId) return;
+    const map = readBLExportDates();
+    map[livraisonId] = new Date().toISOString();
+    writeBLExportDates(map);
+};
+// Local-first : retourne la date stockée dans la clé dédiée, sinon retombe
+// sur le champ historique `livraison.dateDernierExport` pour rétrocompatibilité.
+const getBLLastExportDate = (livraison) => {
+    if (!livraison) return null;
+    const localMap = readBLExportDates();
+    if (localMap && localMap[livraison.id]) return localMap[livraison.id];
+    return livraison.dateDernierExport || null;
+};
+
 // Unit Normalization & Conversion
 const CANONICAL_UNITS = ['g', 'kg', 'mL', 'L', 'pcs', 'm', 'caisse(s)'];
 const UNIT_ALIASES = {
@@ -2000,6 +2039,17 @@ const v11StartListener = (table) => {
             const records = result.records;
             const remoteVersions = result.versions;
 
+            // Map id -> record pour détecter le self-echo de l'écriture locale.
+            // Si le document distant reçu par le snapshot est strictement égal
+            // au payload en attente (op.record), c'est l'écho renvoyé par
+            // Firestore après l'upsert local : aucun conflit à notifier pour
+            // cette op. Les vrais conflits concurrents (vraie divergence sur
+            // un autre device) ne sont pas affectés.
+            const snapshotRecordMap = new Map();
+            for (const r of records) {
+                if (r && r.id) snapshotRecordMap.set(r.id, r);
+            }
+
             // Conflict detection: compare known versions in pending queue ops with remote versions.
             // Harmonized with flush transaction logic (Fix v11.2): tout document distant existant
             // avec base version inconnue est un conflit LWW local. _conflictNotified évite les doublons.
@@ -2010,6 +2060,15 @@ const v11StartListener = (table) => {
                     const remoteVersion = remoteVersions[op.recordId];
                     const conflictKey = `${table}/${op.recordId}`;
                     if (remoteVersion !== undefined) {
+                        // Self-echo : le snapshot distant est strictement le payload
+                        // qu'on vient d'écrire. On saute la notification de conflit
+                        // pour cette op, sans toucher à la queue et sans désactiver
+                        // les vrais conflits sur d'autres enregistrements.
+                        const remoteRecord = snapshotRecordMap.get(op.recordId);
+                        if (op.record && remoteRecord &&
+                            JSON.stringify(op.record) === JSON.stringify(remoteRecord)) {
+                            continue;
+                        }
                         if (op.knownVersion === null) {
                             // Bénin : écriture locale sans version de base connue (1re sync /
                             // migration au boot). LWW local — console seulement, pas de toast.
@@ -3894,14 +3953,29 @@ const saveLot = (event) => {
         );
 
         let newId, numLot;
+        let dateOverridden = false;
         if (existingLot) {
             existingLot.quantite = (existingLot.quantite || 0) + quantite;
             newId = existingLot.id;
             numLot = existingLot.numLot || existingLot.id;
         } else {
-            newId = generateId();
-            numLot = nextLotNumero(lots, history);
+            const referenceLot = lots.find(l =>
+                l.arome === arome &&
+                l.dateProduction === dateProduction
+            );
 
+            if (referenceLot) {
+                numLot = referenceLot.numLot || referenceLot.id;
+                if (referenceLot.dlv !== dlv || referenceLot.dlc !== dlc) {
+                    dlv = referenceLot.dlv || dlv;
+                    dlc = referenceLot.dlc || dlc;
+                    dateOverridden = true;
+                }
+            } else {
+                numLot = nextLotNumero(lots, history);
+            }
+
+            newId = generateId();
             const lot = {
                 id: newId,
                 numLot,
@@ -3931,6 +4005,9 @@ const saveLot = (event) => {
 
         modal.hide();
         showToast('Lot créé avec succès');
+        if (dateOverridden) {
+            showToast('Dates du lot existant reprises (DLV/DLC) pour conserver le même numéro de lot', 'warning');
+        }
         renderCurrentView();
     } catch (e) {
         console.error('Error saving lot:', e);
@@ -6442,7 +6519,8 @@ const renderLivraisons = () => {
                             return `${l.quantite}× ${a?.nom || l.aromeNom || '?'} ${f?.nom || l.formatNom || '?'}`;
                         }).join(' • ');
                         const more = (liv.lignes || []).length > 3 ? ` • +${liv.lignes.length - 3}` : '';
-                        const lastExport = liv.dateDernierExport ? formatDateTime(liv.dateDernierExport) : 'Jamais exporté';
+                        const lastExportRaw = getBLLastExportDate(liv);
+                        const lastExport = lastExportRaw ? formatDateTime(lastExportRaw) : 'Jamais exporté';
 
                         return `<div class="commande-card">
                             <div class="commande-card-header">
@@ -6524,7 +6602,7 @@ const showLivraisonDetails = (id) => {
             <p><strong>Client:</strong> ${escapeHtml(client?.societe || client?.nom || 'N/A')}</p>
             <p><strong>Date BL:</strong> ${formatDate(livraison.dateBL)}</p>
             <p><strong>N° commande:</strong> #${escapeHtml(commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5))}</p>
-            <p><strong>Dernier export:</strong> ${livraison.dateDernierExport ? formatDateTime(livraison.dateDernierExport) : 'Jamais exporté'}</p>
+            <p><strong>Dernier export:</strong> ${(() => { const d = getBLLastExportDate(livraison); return d ? formatDateTime(d) : 'Jamais exporté'; })()}</p>
             <p><strong>Caisses IFCO:</strong> ${caissesVertes} verte(s), ${caissesNoires} noire(s)</p>
             ${livraison.notes ? `<p><strong>Notes internes:</strong> ${escapeHtml(livraison.notes)}</p>` : ''}
             <p><strong>Total:</strong> ${totalItems} articles</p>
@@ -7189,15 +7267,7 @@ const exportBLExcel = (livraisonId) => {
                     a.download = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
                     a.click();
                     URL.revokeObjectURL(url);
-                    const freshLivraisons = DB.get('livraisons') || [];
-                    const freshIndex = freshLivraisons.findIndex(l => l.id === livraison.id);
-                    if (freshIndex !== -1) {
-                        freshLivraisons[freshIndex] = {
-                            ...freshLivraisons[freshIndex],
-                            dateDernierExport: new Date().toISOString()
-                        };
-                        DB.set('livraisons', freshLivraisons);
-                    }
+                    recordBLExportDate(livraison.id);
                     showToast('Bulletin de livraison exporté');
                     if (window.location.hash === '#livraisons') renderLivraisons();
                 }).catch(err => {

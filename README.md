@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.6**
+**v11.8**
 
 ## Adresse
 
@@ -110,6 +110,16 @@ Application de gestion pour votre entreprise de thé froid.
 - **🏭 Production : validation des unités** — La confirmation de production est bloquée si la conversion entre une unité de recette et l'unité d'inventaire correspondante est impossible ou incompatible. Les alertes de stock insuffisant restent confirmables (warning seulement).
 - **📥 Import JSON : pré-validation + rollback** — Le fichier est intégralement validé avant toute écriture (y compris les champs `_version` V11). Si une écriture échoue pendant l'import, un rollback synchrone restaure automatiquement les tables locales et les métadonnées V11 (cache, versions, file d'attente, tables protégées) à leur état antérieur.
 - **📡 Chargement legacy ignoré** — `DB.loadFromFirebase()` ne lit plus les documents `data/*` (legacy) lorsque V11 est déjà actif (`V11._isReady === true`), évitant tout écrasement involontaire des données synchronisées.
+
+### Nouveautés v11.7
+
+- **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
+- **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
+- **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v11.8
+
+- **🔢 Numéro de lot partagé par arôme et date** — À l'ajout manuel, les lots ayant le même arôme et la même date de production partagent un `numLot` commun, même si le format diffère. Les formats restent des enregistrements de stock distincts. En cas d'arôme+format+date strictement identiques, la quantité est fusionnée avec le lot existant. La DLV et la DLC du lot de référence sont toujours reprises ; si les dates saisies divergent, un avertissement en français est affiché.
 
 ### Nouveautés v11.4
 

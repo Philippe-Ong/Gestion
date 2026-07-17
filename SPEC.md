@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.6
+**Version:** v11.8
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -107,6 +107,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 **Rendu différé (v11.6) :** les snapshots `onSnapshot` n'écrasent plus `#content` si un champ de saisie y est actif. Le re-rendu est différé et rejoué automatiquement au blur (`focusout`). Le flag `V11._pendingRender` et `_renderCurrentViewSafe()` coordonnent ce mécanisme.
 
 **Legacy ignoré en mode V11 (v11.6) :** `DB.loadFromFirebase()` retourne immédiatement si `V11._isReady === true` (ligne 751). Les documents `data/<table>` ne sont plus lus ni écrits en local une fois le schéma V11 actif.
+
+**Écho local supprimé (v11.7) :** le snapshot `onSnapshot` ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique (`JSON.stringify`) au payload de l'opération locale en attente (self-echo). Seuls les vrais conflits concurrents — divergence réelle entre appareils — sont signalés.
 ```
 
 ### Employés
@@ -167,16 +169,17 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 ```json
 {
   "id": "uuid",
-  "numLot": "string (optionnel, numéro de lot commun par arôme et date de production)",
-  "aromeId": "uuid",
-  "formatId": "uuid",
+  "numLot": "string (optionnel — partagé entre lots de même arôme et même dateProduction, même si le format diffère)",
+  "arome": "string (nom de l'arôme)",
+  "format": "string (nom du format)",
   "quantite": "number",
   "dateProduction": "date",
   "dlv": "date (date limite de vente)",
-  "dlc": "date (date limite de consommation)",
-  "statut": "en_stock|vendu|expiré"
+  "dlc": "date (date limite de consommation)"
 }
 ```
+
+**Règles d'attribution du `numLot` (v11.8) :** À l'ajout manuel d'un lot, le système attribue un `numLot` commun à tous les lots partageant le même `arome` et la même `dateProduction`, indépendamment du `format`. Chaque format reste un enregistrement de stock distinct (un `id` unique par lot). Si un lot existe déjà avec le même `arome`, `format` et `dateProduction`, sa `quantite` est incrémentée plutôt qu'un nouveau lot créé. Lorsqu'un nouveau format est ajouté sous un `numLot` existant, la DLV et la DLC du lot de référence sont toujours appliquées au nouveau lot ; si les dates saisies divergent, un avertissement en français est affiché.
 
 ### Commandes
 ```json
@@ -206,7 +209,7 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   "caissesVertesLivrees": "number (optionnel)",
   "caissesNoiresLivrees": "number (optionnel)",
   "notes": "string (optionnel, interne)",
-  "dateDernierExport": "datetime (optionnel)",
+  "dateDernierExport": "datetime (optionnel, legacy — v11.7: remplacé par la clé locale non synchronisée thecol_bl_export_dates)",
   "lotsTraces": [
     { "lotId": "uuid", "arome": "string", "format": "string", "dlc": "date", "quantite": "number" }
   ]
