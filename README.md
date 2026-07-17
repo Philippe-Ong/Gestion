@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.3**
+**v11.6**
 
 ## Adresse
 
@@ -95,6 +95,25 @@ Application de gestion pour votre entreprise de thé froid.
 - **Sauvegarde & Restauration**:
   - Export JSON complet de toutes les données
   - Import depuis un fichier JSON
+
+### Nouveautés v11.5
+
+- **🔒 Démarrage sécurisé** — `startApp()` refuse de démarrer si `window.firebaseReady !== true`. Toute tentative d'accès aux données locales sans session Firebase active est bloquée (appel console, script tiers, boot précoce).
+- **⬆️ Firebase SDK 12.16.0** — Mise à jour du SDK Firebase de la version 10.8.0 vers 12.16.0, appliquée dans le module inline principal ainsi que dans le fallback dynamique (`app.js`).
+- **🔐 Intégrité des dépendances** — Les scripts JSZip et XLSX sont chargés depuis cdnjs avec attributs `integrity` (SRI) et `crossorigin=anonymous` pour prévenir les altérations.
+- **🛡️ Content Security Policy** — CSP appliquée via une balise `<meta http-equiv="Content-Security-Policy">` dans `index.html`, avec `unsafe-inline` conservé à titre transitoire pour les gestionnaires inline non encore migrés vers la délégation centralisée. `unsafe-eval` est explicitement interdit.
+
+### Nouveautés v11.6
+
+- **⏳ Rendu différé V11** — Les snapshots temps réel de Firestore diffèrent le re-rendu de `#content` lorsqu'un champ de saisie est actif (input, textarea, select). Le rendu est rejoué automatiquement au blur, sans effacer le formulaire en cours de saisie.
+- **📋 Livraison : messages d'erreur distincts** — `deliverCommandeTransaction()` vérifie explicitement la session Auth active avant la transaction. Les échecs distinguent désormais session expirée / conflit de transaction (concurrence) / erreur réseau, avec des messages utilisateur en français distincts pour chaque cas.
+- **🏭 Production : validation des unités** — La confirmation de production est bloquée si la conversion entre une unité de recette et l'unité d'inventaire correspondante est impossible ou incompatible. Les alertes de stock insuffisant restent confirmables (warning seulement).
+- **📥 Import JSON : pré-validation + rollback** — Le fichier est intégralement validé avant toute écriture (y compris les champs `_version` V11). Si une écriture échoue pendant l'import, un rollback synchrone restaure automatiquement les tables locales et les métadonnées V11 (cache, versions, file d'attente, tables protégées) à leur état antérieur.
+- **📡 Chargement legacy ignoré** — `DB.loadFromFirebase()` ne lit plus les documents `data/*` (legacy) lorsque V11 est déjà actif (`V11._isReady === true`), évitant tout écrasement involontaire des données synchronisées.
+
+### Nouveautés v11.4
+
+- **BL Excel dynamique** — L'export des Bulletins de Livraison accepte désormais tous les arômes configurés (actifs ou inactifs) au lieu d'une liste statique de 8 arômes. Les lignes article sont remplies dynamiquement avec insertion de lignes supplémentaires si nécessaire, sans perte du pied de page (facturation, IFCO, société, signature).
 
 ### Nouveautés v11.3
 

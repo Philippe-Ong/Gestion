@@ -349,6 +349,7 @@ const V11 = {
     _localCache: {},           // { table: [records] } — shadow copy for snapshot merge
     _versions: {},             // { table: { recordId: _version } } — last known remote version per record
     _debounceTimer: null,
+    _pendingRender: false,   // rendu différé car un champ de saisie dans #content est actif
     _isReady: false,
     _flushPromise: null,       // serializes v11FlushQueue calls
     _bootPromise: null,        // serializes v11BootFirebase calls
@@ -582,11 +583,18 @@ const DB = {
     },
 
     set: (key, data) => {
+        // Contrat : renvoie true si l'écriture locale a réussi ET que la préparation
+        // de la synchronisation n'a rencontré aucun échec (tableau valide, validation
+        // V11 OK, queue persistée pour cette table, pas d'exception dans le calcul
+        // différentiel). Renvoie false dans tous les autres cas. Les appelants
+        // existants qui ignoraient la valeur de retour continuent à fonctionner
+        // inchangés ; les appelants transactionnels (importAllData) peuvent
+        // s'appuyer dessus pour décider d'un rollback.
         // 0. Validate input
         if (!Array.isArray(data)) {
             console.error('[V11] DB.set: data must be an array for', key, typeof data);
             showToast('Erreur interne : les données doivent être un tableau', 'error');
-            return;
+            return false;
         }
 
         // 1. Read previous state for diff computation
@@ -605,6 +613,12 @@ const DB = {
         // _migrating forces queue path during migration, never legacy
         const v11Active = !DB._skipSync && (V11._isReady || V11._bootstrapping || V11._migrating);
 
+        // Track sync-preparation success separately from local write.
+        // localOk reflects localStorage only; syncOk reflects the V11/legacy path
+        // (validation + diff + persist queue). The function only returns true when
+        // both succeeded.
+        let syncOk = true;
+
         if (v11Active) {
             // V11 mode: validate table before producing any diff/op
             const validation = v11ValidateTable(key, data);
@@ -618,7 +632,7 @@ const DB = {
                 v11MarkTableInvalid(key);
                 // Save locally but produce NO v11 operations for this table
                 if (!localOk) showToast('Stockage local plein.', 'warning');
-                return;
+                return false;
             }
 
             // Validation passed — if table was previously invalid, clear the flag
@@ -658,6 +672,7 @@ const DB = {
                 }
             } catch (e) {
                 console.error('[V11] Differential write error:', e);
+                syncOk = false;
             }
             // Check if queue persistence failed and table is now memory-protected
             if (V11._memoryProtectedTables.has(key)) {
@@ -665,6 +680,7 @@ const DB = {
                     `ERREUR : la file d'attente de synchronisation n'a pas pu être stockée pour « ${key} ». Toute synchronisation distante est bloquée pour cette table. Exportez vos données depuis Paramètres → Exporter, puis rechargez la page.`,
                     'error'
                 );
+                syncOk = false;
             } else if (window.firebaseReady && window.firebaseDb) {
                 // Non-blocking flush if Firebase is available and queue is persisted
                 setTimeout(() => v11FlushQueue(), 0);
@@ -692,6 +708,8 @@ const DB = {
         if (!localOk) {
             showToast('Stockage local plein.', 'warning');
         }
+
+        return localOk && syncOk;
     },
 
     // Called by real-time listeners — updates localStorage WITHOUT triggering sync
@@ -730,6 +748,7 @@ const DB = {
 
     loadFromFirebase: async (showNotification = true, skipTables = []) => {
         if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
+        if (V11._isReady === true) return;
         try {
             // Backup before sync
             const backup = {};
@@ -1139,7 +1158,7 @@ window.forceFirebaseSync = async () => {
 
                 v11StopAllListeners();
                 v11StartAllListeners();
-                renderCurrentView();
+                _renderCurrentViewSafe();
                 showToast('Synchronisation collaborative terminée', 'success');
             }
         } else {
@@ -2030,20 +2049,20 @@ const v11StartListener = (table) => {
             DB._applyRemoteSnapshot(table, Array.from(resultMap.values()));
             if (sessionGen !== _appSessionGen) return;
 
-            // Debounced re-render of current view
+            // Debounced re-render of current view — différé si un champ dans
+            // #content est actif (saisie en cours) ; le snapshot est déjà
+            // appliqué à localStorage, seul le re-render visuel est reporté.
             if (V11._debounceTimer) clearTimeout(V11._debounceTimer);
             V11._debounceTimer = setTimeout(() => {
-                if (sessionGen !== _appSessionGen) { V11._debounceTimer = null; return; }
+                V11._debounceTimer = null;
+                if (sessionGen !== _appSessionGen) return;
                 const hash = window.location.hash.slice(1) || 'dashboard';
                 const page = hash.split('?')[0];
-                // Only re-render if still on the same page
-                if (page === 'dashboard' || page === 'stock' || page === 'commandes' ||
-                    page === 'pointage' || page === 'livraisons' || page === 'production' ||
-                    page === 'inventaire' || page === 'parametres' || page === 'archives' ||
-                    page === 'historique') {
-                    renderCurrentView();
-                }
-                V11._debounceTimer = null;
+                if (page !== 'dashboard' && page !== 'stock' && page !== 'commandes' &&
+                    page !== 'pointage' && page !== 'livraisons' && page !== 'production' &&
+                    page !== 'inventaire' && page !== 'parametres' && page !== 'archives' &&
+                    page !== 'historique') return;
+                _renderCurrentViewSafe();
             }, 300);
         }, (error) => {
             console.error('[V11] Snapshot error for table', table, error);
@@ -2063,8 +2082,81 @@ const v11StartAllListeners = () => {
     }
 };
 
+// --- Re-render protection : ne pas remplacer #content pendant qu'une saisie
+// est en cours à l'intérieur (les champs dans une modale hors #content sont
+// ignorés). Le snapshot est déjà appliqué à localStorage, seul le re-render
+// visuel est différé.
+const _isContentFieldActive = () => {
+    const active = document.activeElement;
+    if (!active || active === document.body) return false;
+    const content = document.getElementById('content');
+    if (!content || !content.contains(active)) return false;
+    const tag = (active.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (active.isContentEditable) return true;
+    return false;
+};
+
+const _renderCurrentViewSafe = () => {
+    // Session valide ?
+    if (!window.firebaseReady || !window._appStarted) return;
+    if (_isContentFieldActive()) {
+        V11._pendingRender = true;
+        return;
+    }
+    V11._pendingRender = false;
+    renderCurrentView();
+};
+
+const _flushPendingRender = () => {
+    if (!V11._pendingRender) return;
+    V11._pendingRender = false;
+    if (!window.firebaseReady || !window._appStarted) return;
+    // L'utilisateur a peut-être déjà ouvert un nouveau champ dans #content
+    // pendant le délai ; re-vérifier avant de remplacer le DOM.
+    if (_isContentFieldActive()) {
+        V11._pendingRender = true;
+        return;
+    }
+    // Différer au prochain tick pour ne pas voler le focus tout de suite
+    setTimeout(() => {
+        if (!window.firebaseReady || !window._appStarted) { V11._pendingRender = false; return; }
+        if (_isContentFieldActive()) {
+            V11._pendingRender = true;
+            return;
+        }
+        V11._pendingRender = false;
+        renderCurrentView();
+    }, 50);
+};
+
+// Quand un champ dans #content perd le focus, tenter de rejouer le rendu
+// différé. Délégation au niveau document pour survivre aux re-renders.
+// Le drapeau V11._pendingRender n'est positionné QUE par
+// _renderCurrentViewSafe() lorsqu'un rendu doit avoir lieu mais qu'un champ
+// de saisie actif dans #content l'empêche. Aucun listener focusin ne doit
+// armer ce drapeau en dehors de ce chemin.
+if (!window.__v11ContentBlurBound) {
+    window.__v11ContentBlurBound = true;
+    document.addEventListener('focusout', (e) => {
+        const target = e.target;
+        if (!target) return;
+        const content = document.getElementById('content');
+        if (!content || !content.contains(target)) return;
+        const tag = (target.tagName || '').toUpperCase();
+        const isField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+        if (!isField) return;
+        // Idempotent : flusher seulement si un rendu est réellement en attente.
+        // _flushPendingRender vérifie lui-même V11._pendingRender et sort sinon.
+        if (!V11._pendingRender) return;
+        // Attendre que le focus se soit posé ailleurs
+        setTimeout(_flushPendingRender, 0);
+    }, true);
+}
+
 const v11StopAllListeners = () => {
     if (V11._debounceTimer) { clearTimeout(V11._debounceTimer); V11._debounceTimer = null; }
+    V11._pendingRender = false;
     for (const [table, unsubscribe] of Object.entries(V11._listeners)) {
         if (typeof unsubscribe === 'function') {
             try { unsubscribe(); } catch (e) { /* ignore */ }
@@ -2109,15 +2201,15 @@ window.initFirebase = async (maxRetries = 3) => {
     if (window.firebaseReady && window.firebaseDb) return true;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            const { initializeApp, getApps, getApp } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js');
+            const { initializeApp, getApps, getApp } = await import('https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js');
             const {
                 getFirestore, doc, setDoc, getDoc, getDocs, collection,
                 onSnapshot, deleteDoc, writeBatch, runTransaction
-            } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js');
+            } = await import('https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js');
             const {
                 getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged,
                 setPersistence, browserLocalPersistence
-            } = await import('https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js');
+            } = await import('https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js');
 
             const firebaseConfig = {
                 apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
@@ -2145,8 +2237,13 @@ window.initFirebase = async (maxRetries = 3) => {
             if (!window.firebaseAuth) {
                 window.firebaseAuth = {
                     signIn: (password) => signInWithEmailAndPassword(auth, 'gestion@thecol.ch', password),
-                    signOut: () => signOut(auth)
+                    signOut: () => signOut(auth),
+                    isAuthenticated: () => !!(auth && auth.currentUser)
                 };
+            } else if (typeof window.firebaseAuth.isAuthenticated !== 'function') {
+                // Si l'init module a exposé l'objet avant ce fallback, ajouter
+                // la méthode isAuthenticated en s'appuyant sur cet auth.
+                window.firebaseAuth.isAuthenticated = () => !!(auth && auth.currentUser);
             }
 
             // Restaurer la session persistée — ce callback est essentiel pour
@@ -2279,8 +2376,8 @@ const v11BootFirebase = async () => {
             // 5. Start real-time listeners
             v11StartAllListeners();
 
-            // 6. Re-render current view
-            renderCurrentView();
+            // 6. Re-render current view — protégé si l'utilisateur saisit
+            _renderCurrentViewSafe();
 
             console.log('[V11] Boot complete — collaborative sync active');
             showToast('Synchronisation collaborative active', 'success');
@@ -5352,6 +5449,14 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
             'Authentification requise. Veuillez vous connecter puis réessayer.'
         );
     }
+    if (typeof window.firebaseAuth.isAuthenticated === 'function'
+            ? !window.firebaseAuth.isAuthenticated()
+            : !window.firebaseReady) {
+        throw new Error(
+            'Session expirée. Veuillez vous reconnecter puis réessayer la livraison. ' +
+            'Aucune donnée locale n\'a été modifiée.'
+        );
+    }
 
     // --- Guarde réseau : refus immédiat si offline ---
     if (navigator.onLine === false) {
@@ -5829,7 +5934,22 @@ const showLivraisonBouteillesModal = (commandeId) => {
                 /firestore.*(network|unavailable|timeout)/i.test(e.message || '') ||
                 /ERR_NETWORK|ERR_CONNECTION|fetch/i.test(e.message || '')
             );
-            if (isNetworkError) {
+            const isAuthError = e && (e.code === 'permission-denied' || e.code === 'unauthenticated');
+            const isConcurrencyError = e && (e.code === 'aborted' || e.code === 'failed-precondition');
+            if (isAuthError) {
+                showToast(
+                    'Session expirée ou refusée par le serveur. ' +
+                    'Veuillez vous reconnecter puis réessayer la livraison. ' +
+                    'Aucun stock n\'a été déduit.',
+                    'error'
+                );
+            } else if (isConcurrencyError) {
+                showToast(
+                    'La commande ou les lots ont été modifiés sur un autre appareil. ' +
+                    'Rechargez la page et réessayez. Aucun stock n\'a été déduit.',
+                    'error'
+                );
+            } else if (isNetworkError) {
                 showToast(
                     'Erreur réseau : la transaction n\'a pas pu aboutir. ' +
                     'Vérifiez votre connexion et réessayez. Aucun stock n\'a été déduit.',
@@ -6465,29 +6585,13 @@ const deleteLivraison = (id) => {
     });
 };
 
-const AROME_BL_NAMES = {
-    // Canonical name -> ROW_MAP key
-    'mures sauvages': 'Mûres Sauvages',
-    'mure sauvage': 'Mûres Sauvages',
-    'mûres sauvages': 'Mûres Sauvages',
-    'mûre sauvage': 'Mûres Sauvages',
-    'poire a botzi': 'Poire à Botzi',
-    'poire à botzi': 'Poire à Botzi',
-    'herbes des alpes': 'Herbes des Alpes',
-    'sureau': 'Sureau',
-    'hibiscus': 'Hibiscus',
-    'coing': 'Coing',
-    'edition noel': 'Edition Noël',
-    'menthe': 'Menthe'
-};
-
 const getAromeBLName = (nom) => {
     if (!nom) return nom;
+    // Look up canonical display name from DB aromes — accepte tout arôme (actif ou inactif)
+    const aromes = DB.get('aromes') || [];
     const lower = nom.toLowerCase().trim();
-    const mapped = AROME_BL_NAMES[lower];
-    if (mapped) return mapped;
-    const base = lower.replace(/s$/, '');
-    return AROME_BL_NAMES[base] || nom;
+    const found = aromes.find(a => a.nom && a.nom.toLowerCase().trim() === lower);
+    return found ? found.nom : nom;
 };
 
 const buildLotsTracesForCommande = (commande) => {
@@ -6701,33 +6805,6 @@ const generateBL = (commandeId) => {
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
-const ROW_MAP = {
-    'Poire à Botzi|25 cl': 15,
-    'Poire à Botzi|50 cl': 16,
-    'Poire à Botzi|100 cl': 17,
-    'Mûres Sauvages|25 cl': 21,
-    'Mûres Sauvages|50 cl': 22,
-    'Mûres Sauvages|100 cl': 23,
-    'Herbes des Alpes|25 cl': 24,
-    'Herbes des Alpes|50 cl': 25,
-    'Herbes des Alpes|100 cl': 26,
-    'Menthe|25 cl': 18,
-    'Menthe|50 cl': 19,
-    'Menthe|100 cl': 20,
-    'Hibiscus|25 cl': 27,
-    'Hibiscus|50 cl': 28,
-    'Hibiscus|100 cl': 29,
-    'Sureau|25 cl': 30,
-    'Sureau|50 cl': 31,
-    'Sureau|100 cl': 32,
-    'Coing|25 cl': 33,
-    'Coing|50 cl': 34,
-    'Coing|100 cl': 35,
-    'Edition Noël|25 cl': 36,
-    'Edition Noël|50 cl': 37,
-    'Edition Noël|100 cl': 38
-};
-
 const exportBLExcel = (livraisonId) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
@@ -6878,53 +6955,134 @@ const exportBLExcel = (livraisonId) => {
                     return null;
                 };
 
-                const normalize = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
-                const itemKeyOf = (m) => {
-                    const canon = getAromeBLName(m.aromeNom || '') || m.aromeNom || '';
-                    return `${normalize(canon)}|${m.formatNom}`;
-                };
-
                 const allRows = sheetDoc.getElementsByTagName('row');
-                const matchedKeys = new Set();
-                const mergedNormToKey = {};
-                Object.values(merged).forEach(m => { mergedNormToKey[itemKeyOf(m)] = m; });
+
+                const sortedItems = Object.values(merged).sort((a, b) => {
+                    const aN = (a.aromeNom || '').toLowerCase();
+                    const bN = (b.aromeNom || '').toLowerCase();
+                    if (aN < bN) return -1;
+                    if (aN > bN) return 1;
+                    return (a.formatNom || '').localeCompare(b.formatNom || '');
+                });
+
+                const DATA_START = 15;
+                const DATA_END = 38;
+                const dataRowEls = {};
+
+                for (let i = 0; i < allRows.length; i++) {
+                    const r = allRows[i];
+                    const rn = parseInt(r.getAttribute('r'), 10);
+                    if (rn >= DATA_START && rn <= DATA_END) {
+                        dataRowEls[rn] = r;
+                        r.setAttribute('hidden', '1');
+                    }
+                }
+
+                const extraRows = Math.max(0, sortedItems.length - 24);
+                const FO = extraRows;
+
+                if (FO > 0) {
+                    const footerRows = [];
+                    for (let i = 0; i < allRows.length; i++) {
+                        const rn = parseInt(allRows[i].getAttribute('r'), 10);
+                        if (rn >= 39) footerRows.push(allRows[i]);
+                    }
+                    footerRows.sort((a, b) => parseInt(b.getAttribute('r'), 10) - parseInt(a.getAttribute('r'), 10));
+                    footerRows.forEach(row => {
+                        const oldR = parseInt(row.getAttribute('r'), 10);
+                        const newR = oldR + FO;
+                        row.setAttribute('r', String(newR));
+                        const cells = row.getElementsByTagName('c');
+                        for (let ci = 0; ci < cells.length; ci++) {
+                            const cell = cells[ci];
+                            const ref = cell.getAttribute('r');
+                            cell.setAttribute('r', ref.replace(/[0-9]+$/, '') + newR);
+                        }
+                    });
+                    const dimEl = sheetDoc.getElementsByTagName('dimension')[0];
+                    if (dimEl) {
+                        dimEl.setAttribute('ref', dimEl.getAttribute('ref').replace(/\d+$/, function(m) { return String(parseInt(m) + FO); }));
+                    }
+                    const mergeCells = sheetDoc.getElementsByTagName('mergeCell');
+                    for (let mi = 0; mi < mergeCells.length; mi++) {
+                        mergeCells[mi].setAttribute('ref', mergeCells[mi].getAttribute('ref').replace(/\d+/g, function(m) { return String(parseInt(m) + FO); }));
+                    }
+                    const sheetDataEl = sheetDoc.getElementsByTagName('sheetData')[0];
+                    const newFooterStart = 39 + FO;
+                    for (let i = 0; i < FO; i++) {
+                        const newRowNum = 39 + i;
+                        let insertBefore = null;
+                        for (let j = 0; j < allRows.length; j++) {
+                            if (parseInt(allRows[j].getAttribute('r'), 10) === newFooterStart) {
+                                insertBefore = allRows[j];
+                                break;
+                            }
+                        }
+                        const templateRow = dataRowEls[DATA_END] || dataRowEls[DATA_START];
+                        const newRow = sheetDoc.createElementNS(NS, 'row');
+                        newRow.setAttribute('r', String(newRowNum));
+                        newRow.setAttribute('spans', '1:6');
+                        newRow.setAttribute('hidden', '1');
+                        ['A', 'B', 'C', 'D'].forEach(col => {
+                            const nc = sheetDoc.createElementNS(NS, 'c');
+                            nc.setAttribute('r', col + newRowNum);
+                            if (templateRow) {
+                                const tc = findCellByRef(templateRow, col + DATA_END);
+                                if (tc) {
+                                    const s = tc.getAttribute('s');
+                                    if (s) nc.setAttribute('s', s);
+                                }
+                            }
+                            const vEl = sheetDoc.createElementNS(NS, 'v');
+                            vEl.textContent = '0';
+                            nc.appendChild(vEl);
+                            newRow.appendChild(nc);
+                        });
+                        if (insertBefore && insertBefore.parentNode) {
+                            insertBefore.parentNode.insertBefore(newRow, insertBefore);
+                        } else {
+                            sheetDataEl.appendChild(newRow);
+                        }
+                        dataRowEls[newRowNum] = newRow;
+                    }
+                }
+
+                sortedItems.forEach(function(item, idx) {
+                    const targetRowNum = DATA_START + idx;
+                    const row = dataRowEls[targetRowNum];
+                    if (!row) return;
+                    const rStr = row.getAttribute('r');
+                    const cellA = findCellByRef(row, 'A' + rStr);
+                    if (cellA) setCellValueDom(cellA, item.quantite);
+                    const cellB = findCellByRef(row, 'B' + rStr);
+                    if (cellB) setCellTextDom(cellB, 'ThéCol - Thé Froid Artisanal');
+                    const cellC = findCellByRef(row, 'C' + rStr);
+                    if (cellC) setCellTextDom(cellC, item.aromeNom);
+                    const cellD = findCellByRef(row, 'D' + rStr);
+                    if (cellD) setCellTextDom(cellD, item.formatNom);
+                    row.removeAttribute('hidden');
+                });
+
+                for (let rn = DATA_START + sortedItems.length; rn <= DATA_END + FO; rn++) {
+                    const row = dataRowEls[rn];
+                    if (!row) continue;
+                    row.setAttribute('hidden', '1');
+                    const rStr = row.getAttribute('r');
+                    const cellA = findCellByRef(row, 'A' + rStr);
+                    if (cellA) { clearCellDom(cellA); setCellValueDom(cellA, 0); }
+                    const cellB = findCellByRef(row, 'B' + rStr);
+                    if (cellB) setCellTextDom(cellB, ' ');
+                    const cellC = findCellByRef(row, 'C' + rStr);
+                    if (cellC) setCellTextDom(cellC, ' ');
+                    const cellD = findCellByRef(row, 'D' + rStr);
+                    if (cellD) setCellTextDom(cellD, ' ');
+                }
 
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowNum = parseInt(row.getAttribute('r'));
 
-                    if (rowNum >= 15 && rowNum <= 38) {
-                        const cellA = findCellByRef(row, `A${rowNum}`);
-                        if (!cellA) continue;
-
-                        const mapEntry = Object.entries(ROW_MAP).find(([, r]) => r === rowNum);
-                        if (!mapEntry) {
-                            row.setAttribute('hidden', '1');
-                            const vA = cellA.getElementsByTagName('v')[0];
-                            if (vA) vA.textContent = '0';
-                            const cellB = findCellByRef(row, `B${rowNum}`);
-                            if (cellB) setCellTextDom(cellB, ' ');
-                            continue;
-                        }
-                        const [mapKeyForRow, ] = mapEntry;
-                        const [mapArome, mapFormat] = mapKeyForRow.split('|');
-                        const normArome = normalize(mapArome);
-                        const item = mergedNormToKey[`${normArome}|${mapFormat}`];
-
-                        if (item) {
-                            setCellValueDom(cellA, item.quantite);
-                            row.removeAttribute('hidden');
-                            matchedKeys.add(itemKeyOf(item));
-                            const cellB = findCellByRef(row, `B${rowNum}`);
-                            if (cellB) setCellTextDom(cellB, 'ThéCol - Thé Froid Artisanal');
-                        } else {
-                            row.setAttribute('hidden', '1');
-                            const vA = cellA.getElementsByTagName('v')[0];
-                            if (vA) vA.textContent = '0';
-                            const cellB = findCellByRef(row, `B${rowNum}`);
-                            if (cellB) setCellTextDom(cellB, ' ');
-                        }
-                    }
+                    if (rowNum >= 15 && rowNum <= 38 + FO) continue;
 
                     if (rowNum === 2) {
                         let cellC2 = findCellByRef(row, 'C2');
@@ -6961,14 +7119,14 @@ const exportBLExcel = (livraisonId) => {
                         if (cellF) setCellTextDom(cellF, clientLocalite || ' ');
                     }
 
-                    if (rowNum === 54) {
-                        const cellA = findCellByRef(row, 'A54');
+                    if (rowNum === 54 + FO) {
+                        const cellA = findCellByRef(row, 'A' + (54 + FO));
                         if (cellA) setCellTextDom(cellA, clientSociete || ' ');
                     }
 
-                    if (rowNum >= 47 && rowNum <= 49) {
-                        const expectedMode = rowNum === 47 ? 'email' : rowNum === 48 ? 'poste' : 'autre';
-                        const cellD = findCellByRef(row, `D${rowNum}`);
+                    if (rowNum >= 47 + FO && rowNum <= 49 + FO) {
+                        const expectedMode = rowNum === 47 + FO ? 'email' : rowNum === 48 + FO ? 'poste' : 'autre';
+                        const cellD = findCellByRef(row, 'D' + rowNum);
                         if (cellD) {
                             if (livraison.facturationMode === expectedMode) {
                                 setCellTextDom(cellD, 'x');
@@ -6978,12 +7136,12 @@ const exportBLExcel = (livraisonId) => {
                         }
                     }
 
-                    if (rowNum >= 48 && rowNum <= 51) {
-                        const cellA = findCellByRef(row, `A${rowNum}`);
+                    if (rowNum >= 48 + FO && rowNum <= 51 + FO) {
+                        const cellA = findCellByRef(row, 'A' + rowNum);
                         if (cellA) {
-                            if (rowNum === 48) {
+                            if (rowNum === 48 + FO) {
                                 setCellValueDom(cellA, cVerteLivree);
-                            } else if (rowNum === 49) {
+                            } else if (rowNum === 49 + FO) {
                                 setCellValueDom(cellA, cNoireLivree);
                             } else {
                                 clearCellDom(cellA);
@@ -6991,10 +7149,10 @@ const exportBLExcel = (livraisonId) => {
                         }
                     }
 
-                    if (rowNum >= 57 && rowNum <= 59) {
+                    if (rowNum >= 57 + FO && rowNum <= 59 + FO) {
                         const clearCols = ['D', 'E', 'F'];
                         clearCols.forEach(col => {
-                            const cell = findCellByRef(row, `${col}${rowNum}`);
+                            const cell = findCellByRef(row, col + rowNum);
                             if (cell) {
                                 clearCellDom(cell);
                             }
@@ -7010,13 +7168,6 @@ const exportBLExcel = (livraisonId) => {
                 const newSheetXml = cleaned.startsWith('<?xml')
                     ? cleaned
                     : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + cleaned;
-
-                const unmatched = Object.values(merged).filter(m => !matchedKeys.has(itemKeyOf(m)));
-                if (unmatched.length > 0) {
-                    const labels = unmatched.slice(0, 3).map(m => `${m.aromeNom} ${m.formatNom} (${m.quantite}x)`).join(', ');
-                    const suffix = unmatched.length > 3 ? ` +${unmatched.length - 3}` : '';
-                    showToast(`Lignes non reconnues: ${labels}${suffix}`, 'warning');
-                }
 
                 if (ssModified) {
                     let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
@@ -7972,6 +8123,12 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
     const arome = aromes.find(a => a.nom === aromeNom);
     const recette = recettes.find(r => r.aromeId === arome?.id);
     const warnings = [];
+    // Erreurs de conversion incompatibles : bloquantes, distinctes des
+    // avertissements métier (stock / ingrédient manquant). Une incohérence
+    // d'unités ne peut jamais être confirmée par l'utilisateur : on annule
+    // AVANT toute persistance (premier DB.set plus bas) et on prévient en
+    // français avec le premier élément + le nombre restant.
+    const conversionErrors = [];
 
     if (recette && Array.isArray(recette.ingredients)) {
         recette.ingredients.forEach(ing => {
@@ -7990,12 +8147,12 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
             const ingUnit = displayUnit(ing.unite);
             const invUnit = displayUnit(item.unite);
             if (!areUnitsCompatible(ingUnit, invUnit)) {
-                warnings.push(`Unité incompatible pour ${ing.nom} (recette: ${ingUnit}, inventaire: ${invUnit})`);
+                conversionErrors.push(`Unité incompatible pour ${ing.nom} (recette: ${ingUnit}, inventaire: ${invUnit})`);
                 return;
             }
             const converted = ingUnit !== invUnit ? convertQuantity(besoinMajore, ingUnit, invUnit) : besoinMajore;
             if (converted === null) {
-                warnings.push(`Conversion impossible pour ${ing.nom}`);
+                conversionErrors.push(`Conversion impossible pour ${ing.nom}`);
                 return;
             }
             if ((item.quantite || 0) < converted) warnings.push(`Stock insuffisant: ${item.nom}`);
@@ -8003,6 +8160,16 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
         });
     } else {
         warnings.push(`Recette introuvable pour ${aromeNom}`);
+    }
+
+    if (conversionErrors.length > 0) {
+        const first = conversionErrors[0];
+        const remaining = conversionErrors.length - 1;
+        showToast(
+            `Production annulée : ${first}${remaining > 0 ? ` (+${remaining} autre${remaining > 1 ? 's' : ''})` : ''}. Corrigez les unités de la recette.`,
+            'error'
+        );
+        return false;
     }
 
     producedByFormat.forEach(({ format, quantite }) => {
@@ -9547,6 +9714,42 @@ const exportAllData = () => {
 };
 
 // Import all data from JSON
+// ---------------------------------------------------------------------------
+// Capture l'état local (localStorage + caches mémoire V11) AVANT toute écriture,
+// puis applique les DB.set séquentiellement. Si une étape échoue (DB.set renvoie
+// autre chose que true ou lève), rollback synchrone immédiat : restauration des
+// valeurs brutes localStorage (clé absente si elle n'existait pas au départ),
+// de V11._localCache, V11._versions, queue, versions, invalid tables et
+// _memoryProtectedTables. Aucune ré-entrée dans DB.set pendant le rollback.
+// ---------------------------------------------------------------------------
+const _importSnapshotLocalStorage = (keys) => {
+    const snap = {};
+    for (const k of keys) {
+        const raw = localStorage.getItem(k);
+        snap[k] = { existed: raw !== null, raw };
+    }
+    return snap;
+};
+const _importRestoreLocalStorage = (snap) => {
+    for (const k of Object.keys(snap)) {
+        const entry = snap[k];
+        if (entry.existed) {
+            try { localStorage.setItem(k, entry.raw); }
+            catch (e) { console.error('Import rollback: setItem failed for', k, e); }
+        } else {
+            localStorage.removeItem(k);
+        }
+    }
+};
+const _importCloneLocalCache = () => {
+    const out = {};
+    for (const t of Object.keys(V11._localCache || {})) {
+        out[t] = JSON.parse(JSON.stringify(V11._localCache[t]));
+    }
+    return out;
+};
+const _importCloneVersions = () => JSON.parse(JSON.stringify(V11._versions || {}));
+
 const importAllData = (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -9567,14 +9770,57 @@ const importAllData = (event) => {
                 }
             }
 
+            // ----- SNAPSHOT pré-écriture : tout ce que DB.set peut modifier -----
+            const dataKeys = tablesToImport.map(t => 'thecol_' + t);
+            const metaKeys = [V11.QUEUE_KEY, V11.VERSIONS_KEY, V11_INVALID_TABLES_KEY];
+            const snap = _importSnapshotLocalStorage([...dataKeys, ...metaKeys]);
+            const cacheSnap = _importCloneLocalCache();
+            const versionsSnap = _importCloneVersions();
+            const memoryProtectedSnap = new Set(V11._memoryProtectedTables);
+
             let count = 0;
-            tablesToImport.forEach(table => {
-                DB.set(table, data[table]);
+            let failed = false;
+            // Séquentiel (pas forEach) pour court-circuiter dès qu'un appel
+            // renvoie autre chose que true ou lève.
+            for (const table of tablesToImport) {
+                let result;
+                try {
+                    result = DB.set(table, data[table]);
+                } catch (writeErr) {
+                    console.error('Import rollback:', writeErr);
+                    failed = true;
+                    break;
+                }
+                if (result !== true) {
+                    console.error('Import rollback: DB.set a retourné une valeur inattendue pour', table, result);
+                    failed = true;
+                    break;
+                }
                 count++;
-            });
+            }
+
+            if (failed) {
+                // -------- ROLLBACK synchrone --------
+                // Restaurer localStorage (tables + métadonnées V11) en écrivant
+                // directement, sans repasser par DB.set (qui enfilerait de
+                // nouvelles opérations V11 et piétinerait le rollback).
+                _importRestoreLocalStorage(snap);
+                // Restaurer les caches mémoire V11 depuis les clones capturés.
+                V11._localCache = cacheSnap;
+                V11._versions = versionsSnap;
+                V11._memoryProtectedTables = memoryProtectedSnap;
+                showToast(
+                    `Restauration annulée : une erreur est survenue pendant l'écriture des tables. Aucune modification n'a été appliquée.`,
+                    'error'
+                );
+                // Pas de router(), pas de toast de succès.
+                return;
+            }
+
             showToast(`${count} tables restaurées`);
             router();
         } catch(err) {
+            console.error('Import rollback:', err);
             showToast('Erreur: fichier invalide', 'error');
         }
     };
@@ -9794,6 +10040,7 @@ const resetAppSession = () => {
     // 2. Arrêt des listeners temps réel et debounce
     v11StopAllListeners();
     if (V11._debounceTimer) { clearTimeout(V11._debounceTimer); V11._debounceTimer = null; }
+    V11._pendingRender = false;
 
     // 3. Verrouillage du shell (aria-hidden + body--locked)
     lockShell();
@@ -9883,6 +10130,19 @@ const bootFirebaseSync = async () => {
 window.startApp = () => {
     // Éviter le double démarrage
     if (window._appStarted) return;
+
+    // Garde-fu de sécurité : démarrer l'app exige une session Firebase active.
+    // Si un appelant non authentifié (console, script tiers, ordre de boot
+    // précoce) tente unlockShell()+startApp(), on réinitialise la session
+    // de manière sûre (flag, listeners, contenu métier, verrouillage shell)
+    // et on abandonne le boot pour empêcher l'affichage des données locales.
+    if (window.firebaseReady !== true) {
+        if (typeof window.resetAppSession === 'function') {
+            window.resetAppSession();
+        }
+        return;
+    }
+
     window._appStarted = true;
 
     // Attacher les écouteurs de connexion/déconnexion si pas déjà fait

@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.3
+**Version:** v11.6
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -103,6 +103,10 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   │               (lock → valider IDs → merge legacy+local → batch write → schema.ready)
   └─ migré     → v11LoadTableRecords() → v11OverlayQueueOnCache() → v11FlushQueue()
                  → v11StartAllListeners() (onSnapshot par table)
+
+**Rendu différé (v11.6) :** les snapshots `onSnapshot` n'écrasent plus `#content` si un champ de saisie y est actif. Le re-rendu est différé et rejoué automatiquement au blur (`focusout`). Le flag `V11._pendingRender` et `_renderCurrentViewSafe()` coordonnent ce mécanisme.
+
+**Legacy ignoré en mode V11 (v11.6) :** `DB.loadFromFirebase()` retourne immédiatement si `V11._isReady === true` (ligne 751). Les documents `data/<table>` ne sont plus lus ni écrits en local une fois le schéma V11 actif.
 ```
 
 ### Employés
@@ -382,7 +386,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - HTML5, CSS3, Vanilla JavaScript (ES6+)
 - Pas de framework (simplicité)
 - localStorage pour persistance locale
-- Firebase Firestore v10.8.0 pour synchronisation cloud optionnelle
+- Firebase Firestore v12.16.0 pour synchronisation cloud optionnelle
 - **Firebase Auth — Authentification par mot de passe partagé (Email/Password) :**
   - L'application utilise un compte technique fixe `gestion@thecol.ch` (Email/Password).
   - L'adresse email n'est jamais affichée dans l'interface utilisateur — elle est définie comme constante `FIREBASE_AUTH_EMAIL` dans le module Firebase d'`index.html`.
@@ -434,11 +438,14 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 
 - **Livraison transactionnelle :** `deliverCommandeTransaction()` exécute une transaction atomique Firestore multi-documents (commande + lots) qui exige :
   - Une connexion réseau active (refus immédiat si `navigator.onLine === false`)
-  - Firebase Auth authentifié (session active)
+  - Firebase Auth authentifié (session active) — vérification explicite du fournisseur Auth (objet `window.firebaseAuth` et méthode `isAuthenticated()`) avant la transaction
   - V11 prêt (synchronisation collaborative active)
   - File d'attente vide pour les documents concernés (commande + lots)
   - La transaction valide l'intégrité des données distantes (statut commande, stock, DLV/DLC) avant toute écriture.
-  - En cas d'échec, aucun document n'est modifié et un message d'erreur explicite est affiché (français).
+  - En cas d'échec, aucun document n'est modifié et l'erreur est catégorisée avec un message français distinct :
+    - **Session expirée / refusée** (`permission-denied`, `unauthenticated`)
+    - **Conflit de concurrence** (`aborted`, `failed-precondition`) — un autre appareil a modifié les mêmes documents
+    - **Erreur réseau** (`unavailable`, `deadline-exceeded`)
 
 - **Correction DLV :** la fonction `isLotSellable()` vérifie désormais d'abord la **DLV** (Date Limite de Vente) avant la DLC (Date Limite de Consommation). Si la DLV est présente et expirée, le lot est considéré invendable même si la DLC est encore valide. La DLV est la date de vente primaire ; la DLC reste la date ultime de consommation. Dans `restaurerCommande()`, le champ `dlv` est préservé depuis les données distantes (fallback sur `dlc` pour les lots legacy).
 
@@ -449,9 +456,10 @@ Les entrées d'historique utilisent trois préfixes d'ID :
   - Avantages : pas de XSS par interpolation d'attributs JS, fonctionne sur le contenu re-rendu (notamment les modales), réduit les fuites mémoire.
 
 - **Validation des IDs V11 :** la fonction `v11ValidateId()` vérifie désormais que les IDs contiennent uniquement des caractères autorisés : lettres, chiffres, `_`, `:`, `-`, `.` (1-128 caractères). Un ID invalide bloque la synchronisation mais les données restent en localStorage.
-- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration.
+- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration. Depuis v11.6, l'import capture un snapshot complet (localStorage + caches mémoire V11) avant la première écriture. Si un `DB.set()` échoue (exception ou valeur de retour inattendue), un rollback synchrone restaure localStorage, `V11._localCache`, `V11._versions`, la file d'attente, la liste des tables protégées et les clés de versions, en écrivant directement dans localStorage (sans repasser par `DB.set`). Le toast d'erreur confirme qu'aucune donnée n'a été modifiée.
 
 - **Capacitor 8** pour emballage mobile Android/iOS
 - **`safeColor()`** — nouvelle fonction utilitaire qui valide les couleurs hexadécimales avant interpolation dans les attributs `style` (prévient l'injection CSS). Fallback sur `#cccccc` si la valeur est invalide.
 - **Responsive (mobile first)**
 - **Works offline après premier chargement** (les opérations hors-ligne sont mises en file d'attente dans `thecol_v11_queue`)
+- **Validation des unités en production (v11.6) :** la confirmation de production vérifie la compatibilité des unités entre chaque ingrédient de recette et l'article d'inventaire correspondant via `areUnitsCompatible()`. Si les unités sont incompatibles (ex. grammes vs litres) ou si la conversion échoue, la production est bloquée avec un toast d'erreur et la liste des ingrédients en échec. Les alertes de stock insuffisant restent des warnings confirmables.

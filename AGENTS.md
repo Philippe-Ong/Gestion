@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v11.3
+**Current Version:** v11.6
 
 ## 1. Build, Lint, and Test Commands
 
@@ -201,9 +201,9 @@ Dual-category inventory system:
 ### Bulletins de Livraison (BL) (`#livraisons`)
 Delivery note generation and export:
 - **Generation:** `generateBL(commandeId)` — creates BL from delivered order
-- **Arome mapping:** `AROME_BL_NAMES` — maps internal names to BL template format
+- **Arome resolution:** `getAromeBLName()` — resolves any configured aroma (active or inactive) via `DB.get('aromes')` instead of a static mapping
 - **Excel export:** `exportBLExcel(livraisonId)` — fills `templates/bl_template.xlsx` with data
-- **Row mapping:** `ROW_MAP` — positions data in specific template cells by arome/format
+- **Dynamic row filling:** sorts items alphabetically and fills rows starting at line 15; inserts extra rows if needed and shifts the footer (facturation, IFCO, signature) accordingly — no longer relies on a static `ROW_MAP`
 - **Transactional delivery (v11.2) :** `deliverCommandeTransaction(commandeId, allocations)` exécute une transaction atomique Firestore multi-documents (commande + lots). Exige : connexion réseau (`navigator.onLine`), Firebase Auth, V11 ready, file d'attente vide pour les documents ciblés. En cas d'échec, aucun document n'est modifié.
 - **Guards :** livraison impossible sans connexion ; anti-double-clic sur le bouton Confirmer ; validation de l'intégrité des données distantes (statut, stock, DLV/DLC) avant écriture.
 
