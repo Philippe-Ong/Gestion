@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.9**
+**v11.10**
 
 ## Adresse
 
@@ -43,7 +43,7 @@ Application de gestion pour votre entreprise de thé froid.
 ### Livraisons
 - Génération de Bulletins de Livraison (BL) depuis les commandes livrées
 - Export Excel des BL avec template pré-formaté
-- Export PDF des BL — aperçu HTML A4 imprimable via la boîte de dialogue du navigateur
+- Export PDF des BL — reproduction fidèle du template Excel (logo, coordonnées, tableau, IFCO, signature) via aperçu HTML A4 imprimable
 - Remplissage automatique des lignes par arôme/format, triés alphabétiquement
 - Saisie des caisses IFCO vertes/noires livrées
 
@@ -129,6 +129,17 @@ Application de gestion pour votre entreprise de thé froid.
   - **Pagination automatique** : 18 lignes maximum par page ; la dernière page limite à 11 lignes pour laisser la place aux blocs de total, IFCO, facturation et signatures. Les en-têtes (logo, numéro BL, page X/N) sont répétés sur chaque page.
   - **Notes internes** : non imprimées dans le PDF.
   - **Sans dépendance** : pas de bibliothèque externe — le PDF est généré via `window.print()` depuis une fenêtre ouverte. L'export enregistre uniquement la date locale d'export (`thecol_bl_export_dates`) et ne crée pas d'opération V11.
+  - **L'export Excel reste inchangé** et disponible en parallèle.
+
+### Nouveautés v11.10
+
+- **📄 PDF BL fidèle au template Excel** — L'aperçu HTML A4 de l'export PDF des Bulletins de Livraison (`exportBLPDF`) a été entièrement repensé pour reproduire fidèlement la mise en page du template Excel `templates/bl_template.xlsx`. Le mécanisme reste HTML + `window.print()` (pas de conversion XLSX→PDF), mais le rendu visuel s'appuie désormais sur 6 médias extraits dans `icons/bl-template/` :
+  - **Logo ThéCol** (`logo.jpeg`), **coordonnées** (`contact.png`), **titre « Bulletin de Livraison »** (`title.png`), **glyphe « À »** (`to.jpeg`), **signature Noah Bevegni** (`signature.png`), **décor montagne** (`mountain.png`).
+  - **En-tête** : logo et coordonnées à gauche ; titre, numéro BL discret, date et bloc destinataire (avec glyphe « À ») à droite.
+  - **Tableau** : fond blanc, grille noire intégrale (pas de fond vert d'en-tête).
+  - **IFCO et facturation** : disposition et libellés identiques au template (caisses vertes/noires livrées et retour, cases à cocher facturation).
+  - **Bas de page** : société cliente, auteur « Noah Bevegni, ThéCol », image de signature et décor montagne.
+  - **Pagination multi-page** conservée avec en-têtes répétés et pied de page « BL-XXX · Page X / N ».
   - **L'export Excel reste inchangé** et disponible en parallèle.
 
 ### Nouveautés v11.4

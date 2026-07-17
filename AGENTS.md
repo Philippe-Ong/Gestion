@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v11.9
+**Current Version:** v11.10
 
 ## 1. Build, Lint, and Test Commands
 
@@ -37,6 +37,7 @@ Because there are no automated tests:
 | `styles.css` | All styling, CSS custom properties, responsive breakpoints. |
 | `SPEC.md` | Data schemas and feature specifications. |
 | `templates/bl_template.xlsx` | Excel template for Bulletin de Livraison (BL) export. |
+| `icons/bl-template/` | Extracted media assets for PDF BL export (logo, title, signature, mountain, etc.). |
 | `capacitor.config.json` | Capacitor 8 config (appId, webDir). |
 | `scripts/copy-web.js` | Copies root web files into `www/` for native sync. |
 | `android/` `ios/` | Native scaffolds — committed, not edited manually. |
@@ -56,7 +57,7 @@ The `navigateTo(page)` function looks up the page name in a views map and calls 
 - `stock` - Gestion des lots, historique de production, statuts DLC
 - `pointage` - Saisie des heures employés avec tabs: pointage, historique, stats, employés
 - `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée)
-- `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF
+- `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF (design fidèle au template depuis v11.10)
 - `production` - Planificateur de production avec calcul automatique des ingrédients et gestion des cuves
 - `inventaire` - Gestion des consommables et équipements avec seuils d'alerte
 - `parametres` - Configuration employés, arômes, formats, recettes, clients
@@ -203,7 +204,7 @@ Delivery note generation and export:
 - **Generation:** `generateBL(commandeId)` — creates BL from delivered order
 - **Arome resolution:** `getAromeBLName()` — resolves any configured aroma (active or inactive) via `DB.get('aromes')` instead of a static mapping
 - **Excel export:** `exportBLExcel(livraisonId)` — fills `templates/bl_template.xlsx` with data
-- **PDF export (v11.9):** `exportBLPDF(livraisonId)` — opens an A4-format HTML preview in a new window and triggers the browser's native print dialog (no external library). The user saves as PDF or prints on paper via `window.print()`.
+- **PDF export (v11.10 — template fidelity):** `exportBLPDF(livraisonId)` — opens an A4-format HTML preview in a new window and triggers the browser's native print dialog (no external library). The user saves as PDF or prints on paper via `window.print()`. Since v11.10, the visual design faithfully reproduces the Excel template using 6 extracted media assets from `icons/bl-template/` (logo, coordinates, title, À glyph, signature, mountain) instead of a generic green-themed layout. The table uses a black grid on white, IFCO/facturation blocks match the template, and the bottom includes the signature image and mountain decoration.
 - **Dynamic row filling:** sorts items alphabetically and fills rows starting at line 15; inserts extra rows if needed and shifts the footer (facturation, IFCO, signature) accordingly — no longer relies on a static `ROW_MAP`
 - **Export dispatch (v11.9):** `exportPreparedBL(livraisonId, format)` is called with `'excel'` or `'pdf'` from the Préparer BL modal buttons (`data-click="export-bl-excel"` / `data-click="export-bl-pdf"`). Both save preparation data via `saveBLPreparation()` before exporting.
 - **Transactional delivery (v11.2) :** `deliverCommandeTransaction(commandeId, allocations)` exécute une transaction atomique Firestore multi-documents (commande + lots). Exige : connexion réseau (`navigator.onLine`), Firebase Auth, V11 ready, file d'attente vide pour les documents ciblés. En cas d'échec, aucun document n'est modifié.

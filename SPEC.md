@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.9
+**Version:** v11.10
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -216,17 +216,24 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 }
 ```
 
-**Export PDF des BL (`exportBLPDF`, v11.9) :**
-Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`).
+**Export PDF des BL (`exportBLPDF`, v11.10 — design fidèle au template) :**
+Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`). Depuis v11.10, le rendu visuel reproduit fidèlement la mise en page du template Excel `templates/bl_template.xlsx` en utilisant 6 médias extraits dans `icons/bl-template/`.
 
+- **Médias utilisés :**
+  - `icons/bl-template/logo.jpeg` — logo ThéCol
+  - `icons/bl-template/contact.png` — coordonnées postales ThéCol
+  - `icons/bl-template/title.png` — titre « Bulletin de Livraison »
+  - `icons/bl-template/to.jpeg` — glyphe « À » (destinataire)
+  - `icons/bl-template/signature.png` — signature Noah Bevegni
+  - `icons/bl-template/mountain.png` — décor montagne
 - **Fusion et tri :** les lignes de livraison de même arôme+format sont fusionnées (quantité cumulée). Les articles sont triés alphabétiquement par arôme puis par format.
-- **Données imprimées :** logo ThéCol, numéro BL, date, numéro de commande, coordonnées client (première page uniquement), tableau des articles (QTT, description, arôme, format), total bouteilles, caisses IFCO vertes/noires, mode de facturation, zones de signature client et ThéCol.
-- **Données non imprimées :** notes internes (`livraison.notes`).
+- **Données imprimées :** logo ThéCol + coordonnées, titre « Bulletin de Livraison », numéro BL discret, date, bloc destinataire avec glyphe « À » (société, contact, adresse, localité), tableau des articles (QTT, description, arôme, format) à grille noire, caisses IFCO vertes/noires (livrées et retour), mode de facturation (cases à cocher par marque `x`), société cliente, auteur « Noah Bevegni, ThéCol », image de signature et décor montagne.
+- **Données non imprimées :** numéro de commande, total bouteilles, notes internes (`livraison.notes`), zones de signature vierges.
 - **Pagination :**
   - 18 lignes articles maximum par page.
-  - Dernière page : 11 lignes maximum pour ménager l'espace des blocs finaux (total, IFCO, facturation, signatures).
-  - En-têtes (logo, infos BL, page X/N) répétés sur chaque page.
-  - Pied de page avec numéro BL et page X/N sur chaque page.
+  - Dernière page : 11 lignes maximum pour ménager l'espace des blocs finaux (IFCO, facturation, signature, montagne).
+  - En-têtes (logo, contact, titre, numéro BL, date, destinataire) répétés sur chaque page.
+  - Pied de page avec « BL-XXX · Page X / N » sur chaque page.
 - **Horodatage d'export :** seul `recordBLExportDate()` est appelé (clé locale `thecol_bl_export_dates`). Aucune opération V11 ni écriture Firestore.
 - **Export Excel (`exportBLExcel`) :** inchangé, toujours disponible. Le choix du format (Excel ou PDF) se fait depuis la modale Préparer BL via les boutons `data-click="export-bl-excel"` / `data-click="export-bl-pdf"`.
 - **Fonction de dispatch :** `exportPreparedBL(livraisonId, format)` — appelle `exportBLExcel` ou `exportBLPDF` selon le format.

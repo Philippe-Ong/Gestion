@@ -6894,7 +6894,6 @@ const exportBLPDF = (livraisonId) => {
     try {
         const livraisons = DB.get('livraisons') || [];
         const clients = DB.get('clients') || [];
-        const commandes = DB.get('commandes') || [];
         const formats = DB.get('formats') || [];
 
         const livraison = livraisons.find(l => l.id === livraisonId);
@@ -6904,7 +6903,6 @@ const exportBLPDF = (livraisonId) => {
         }
 
         const client = clients.find(c => c.id === livraison.clientId);
-        const commande = commandes.find(c => c.id === livraison.commandeId);
 
         const lignesFiltered = (livraison.lignes || []).filter(l => Number(l.quantite) > 0);
         if (lignesFiltered.length === 0) {
@@ -6947,21 +6945,15 @@ const exportBLPDF = (livraisonId) => {
             return;
         }
 
-        const totalBouteilles = sortedItems.reduce((sum, it) => sum + (Number(it.quantite) || 0), 0);
         const cVerte = parseInt(livraison.caissesVertesLivrees, 10) || 0;
         const cNoire = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
-        const facturationLabels = { email: 'Par email', poste: 'Par poste', autre: 'Autre mode' };
-        const facturationLabel = livraison.facturationMode && facturationLabels[livraison.facturationMode]
-            ? facturationLabels[livraison.facturationMode]
-            : 'Non renseigné';
 
         const clientSociete = client ? (client.societe || '') : '';
         const clientContact = client ? (client.nom || '') : '';
         const clientAdresse = client ? (client.adresse || '') : '';
         const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
         const blNum = getBLNumero(livraison);
-        const blDate = livraison.dateBL ? formatDate(livraison.dateBL) : '';
-        const cmdNum = commande ? getCommandeNumero(commande) : '';
+        const blDate = livraison.dateBL || '';
 
         const PER_PAGE = 18;
         const LAST_PAGE_MAX = 11;
@@ -6989,60 +6981,40 @@ const exportBLPDF = (livraisonId) => {
         };
         const pageChunks = buildPageChunks(sortedItems.length);
         const pageCount = pageChunks.length;
-        const logoUrl = new URL('icons/icon-192.png', window.location.href).href;
+
+        const assetUrl = (file) => new URL(`icons/bl-template/${file}`, window.location.href).href;
+        const logoUrl = assetUrl('logo.jpeg');
+        const contactUrl = assetUrl('contact.png');
+        const titleUrl = assetUrl('title.png');
+        const toUrl = assetUrl('to.jpeg');
+        const signatureUrl = assetUrl('signature.png');
+        const mountainUrl = assetUrl('mountain.png');
 
         const escapeAttr = (v) => escapeHtml(v).replace(/"/g, '&quot;');
 
         const renderHeader = (isFirstPage, pageNumber) => `
             <div class="pdf-header">
                 <div class="pdf-header-left">
-                    <img src="${escapeAttr(logoUrl)}" alt="ThéCol" class="pdf-logo">
-                    <div class="pdf-tagline">local · artisanal · saveurs originales</div>
+                    <img src="${escapeAttr(logoUrl)}" alt="Logo ThéCol" class="pdf-logo">
+                    <div class="pdf-tagline">local — artisanal — saveurs originales</div>
+                    <img src="${escapeAttr(contactUrl)}" alt="Coordonnées ThéCol" class="pdf-contact">
                 </div>
                 <div class="pdf-header-right">
-                    <div class="pdf-title">Bulletin de Livraison</div>
-                    ${isFirstPage ? '' : `<div class="pdf-subtitle">Suite — page ${pageNumber}</div>`}
+                    <img src="${escapeAttr(titleUrl)}" alt="Bulletin de Livraison" class="pdf-title-img">
+                    <div class="pdf-blnum">${escapeHtml(blNum)}</div>
+                    <div class="pdf-date-row"><span class="pdf-date-label">Date :</span><span class="pdf-date-value">${escapeHtml(blDate)}</span></div>
+                    <div class="pdf-recipient">
+                        <img src="${escapeAttr(toUrl)}" alt="À" class="pdf-to">
+                        <div class="pdf-recipient-body">
+                            <div class="pdf-recipient-line">${escapeHtml(clientSociete)}</div>
+                            ${clientContact ? `<div class="pdf-recipient-line">${escapeHtml(clientContact)}</div>` : ''}
+                            ${clientAdresse ? `<div class="pdf-recipient-line">${escapeHtml(clientAdresse)}</div>` : ''}
+                            ${clientLocalite ? `<div class="pdf-recipient-line">${escapeHtml(clientLocalite)}</div>` : ''}
+                        </div>
+                    </div>
                 </div>
             </div>
-            <div class="pdf-meta">
-                ${isFirstPage ? `
-                    <div class="pdf-meta-block">
-                        <div class="pdf-meta-label">N°</div>
-                        <div class="pdf-meta-value">${escapeHtml(blNum)}</div>
-                    </div>
-                    <div class="pdf-meta-block">
-                        <div class="pdf-meta-label">Date</div>
-                        <div class="pdf-meta-value">${escapeHtml(blDate)}</div>
-                    </div>
-                    <div class="pdf-meta-block">
-                        <div class="pdf-meta-label">Commande</div>
-                        <div class="pdf-meta-value">${escapeHtml(cmdNum)}</div>
-                    </div>
-                    <div class="pdf-meta-block pdf-meta-spacer"></div>
-                ` : `
-                    <div class="pdf-meta-block">
-                        <div class="pdf-meta-label">N°</div>
-                        <div class="pdf-meta-value">${escapeHtml(blNum)}</div>
-                    </div>
-                    <div class="pdf-meta-block">
-                        <div class="pdf-meta-label">Suite</div>
-                        <div class="pdf-meta-value">Page ${pageNumber}</div>
-                    </div>
-                `}
-                <div class="pdf-meta-block pdf-meta-page">
-                    <div class="pdf-meta-label">Page</div>
-                    <div class="pdf-meta-value">${pageNumber} / ${pageCount}</div>
-                </div>
-            </div>
-            ${isFirstPage ? `
-                <div class="pdf-client">
-                    <div class="pdf-client-title">Livré à</div>
-                    <div class="pdf-client-line">${escapeHtml(clientSociete)}</div>
-                    <div class="pdf-client-line">${escapeHtml(clientContact)}</div>
-                    <div class="pdf-client-line">${escapeHtml(clientAdresse)}</div>
-                    <div class="pdf-client-line">${escapeHtml(clientLocalite)}</div>
-                </div>
-            ` : ''}
+            ${!isFirstPage ? `<div class="pdf-subtitle">Suite — page ${pageNumber}</div>` : ''}
         `;
 
         const renderTableHead = () => `
@@ -7058,6 +7030,8 @@ const exportBLPDF = (livraisonId) => {
                 <tbody>
         `;
 
+        const factMark = (mode) => (livraison.facturationMode === mode ? 'x' : ' ');
+
         let pagesHtml = '';
         let offset = 0;
         for (let p = 0; p < pageChunks.length; p++) {
@@ -7070,7 +7044,7 @@ const exportBLPDF = (livraisonId) => {
             const rowsHtml = chunk.map(it => `
                 <tr>
                     <td class="col-qtt">${escapeHtml(String(it.quantite))}</td>
-                    <td class="col-desc">Thé froid artisanal</td>
+                    <td class="col-desc">ThéCol - Thé Froid Artisanal</td>
                     <td class="col-arome">${escapeHtml(it.aromeNom || '')}</td>
                     <td class="col-format">${escapeHtml(it.formatNom || '')}</td>
                 </tr>
@@ -7084,39 +7058,32 @@ const exportBLPDF = (livraisonId) => {
                     </tbody>
                     </table>
                     ${isLastPage ? `
-                        <div class="pdf-totals">
-                            <div class="pdf-total-line"><span>Total bouteilles</span><strong>${escapeHtml(String(totalBouteilles))}</strong></div>
-                            <div class="pdf-ifco">
-                                <div class="pdf-ifco-item">
-                                    <div class="pdf-ifco-caisse pdf-ifco-vert"></div>
-                                    <div class="pdf-ifco-label">Caisses vertes livrées</div>
-                                    <div class="pdf-ifco-value">${escapeHtml(String(cVerte))}</div>
+                        <div class="pdf-foot">
+                            <div class="pdf-foot-grid">
+                                <div class="pdf-ifco">
+                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark">${escapeHtml(String(cVerte || ''))}</span><span class="pdf-ifco-label">Livré : "ancienne caisse verte" IFCO</span></div>
+                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark">${escapeHtml(String(cNoire || ''))}</span><span class="pdf-ifco-label">Livré : "nouvelle caisse noire" IFCO</span></div>
+                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark"> </span><span class="pdf-ifco-label">Retour : "ancienne caisse verte" IFCO</span></div>
+                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark"> </span><span class="pdf-ifco-label">Retour : "nouvelle caisse noire" IFCO</span></div>
                                 </div>
-                                <div class="pdf-ifco-item">
-                                    <div class="pdf-ifco-caisse pdf-ifco-noir"></div>
-                                    <div class="pdf-ifco-label">Caisses noires livrées</div>
-                                    <div class="pdf-ifco-value">${escapeHtml(String(cNoire))}</div>
+                                <div class="pdf-facturation">
+                                    <div class="pdf-fact-title">Facturation :</div>
+                                    <div class="pdf-fact-line"><span class="pdf-fact-mark">${factMark('email')}</span><span>par E-mail</span></div>
+                                    <div class="pdf-fact-line"><span class="pdf-fact-mark">${factMark('poste')}</span><span>par poste (+ 1CHF)</span></div>
+                                    <div class="pdf-fact-line"><span class="pdf-fact-mark">${factMark('autre')}</span><span>Autre :</span></div>
+                                    <div class="pdf-fact-place">À&nbsp;&nbsp;sur place à la livraison</div>
                                 </div>
                             </div>
-                            <div class="pdf-facturation">
-                                <span class="pdf-facturation-label">Mode de facturation :</span>
-                                <strong>${escapeHtml(facturationLabel)}</strong>
-                            </div>
-                        </div>
-                        <div class="pdf-signatures">
-                            <div class="pdf-sig-block">
-                                <div class="pdf-sig-label">Signature Client</div>
-                                <div class="pdf-sig-line"></div>
-                            </div>
-                            <div class="pdf-sig-block">
-                                <div class="pdf-sig-label">Signature ThéCol</div>
-                                <div class="pdf-sig-line"></div>
+                            <div class="pdf-client-line-bottom">${escapeHtml(clientSociete)}</div>
+                            <div class="pdf-author">Noah Bevegni, ThéCol</div>
+                            <div class="pdf-foot-art">
+                                <img src="${escapeAttr(signatureUrl)}" alt="Signature Noah Bevegni" class="pdf-signature">
+                                <img src="${escapeAttr(mountainUrl)}" alt="Décor montagne" class="pdf-mountain">
                             </div>
                         </div>
                     ` : ''}
                     <div class="pdf-page-footer">
-                        <span>BL-${escapeHtml(blNum)}</span>
-                        <span>Page ${pageNumber} / ${pageCount}</span>
+                        <span>BL-${escapeHtml(blNum)} · Page ${pageNumber} / ${pageCount}</span>
                     </div>
                 </div>
             `;
@@ -7126,56 +7093,52 @@ const exportBLPDF = (livraisonId) => {
             * { box-sizing: border-box; }
             html, body { margin: 0; padding: 0; background: #fff; color: #1f1f1f; font-family: 'Helvetica Neue', Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             .no-print { position: fixed; top: 12px; right: 12px; z-index: 1000; }
-            .no-print button { background: #5D7B3E; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
-            .no-print button:hover { background: #4d6632; }
+            .no-print button { background: #1f1f1f; color: #fff; border: none; padding: 10px 18px; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
+            .no-print button:hover { background: #000; }
             @page { size: A4; margin: 0; }
-            .pdf-page { width: 210mm; height: 297mm; padding: 18mm 16mm 20mm 16mm; margin: 0 auto; background: #fff; page-break-after: always; display: flex; flex-direction: column; overflow: hidden; }
-            .pdf-page .pdf-table { flex: 0 0 auto; }
+            .pdf-page { width: 210mm; height: 297mm; padding: 16mm 16mm 18mm 16mm; margin: 0 auto; background: #fff; page-break-after: always; display: flex; flex-direction: column; overflow: hidden; }
             .pdf-page:last-child { page-break-after: auto; }
-            .pdf-header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #5D7B3E; padding-bottom: 10px; margin-bottom: 14px; }
-            .pdf-header-left { display: flex; flex-direction: column; gap: 6px; }
-            .pdf-logo { width: 64px; height: 64px; object-fit: contain; }
-            .pdf-tagline { font-size: 11px; color: #5D7B3E; font-style: italic; letter-spacing: 0.3px; }
-            .pdf-header-right { text-align: right; }
-            .pdf-title { font-size: 22px; font-weight: 700; color: #5D7B3E; letter-spacing: 0.5px; }
-            .pdf-subtitle { font-size: 12px; color: #888; margin-top: 4px; font-style: italic; }
-            .pdf-meta { display: flex; gap: 28px; margin-bottom: 14px; font-size: 12px; align-items: flex-start; }
-            .pdf-meta-block { display: flex; flex-direction: column; }
-            .pdf-meta-spacer { flex: 1; }
-            .pdf-meta-page { margin-left: auto; text-align: right; }
-            .pdf-meta-label { font-size: 10px; text-transform: uppercase; color: #888; letter-spacing: 0.5px; }
-            .pdf-meta-value { font-weight: 600; color: #1f1f1f; font-size: 13px; margin-top: 2px; }
-            .pdf-client { border: 1px solid #e3e3e3; border-left: 3px solid #5D7B3E; padding: 10px 14px; border-radius: 4px; margin-bottom: 16px; background: #fafaf7; font-size: 12px; }
-            .pdf-client-title { font-size: 10px; text-transform: uppercase; color: #5D7B3E; font-weight: 700; margin-bottom: 4px; letter-spacing: 0.5px; }
-            .pdf-client-line { line-height: 1.5; color: #2a2a2a; }
-            .pdf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-            .pdf-table thead th { background: #5D7B3E; color: #fff; padding: 8px 10px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
-            .pdf-table thead th.col-qtt { width: 12%; text-align: center; }
-            .pdf-table thead th.col-desc { width: 38%; }
-            .pdf-table thead th.col-arome { width: 30%; }
-            .pdf-table thead th.col-format { width: 20%; text-align: right; }
-            .pdf-table tbody td { padding: 7px 10px; border-bottom: 1px solid #ececec; }
-            .pdf-table tbody td.col-qtt { text-align: center; font-weight: 700; color: #5D7B3E; }
-            .pdf-table tbody td.col-desc { color: #555; }
+            .pdf-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12mm; }
+            .pdf-header-left { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 80mm; }
+            .pdf-logo { width: 28mm; height: 28mm; object-fit: contain; }
+            .pdf-tagline { font-size: 9.5px; color: #5D7B3E; font-style: italic; letter-spacing: 0.2px; margin-top: 2px; }
+            .pdf-contact { width: 58mm; max-width: 100%; height: auto; margin-top: 4px; object-fit: contain; }
+            .pdf-header-right { display: flex; flex-direction: column; align-items: flex-end; text-align: right; flex: 1; }
+            .pdf-title-img { width: 80mm; max-width: 100%; height: auto; object-fit: contain; margin-bottom: 2px; }
+            .pdf-blnum { font-size: 14px; font-weight: 600; color: #1f1f1f; letter-spacing: 0.4px; margin: 2px 0 2px 0; }
+            .pdf-date-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; color: #2a2a2a; margin-bottom: 6px; }
+            .pdf-recipient { display: flex; align-items: flex-start; gap: 4mm; margin-top: 4px; text-align: left; }
+            .pdf-to { width: 14mm; height: auto; object-fit: contain; flex-shrink: 0; }
+            .pdf-recipient-body { display: flex; flex-direction: column; gap: 1px; font-size: 11px; color: #1f1f1f; line-height: 1.45; }
+            .pdf-recipient-line { white-space: pre-wrap; }
+            .pdf-subtitle { font-size: 10px; color: #888; font-style: italic; margin: 8px 0 4px 0; text-align: right; }
+            .pdf-table { width: 125mm; max-width: 100%; border-collapse: collapse; font-size: 11px; color: #1f1f1f; margin-top: 8px; }
+            .pdf-table thead th { background: transparent; color: #1f1f1f; padding: 0 8px 2px; text-align: left; font-weight: 700; font-size: 11px; border: none; }
+            .pdf-table thead th.col-qtt { width: 14%; text-align: center; }
+            .pdf-table thead th.col-desc { width: 44%; }
+            .pdf-table thead th.col-arome { width: 26%; }
+            .pdf-table thead th.col-format { width: 16%; text-align: right; }
+            .pdf-table tbody td { padding: 5px 8px; border: 1px solid #000; }
+            .pdf-table tbody td.col-qtt { text-align: center; font-weight: 600; }
+            .pdf-table tbody td.col-desc { color: #1f1f1f; }
             .pdf-table tbody td.col-arome { font-weight: 600; }
-            .pdf-table tbody td.col-format { text-align: right; color: #555; }
-            .pdf-totals { margin-top: 18px; }
-            .pdf-total-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 14px; padding: 8px 0; border-top: 1px solid #5D7B3E; border-bottom: 1px solid #ececec; margin-bottom: 14px; }
-            .pdf-total-line strong { color: #5D7B3E; font-size: 16px; }
-            .pdf-ifco { display: flex; gap: 18px; margin-bottom: 12px; }
-            .pdf-ifco-item { flex: 1; display: flex; align-items: center; gap: 10px; border: 1px solid #ececec; padding: 10px 12px; border-radius: 4px; background: #fafaf7; }
-            .pdf-ifco-caisse { width: 26px; height: 20px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(0,0,0,0.15); }
-            .pdf-ifco-vert { background: #2e7d32; }
-            .pdf-ifco-noir { background: #1a1a1a; }
-            .pdf-ifco-label { flex: 1; font-size: 11px; color: #555; }
-            .pdf-ifco-value { font-weight: 700; font-size: 14px; color: #1f1f1f; }
-            .pdf-facturation { font-size: 12px; color: #333; margin-bottom: 18px; padding: 6px 0; }
-            .pdf-facturation-label { color: #888; margin-right: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
-            .pdf-signatures { display: flex; gap: 32px; margin-top: 24px; }
-            .pdf-sig-block { flex: 1; }
-            .pdf-sig-label { font-size: 11px; text-transform: uppercase; color: #5D7B3E; font-weight: 600; margin-bottom: 30px; letter-spacing: 0.5px; }
-            .pdf-sig-line { border-top: 1px solid #1f1f1f; height: 0; }
-            .pdf-page-footer { font-size: 10px; color: #aaa; margin-top: auto; padding-top: 6px; border-top: 1px solid #ececec; display: flex; justify-content: space-between; }
+            .pdf-table tbody td.col-format { text-align: right; }
+            .pdf-foot { margin-top: auto; padding-top: 10px; }
+            .pdf-foot-grid { display: flex; justify-content: space-between; align-items: flex-start; gap: 12mm; margin-bottom: 10px; }
+            .pdf-ifco { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+            .pdf-ifco-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #1f1f1f; }
+            .pdf-ifco-mark { display: inline-block; min-width: 22px; padding: 1px 6px; border: 1px solid #000; background: #fff; color: #000; text-align: center; font-weight: 700; font-size: 11px; line-height: 1.2; }
+            .pdf-facturation { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #1f1f1f; text-align: left; }
+            .pdf-fact-title { font-weight: 700; margin-bottom: 1px; }
+            .pdf-fact-line { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+            .pdf-fact-mark { display: inline-block; width: 5mm; min-height: 4mm; border-right: 1px solid #000; text-align: center; font-weight: 700; line-height: 4mm; }
+            .pdf-fact-place { margin-top: 2px; white-space: nowrap; }
+            .pdf-client-line-bottom { font-size: 11px; color: #1f1f1f; margin-top: 4px; }
+            .pdf-author { font-size: 11px; color: #1f1f1f; font-style: italic; margin-top: 2px; }
+            .pdf-foot-art { display: flex; justify-content: space-between; align-items: flex-end; gap: 8mm; margin-top: 6px; }
+            .pdf-signature { height: 28mm; width: auto; object-fit: contain; }
+            .pdf-mountain { height: 22mm; width: auto; object-fit: contain; }
+            .pdf-page-footer { font-size: 9px; color: #888; margin-top: 8px; padding-top: 4px; text-align: center; }
             @media print {
                 .no-print { display: none !important; }
                 .pdf-page { margin: 0; box-shadow: none; }
