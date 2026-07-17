@@ -65,6 +65,7 @@ Puis dans Xcode : Product → Archive → Distribute App.
 - **localStorage fonctionne** dans Capacitor (il utilise WebView native).
 - **Firebase fonctionne** aussi mais l'auth web peut nécessiter des plugins natifs pour OAuth.
 - **CDN externes** (Outfit font, XLSX, Firebase SDK) : le téléphone doit avoir internet au moins au premier lancement pour les charger. Pour offline complet, on peut télécharger ces libs en local plus tard.
+- **Export PDF (`window.print()`)** : l'export PDF des BL utilise la boîte de dialogue d'impression du navigateur. Il est pris en charge dans les navigateurs et PWA qui exposent le dialogue d'impression système. Dans les WebViews natives Capacitor (Android WebView, iOS WKWebView), la disponibilité de `window.print()` dépend de la plateforme et doit être testée sur chaque cible. Si le dialogue d'impression est absent, un plugin natif (ex. Capacitor Print) ou une génération de fichier PDF avec partage natif peut être nécessaire. L'export Excel reste l'alternative disponible sur toutes les plateformes.
 - L'**ID de l'app** est `ch.thecol.gestion` (modifiable dans `capacitor.config.json` + projets natifs).
 
 ## Pour mettre à jour après modif du code web

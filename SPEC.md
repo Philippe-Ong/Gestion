@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.8
+**Version:** v11.9
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -215,6 +215,21 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   ]
 }
 ```
+
+**Export PDF des BL (`exportBLPDF`, v11.9) :**
+Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`).
+
+- **Fusion et tri :** les lignes de livraison de même arôme+format sont fusionnées (quantité cumulée). Les articles sont triés alphabétiquement par arôme puis par format.
+- **Données imprimées :** logo ThéCol, numéro BL, date, numéro de commande, coordonnées client (première page uniquement), tableau des articles (QTT, description, arôme, format), total bouteilles, caisses IFCO vertes/noires, mode de facturation, zones de signature client et ThéCol.
+- **Données non imprimées :** notes internes (`livraison.notes`).
+- **Pagination :**
+  - 18 lignes articles maximum par page.
+  - Dernière page : 11 lignes maximum pour ménager l'espace des blocs finaux (total, IFCO, facturation, signatures).
+  - En-têtes (logo, infos BL, page X/N) répétés sur chaque page.
+  - Pied de page avec numéro BL et page X/N sur chaque page.
+- **Horodatage d'export :** seul `recordBLExportDate()` est appelé (clé locale `thecol_bl_export_dates`). Aucune opération V11 ni écriture Firestore.
+- **Export Excel (`exportBLExcel`) :** inchangé, toujours disponible. Le choix du format (Excel ou PDF) se fait depuis la modale Préparer BL via les boutons `data-click="export-bl-excel"` / `data-click="export-bl-pdf"`.
+- **Fonction de dispatch :** `exportPreparedBL(livraisonId, format)` — appelle `exportBLExcel` ou `exportBLPDF` selon le format.
 
 ### Pointages
 ```json

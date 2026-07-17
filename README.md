@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.8**
+**v11.9**
 
 ## Adresse
 
@@ -43,7 +43,8 @@ Application de gestion pour votre entreprise de thé froid.
 ### Livraisons
 - Génération de Bulletins de Livraison (BL) depuis les commandes livrées
 - Export Excel des BL avec template pré-formaté
-- Remplissage automatique des lignes par arôme/format
+- Export PDF des BL — aperçu HTML A4 imprimable via la boîte de dialogue du navigateur
+- Remplissage automatique des lignes par arôme/format, triés alphabétiquement
 - Saisie des caisses IFCO vertes/noires livrées
 
 ### Production
@@ -120,6 +121,15 @@ Application de gestion pour votre entreprise de thé froid.
 ### Nouveautés v11.8
 
 - **🔢 Numéro de lot partagé par arôme et date** — À l'ajout manuel, les lots ayant le même arôme et la même date de production partagent un `numLot` commun, même si le format diffère. Les formats restent des enregistrements de stock distincts. En cas d'arôme+format+date strictement identiques, la quantité est fusionnée avec le lot existant. La DLV et la DLC du lot de référence sont toujours reprises ; si les dates saisies divergent, un avertissement en français est affiché.
+
+### Nouveautés v11.9
+
+- **📄 Export PDF des Bulletins de Livraison** — Depuis la modale Préparer BL, deux boutons permettent désormais d'exporter au choix : **Exporter Excel** (inchangé) ou **Exporter PDF**. Le PDF n'est pas un fichier généré silencieusement : c'est un aperçu HTML au format A4 qui ouvre la boîte de dialogue d'impression du navigateur, permettant à l'utilisateur d'enregistrer au format PDF ou d'imprimer sur papier.
+  - **Mise en page ThéCol** : logo, coordonnées client, numéro BL/date/commande, articles fusionnés et triés par arôme/format, total, caisses IFCO, mode de facturation et zones de signature.
+  - **Pagination automatique** : 18 lignes maximum par page ; la dernière page limite à 11 lignes pour laisser la place aux blocs de total, IFCO, facturation et signatures. Les en-têtes (logo, numéro BL, page X/N) sont répétés sur chaque page.
+  - **Notes internes** : non imprimées dans le PDF.
+  - **Sans dépendance** : pas de bibliothèque externe — le PDF est généré via `window.print()` depuis une fenêtre ouverte. L'export enregistre uniquement la date locale d'export (`thecol_bl_export_dates`) et ne crée pas d'opération V11.
+  - **L'export Excel reste inchangé** et disponible en parallèle.
 
 ### Nouveautés v11.4
 

@@ -960,6 +960,9 @@ CLICK_HANDLERS['restaurer-commande'] = (el) => restaurerCommande(el.getAttribute
 CLICK_HANDLERS['show-livraison-details'] = (el) => showLivraisonDetails(el.getAttribute('data-id'));
 CLICK_HANDLERS['prepare-bl-export'] = (el) => showPrepareBLExportModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['delete-livraison'] = (el) => deleteLivraison(el.getAttribute('data-id'));
+CLICK_HANDLERS['close-modal'] = () => modal.hide();
+CLICK_HANDLERS['export-bl-excel'] = (el) => exportPreparedBL(el.getAttribute('data-id'), 'excel');
+CLICK_HANDLERS['export-bl-pdf'] = (el) => exportPreparedBL(el.getAttribute('data-id'), 'pdf');
 
 // ---------------------------------------------------------------------------
 // Production
@@ -6822,16 +6825,10 @@ const showPrepareBLExportModal = (livraisonId) => {
             ` : '<p class="text-muted">Aucun lot tracé pour cette livraison.</p>'}
         </div>
     `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" id="confirmBLExportBtn">Exporter Excel</button>
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button class="btn btn-secondary" data-click="export-bl-excel" data-id="${escapeHtml(livraisonId)}">Exporter Excel</button>
+        <button class="btn btn-primary" data-click="export-bl-pdf" data-id="${escapeHtml(livraisonId)}">Exporter PDF</button>
     `, 'large');
-
-    document.getElementById('confirmBLExportBtn')?.addEventListener('click', () => {
-        const saved = saveBLPreparation(livraisonId);
-        if (!saved) return;
-        modal.hide();
-        exportBLExcel(saved.id);
-    });
 };
 
 const generateBL = (commandeId) => {
@@ -6879,6 +6876,359 @@ const generateBL = (commandeId) => {
     DB.set('livraisons', livraisons);
 
     return livraison;
+};
+
+const exportPreparedBL = (livraisonId, format) => {
+    const saved = saveBLPreparation(livraisonId);
+    if (!saved) return;
+    modal.hide();
+    if (format === 'pdf') {
+        exportBLPDF(saved.id);
+    } else {
+        exportBLExcel(saved.id);
+    }
+};
+
+const exportBLPDF = (livraisonId) => {
+    let popup = null;
+    try {
+        const livraisons = DB.get('livraisons') || [];
+        const clients = DB.get('clients') || [];
+        const commandes = DB.get('commandes') || [];
+        const formats = DB.get('formats') || [];
+
+        const livraison = livraisons.find(l => l.id === livraisonId);
+        if (!livraison) {
+            showToast('Livraison non trouvée', 'error');
+            return;
+        }
+
+        const client = clients.find(c => c.id === livraison.clientId);
+        const commande = commandes.find(c => c.id === livraison.commandeId);
+
+        const lignesFiltered = (livraison.lignes || []).filter(l => Number(l.quantite) > 0);
+        if (lignesFiltered.length === 0) {
+            showToast('Aucun article à livrer', 'warning');
+            return;
+        }
+
+        const merged = {};
+        let skippedCount = 0;
+        lignesFiltered.forEach(l => {
+            const fmt = formats.find(f => f.id === l.formatId);
+            const fmtLabel = fmt ? `${fmt.contenanceCl} cl` : (l.formatNom || '');
+            if (!fmtLabel || !fmtLabel.trim()) {
+                skippedCount++;
+                return;
+            }
+            const canonicalArome = getAromeBLName(l.aromeNom || '') || l.aromeNom || '';
+            const key = `${canonicalArome}|${fmtLabel}`;
+            if (merged[key]) {
+                merged[key].quantite += Number(l.quantite) || 0;
+            } else {
+                merged[key] = { aromeNom: canonicalArome, formatNom: fmtLabel, quantite: Number(l.quantite) || 0 };
+            }
+        });
+
+        if (skippedCount > 0) {
+            showToast(`${skippedCount} article(s) ignoré(s) — libellé de format indisponible`, 'warning');
+        }
+
+        const sortedItems = Object.values(merged).sort((a, b) => {
+            const aN = (a.aromeNom || '').toLowerCase();
+            const bN = (b.aromeNom || '').toLowerCase();
+            if (aN < bN) return -1;
+            if (aN > bN) return 1;
+            return (a.formatNom || '').localeCompare(b.formatNom || '');
+        });
+
+        if (sortedItems.length === 0) {
+            showToast('Aucune ligne exploitable pour générer le BL — tous les articles ont été ignorés (format manquant)', 'error');
+            return;
+        }
+
+        const totalBouteilles = sortedItems.reduce((sum, it) => sum + (Number(it.quantite) || 0), 0);
+        const cVerte = parseInt(livraison.caissesVertesLivrees, 10) || 0;
+        const cNoire = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
+        const facturationLabels = { email: 'Par email', poste: 'Par poste', autre: 'Autre mode' };
+        const facturationLabel = livraison.facturationMode && facturationLabels[livraison.facturationMode]
+            ? facturationLabels[livraison.facturationMode]
+            : 'Non renseigné';
+
+        const clientSociete = client ? (client.societe || '') : '';
+        const clientContact = client ? (client.nom || '') : '';
+        const clientAdresse = client ? (client.adresse || '') : '';
+        const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
+        const blNum = getBLNumero(livraison);
+        const blDate = livraison.dateBL ? formatDate(livraison.dateBL) : '';
+        const cmdNum = commande ? getCommandeNumero(commande) : '';
+
+        const PER_PAGE = 18;
+        const LAST_PAGE_MAX = 11;
+        const buildPageChunks = (total) => {
+            if (total <= LAST_PAGE_MAX) return [total];
+            const chunks = [];
+            let remaining = total;
+            while (remaining > PER_PAGE) {
+                const after = remaining - PER_PAGE;
+                if (after > LAST_PAGE_MAX) {
+                    chunks.push(PER_PAGE);
+                    remaining = after;
+                } else if (after >= 0) {
+                    chunks.push(PER_PAGE);
+                    remaining = after;
+                }
+            }
+            if (remaining > LAST_PAGE_MAX) {
+                chunks.push(remaining - LAST_PAGE_MAX);
+                chunks.push(LAST_PAGE_MAX);
+            } else if (remaining > 0) {
+                chunks.push(remaining);
+            }
+            return chunks;
+        };
+        const pageChunks = buildPageChunks(sortedItems.length);
+        const pageCount = pageChunks.length;
+        const logoUrl = new URL('icons/icon-192.png', window.location.href).href;
+
+        const escapeAttr = (v) => escapeHtml(v).replace(/"/g, '&quot;');
+
+        const renderHeader = (isFirstPage, pageNumber) => `
+            <div class="pdf-header">
+                <div class="pdf-header-left">
+                    <img src="${escapeAttr(logoUrl)}" alt="ThéCol" class="pdf-logo">
+                    <div class="pdf-tagline">local · artisanal · saveurs originales</div>
+                </div>
+                <div class="pdf-header-right">
+                    <div class="pdf-title">Bulletin de Livraison</div>
+                    ${isFirstPage ? '' : `<div class="pdf-subtitle">Suite — page ${pageNumber}</div>`}
+                </div>
+            </div>
+            <div class="pdf-meta">
+                ${isFirstPage ? `
+                    <div class="pdf-meta-block">
+                        <div class="pdf-meta-label">N°</div>
+                        <div class="pdf-meta-value">${escapeHtml(blNum)}</div>
+                    </div>
+                    <div class="pdf-meta-block">
+                        <div class="pdf-meta-label">Date</div>
+                        <div class="pdf-meta-value">${escapeHtml(blDate)}</div>
+                    </div>
+                    <div class="pdf-meta-block">
+                        <div class="pdf-meta-label">Commande</div>
+                        <div class="pdf-meta-value">${escapeHtml(cmdNum)}</div>
+                    </div>
+                    <div class="pdf-meta-block pdf-meta-spacer"></div>
+                ` : `
+                    <div class="pdf-meta-block">
+                        <div class="pdf-meta-label">N°</div>
+                        <div class="pdf-meta-value">${escapeHtml(blNum)}</div>
+                    </div>
+                    <div class="pdf-meta-block">
+                        <div class="pdf-meta-label">Suite</div>
+                        <div class="pdf-meta-value">Page ${pageNumber}</div>
+                    </div>
+                `}
+                <div class="pdf-meta-block pdf-meta-page">
+                    <div class="pdf-meta-label">Page</div>
+                    <div class="pdf-meta-value">${pageNumber} / ${pageCount}</div>
+                </div>
+            </div>
+            ${isFirstPage ? `
+                <div class="pdf-client">
+                    <div class="pdf-client-title">Livré à</div>
+                    <div class="pdf-client-line">${escapeHtml(clientSociete)}</div>
+                    <div class="pdf-client-line">${escapeHtml(clientContact)}</div>
+                    <div class="pdf-client-line">${escapeHtml(clientAdresse)}</div>
+                    <div class="pdf-client-line">${escapeHtml(clientLocalite)}</div>
+                </div>
+            ` : ''}
+        `;
+
+        const renderTableHead = () => `
+            <table class="pdf-table">
+                <thead>
+                    <tr>
+                        <th class="col-qtt">QTT</th>
+                        <th class="col-desc">Description</th>
+                        <th class="col-arome">Arôme</th>
+                        <th class="col-format">Format</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        let pagesHtml = '';
+        let offset = 0;
+        for (let p = 0; p < pageChunks.length; p++) {
+            const isFirstPage = p === 0;
+            const isLastPage = p === pageChunks.length - 1;
+            const pageNumber = p + 1;
+            const size = pageChunks[p];
+            const chunk = sortedItems.slice(offset, offset + size);
+            offset += size;
+            const rowsHtml = chunk.map(it => `
+                <tr>
+                    <td class="col-qtt">${escapeHtml(String(it.quantite))}</td>
+                    <td class="col-desc">Thé froid artisanal</td>
+                    <td class="col-arome">${escapeHtml(it.aromeNom || '')}</td>
+                    <td class="col-format">${escapeHtml(it.formatNom || '')}</td>
+                </tr>
+            `).join('');
+
+            pagesHtml += `
+                <div class="pdf-page">
+                    ${renderHeader(isFirstPage, pageNumber)}
+                    ${renderTableHead()}
+                        ${rowsHtml}
+                    </tbody>
+                    </table>
+                    ${isLastPage ? `
+                        <div class="pdf-totals">
+                            <div class="pdf-total-line"><span>Total bouteilles</span><strong>${escapeHtml(String(totalBouteilles))}</strong></div>
+                            <div class="pdf-ifco">
+                                <div class="pdf-ifco-item">
+                                    <div class="pdf-ifco-caisse pdf-ifco-vert"></div>
+                                    <div class="pdf-ifco-label">Caisses vertes livrées</div>
+                                    <div class="pdf-ifco-value">${escapeHtml(String(cVerte))}</div>
+                                </div>
+                                <div class="pdf-ifco-item">
+                                    <div class="pdf-ifco-caisse pdf-ifco-noir"></div>
+                                    <div class="pdf-ifco-label">Caisses noires livrées</div>
+                                    <div class="pdf-ifco-value">${escapeHtml(String(cNoire))}</div>
+                                </div>
+                            </div>
+                            <div class="pdf-facturation">
+                                <span class="pdf-facturation-label">Mode de facturation :</span>
+                                <strong>${escapeHtml(facturationLabel)}</strong>
+                            </div>
+                        </div>
+                        <div class="pdf-signatures">
+                            <div class="pdf-sig-block">
+                                <div class="pdf-sig-label">Signature Client</div>
+                                <div class="pdf-sig-line"></div>
+                            </div>
+                            <div class="pdf-sig-block">
+                                <div class="pdf-sig-label">Signature ThéCol</div>
+                                <div class="pdf-sig-line"></div>
+                            </div>
+                        </div>
+                    ` : ''}
+                    <div class="pdf-page-footer">
+                        <span>BL-${escapeHtml(blNum)}</span>
+                        <span>Page ${pageNumber} / ${pageCount}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        const css = `
+            * { box-sizing: border-box; }
+            html, body { margin: 0; padding: 0; background: #fff; color: #1f1f1f; font-family: 'Helvetica Neue', Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .no-print { position: fixed; top: 12px; right: 12px; z-index: 1000; }
+            .no-print button { background: #5D7B3E; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
+            .no-print button:hover { background: #4d6632; }
+            @page { size: A4; margin: 0; }
+            .pdf-page { width: 210mm; height: 297mm; padding: 18mm 16mm 20mm 16mm; margin: 0 auto; background: #fff; page-break-after: always; display: flex; flex-direction: column; overflow: hidden; }
+            .pdf-page .pdf-table { flex: 0 0 auto; }
+            .pdf-page:last-child { page-break-after: auto; }
+            .pdf-header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #5D7B3E; padding-bottom: 10px; margin-bottom: 14px; }
+            .pdf-header-left { display: flex; flex-direction: column; gap: 6px; }
+            .pdf-logo { width: 64px; height: 64px; object-fit: contain; }
+            .pdf-tagline { font-size: 11px; color: #5D7B3E; font-style: italic; letter-spacing: 0.3px; }
+            .pdf-header-right { text-align: right; }
+            .pdf-title { font-size: 22px; font-weight: 700; color: #5D7B3E; letter-spacing: 0.5px; }
+            .pdf-subtitle { font-size: 12px; color: #888; margin-top: 4px; font-style: italic; }
+            .pdf-meta { display: flex; gap: 28px; margin-bottom: 14px; font-size: 12px; align-items: flex-start; }
+            .pdf-meta-block { display: flex; flex-direction: column; }
+            .pdf-meta-spacer { flex: 1; }
+            .pdf-meta-page { margin-left: auto; text-align: right; }
+            .pdf-meta-label { font-size: 10px; text-transform: uppercase; color: #888; letter-spacing: 0.5px; }
+            .pdf-meta-value { font-weight: 600; color: #1f1f1f; font-size: 13px; margin-top: 2px; }
+            .pdf-client { border: 1px solid #e3e3e3; border-left: 3px solid #5D7B3E; padding: 10px 14px; border-radius: 4px; margin-bottom: 16px; background: #fafaf7; font-size: 12px; }
+            .pdf-client-title { font-size: 10px; text-transform: uppercase; color: #5D7B3E; font-weight: 700; margin-bottom: 4px; letter-spacing: 0.5px; }
+            .pdf-client-line { line-height: 1.5; color: #2a2a2a; }
+            .pdf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+            .pdf-table thead th { background: #5D7B3E; color: #fff; padding: 8px 10px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+            .pdf-table thead th.col-qtt { width: 12%; text-align: center; }
+            .pdf-table thead th.col-desc { width: 38%; }
+            .pdf-table thead th.col-arome { width: 30%; }
+            .pdf-table thead th.col-format { width: 20%; text-align: right; }
+            .pdf-table tbody td { padding: 7px 10px; border-bottom: 1px solid #ececec; }
+            .pdf-table tbody td.col-qtt { text-align: center; font-weight: 700; color: #5D7B3E; }
+            .pdf-table tbody td.col-desc { color: #555; }
+            .pdf-table tbody td.col-arome { font-weight: 600; }
+            .pdf-table tbody td.col-format { text-align: right; color: #555; }
+            .pdf-totals { margin-top: 18px; }
+            .pdf-total-line { display: flex; justify-content: space-between; align-items: baseline; font-size: 14px; padding: 8px 0; border-top: 1px solid #5D7B3E; border-bottom: 1px solid #ececec; margin-bottom: 14px; }
+            .pdf-total-line strong { color: #5D7B3E; font-size: 16px; }
+            .pdf-ifco { display: flex; gap: 18px; margin-bottom: 12px; }
+            .pdf-ifco-item { flex: 1; display: flex; align-items: center; gap: 10px; border: 1px solid #ececec; padding: 10px 12px; border-radius: 4px; background: #fafaf7; }
+            .pdf-ifco-caisse { width: 26px; height: 20px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(0,0,0,0.15); }
+            .pdf-ifco-vert { background: #2e7d32; }
+            .pdf-ifco-noir { background: #1a1a1a; }
+            .pdf-ifco-label { flex: 1; font-size: 11px; color: #555; }
+            .pdf-ifco-value { font-weight: 700; font-size: 14px; color: #1f1f1f; }
+            .pdf-facturation { font-size: 12px; color: #333; margin-bottom: 18px; padding: 6px 0; }
+            .pdf-facturation-label { color: #888; margin-right: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+            .pdf-signatures { display: flex; gap: 32px; margin-top: 24px; }
+            .pdf-sig-block { flex: 1; }
+            .pdf-sig-label { font-size: 11px; text-transform: uppercase; color: #5D7B3E; font-weight: 600; margin-bottom: 30px; letter-spacing: 0.5px; }
+            .pdf-sig-line { border-top: 1px solid #1f1f1f; height: 0; }
+            .pdf-page-footer { font-size: 10px; color: #aaa; margin-top: auto; padding-top: 6px; border-top: 1px solid #ececec; display: flex; justify-content: space-between; }
+            @media print {
+                .no-print { display: none !important; }
+                .pdf-page { margin: 0; box-shadow: none; }
+            }
+        `;
+
+        const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Bulletin de Livraison ${escapeHtml(blNum)}</title>
+<style>${css}</style>
+</head>
+<body>
+<div class="no-print"><button onclick="window.print()">Imprimer / Enregistrer en PDF</button></div>
+${pagesHtml}
+</body>
+</html>`;
+
+        popup = window.open('', '_blank');
+        if (!popup) {
+            showToast('Autorisez les popups pour exporter le PDF', 'warning');
+            return;
+        }
+        popup.document.open();
+        popup.document.write(html);
+        popup.document.close();
+
+        const triggerPrint = () => {
+            try {
+                popup.focus();
+                popup.print();
+            } catch (e) {
+                console.error('exportBLPDF: print failed', e);
+            }
+            recordBLExportDate(livraisonId);
+            if (window.location.hash === '#livraisons') {
+                renderLivraisons();
+            }
+        };
+
+        if (popup.document.readyState === 'complete') {
+            setTimeout(triggerPrint, 250);
+        } else {
+            popup.addEventListener('load', () => setTimeout(triggerPrint, 250), { once: true });
+        }
+    } catch (e) {
+        console.error('exportBLPDF: échec de génération', e);
+        if (popup && !popup.closed) {
+            try { popup.close(); } catch (_) { /* ignore */ }
+        }
+        showToast('Erreur lors de la génération du PDF', 'error');
+    }
 };
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
