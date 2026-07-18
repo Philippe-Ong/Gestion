@@ -6956,20 +6956,14 @@ const exportBLPDF = (livraisonId) => {
         const blDate = livraison.dateBL || '';
 
         const PER_PAGE = 18;
-        const LAST_PAGE_MAX = 11;
+        const LAST_PAGE_MAX = 5;
         const buildPageChunks = (total) => {
             if (total <= LAST_PAGE_MAX) return [total];
             const chunks = [];
             let remaining = total;
             while (remaining > PER_PAGE) {
-                const after = remaining - PER_PAGE;
-                if (after > LAST_PAGE_MAX) {
-                    chunks.push(PER_PAGE);
-                    remaining = after;
-                } else if (after >= 0) {
-                    chunks.push(PER_PAGE);
-                    remaining = after;
-                }
+                chunks.push(PER_PAGE);
+                remaining -= PER_PAGE;
             }
             if (remaining > LAST_PAGE_MAX) {
                 chunks.push(remaining - LAST_PAGE_MAX);
@@ -6982,166 +6976,89 @@ const exportBLPDF = (livraisonId) => {
         const pageChunks = buildPageChunks(sortedItems.length);
         const pageCount = pageChunks.length;
 
-        const assetUrl = (file) => new URL(`icons/bl-template/${file}`, window.location.href).href;
-        const logoUrl = assetUrl('logo.jpeg');
-        const contactUrl = assetUrl('contact.png');
-        const titleUrl = assetUrl('title.png');
-        const toUrl = assetUrl('to.jpeg');
-        const signatureUrl = assetUrl('signature.png');
-        const mountainUrl = assetUrl('mountain.png');
-
+        const fullPageUrl = new URL('icons/bl-template/page-full.png', window.location.href).href;
+        const continuationPageUrl = new URL('icons/bl-template/page-continuation.png', window.location.href).href;
         const escapeAttr = (v) => escapeHtml(v).replace(/"/g, '&quot;');
 
-        const renderHeader = (isFirstPage, pageNumber) => `
-            <div class="pdf-header">
-                <div class="pdf-header-left">
-                    <img src="${escapeAttr(logoUrl)}" alt="Logo ThéCol" class="pdf-logo">
-                    <div class="pdf-tagline">local — artisanal — saveurs originales</div>
-                    <img src="${escapeAttr(contactUrl)}" alt="Coordonnées ThéCol" class="pdf-contact">
-                </div>
-                <div class="pdf-header-right">
-                    <img src="${escapeAttr(titleUrl)}" alt="Bulletin de Livraison" class="pdf-title-img">
-                    <div class="pdf-blnum">${escapeHtml(blNum)}</div>
-                    <div class="pdf-date-row"><span class="pdf-date-label">Date :</span><span class="pdf-date-value">${escapeHtml(blDate)}</span></div>
-                    <div class="pdf-recipient">
-                        <img src="${escapeAttr(toUrl)}" alt="À" class="pdf-to">
-                        <div class="pdf-recipient-body">
-                            <div class="pdf-recipient-line">${escapeHtml(clientSociete)}</div>
-                            ${clientContact ? `<div class="pdf-recipient-line">${escapeHtml(clientContact)}</div>` : ''}
-                            ${clientAdresse ? `<div class="pdf-recipient-line">${escapeHtml(clientAdresse)}</div>` : ''}
-                            ${clientLocalite ? `<div class="pdf-recipient-line">${escapeHtml(clientLocalite)}</div>` : ''}
-                        </div>
-                    </div>
-                </div>
-            </div>
-            ${!isFirstPage ? `<div class="pdf-subtitle">Suite — page ${pageNumber}</div>` : ''}
-        `;
-
-        const renderTableHead = () => `
-            <table class="pdf-table">
-                <thead>
-                    <tr>
-                        <th class="col-qtt">QTT</th>
-                        <th class="col-desc">Description</th>
-                        <th class="col-arome">Arôme</th>
-                        <th class="col-format">Format</th>
-                    </tr>
-                </thead>
-                <tbody>
-        `;
-
-        const factMark = (mode) => (livraison.facturationMode === mode ? 'x' : ' ');
+        const recipientLines = [clientSociete, clientContact, clientAdresse, clientLocalite].filter(Boolean).slice(0, 4);
+        const clientBottom = clientSociete || clientContact;
+        const factMark = (mode) => (livraison.facturationMode === mode ? 'x' : '');
 
         let pagesHtml = '';
         let offset = 0;
         for (let p = 0; p < pageChunks.length; p++) {
-            const isFirstPage = p === 0;
             const isLastPage = p === pageChunks.length - 1;
             const pageNumber = p + 1;
             const size = pageChunks[p];
             const chunk = sortedItems.slice(offset, offset + size);
             offset += size;
             const rowsHtml = chunk.map(it => `
-                <tr>
-                    <td class="col-qtt">${escapeHtml(String(it.quantite))}</td>
-                    <td class="col-desc">ThéCol - Thé Froid Artisanal</td>
-                    <td class="col-arome">${escapeHtml(it.aromeNom || '')}</td>
-                    <td class="col-format">${escapeHtml(it.formatNom || '')}</td>
-                </tr>
+                <div class="pdf-row">
+                    <div class="pdf-cell pdf-qtt">${escapeHtml(String(it.quantite))}</div>
+                    <div class="pdf-cell pdf-desc">ThéCol - Thé Froid Artisanal</div>
+                    <div class="pdf-cell pdf-arome">${escapeHtml(it.aromeNom || '')}</div>
+                    <div class="pdf-cell pdf-format">${escapeHtml(it.formatNom || '')}</div>
+                </div>
             `).join('');
 
             pagesHtml += `
                 <div class="pdf-page">
-                    ${renderHeader(isFirstPage, pageNumber)}
-                    ${renderTableHead()}
-                        ${rowsHtml}
-                    </tbody>
-                    </table>
+                    <img class="pdf-template-bg" src="${escapeAttr(isLastPage ? fullPageUrl : continuationPageUrl)}" alt="">
+                    <div class="pdf-blnum">${escapeHtml(blNum)}</div>
+                    <div class="pdf-date">${escapeHtml(blDate)}</div>
+                    <div class="pdf-recipient">${recipientLines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>
+                    ${!isLastPage ? `<div class="pdf-suite">Suite — page ${pageNumber}</div>` : ''}
+                    <div class="pdf-table-head pdf-table-arome">Arôme</div>
+                    <div class="pdf-table-head pdf-table-format">Format</div>
+                    <div class="pdf-rows">${rowsHtml}</div>
                     ${isLastPage ? `
-                        <div class="pdf-foot">
-                            <div class="pdf-foot-grid">
-                                <div class="pdf-ifco">
-                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark">${escapeHtml(String(cVerte || ''))}</span><span class="pdf-ifco-label">Livré : "ancienne caisse verte" IFCO</span></div>
-                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark">${escapeHtml(String(cNoire || ''))}</span><span class="pdf-ifco-label">Livré : "nouvelle caisse noire" IFCO</span></div>
-                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark"> </span><span class="pdf-ifco-label">Retour : "ancienne caisse verte" IFCO</span></div>
-                                    <div class="pdf-ifco-row"><span class="pdf-ifco-mark"> </span><span class="pdf-ifco-label">Retour : "nouvelle caisse noire" IFCO</span></div>
-                                </div>
-                                <div class="pdf-facturation">
-                                    <div class="pdf-fact-title">Facturation :</div>
-                                    <div class="pdf-fact-line"><span class="pdf-fact-mark">${factMark('email')}</span><span>par E-mail</span></div>
-                                    <div class="pdf-fact-line"><span class="pdf-fact-mark">${factMark('poste')}</span><span>par poste (+ 1CHF)</span></div>
-                                    <div class="pdf-fact-line"><span class="pdf-fact-mark">${factMark('autre')}</span><span>Autre :</span></div>
-                                    <div class="pdf-fact-place">À&nbsp;&nbsp;sur place à la livraison</div>
-                                </div>
-                            </div>
-                            <div class="pdf-client-line-bottom">${escapeHtml(clientSociete)}</div>
-                            <div class="pdf-author">Noah Bevegni, ThéCol</div>
-                            <div class="pdf-foot-art">
-                                <img src="${escapeAttr(signatureUrl)}" alt="Signature Noah Bevegni" class="pdf-signature">
-                                <img src="${escapeAttr(mountainUrl)}" alt="Décor montagne" class="pdf-mountain">
-                            </div>
-                        </div>
+                        <div class="pdf-ifco pdf-ifco-green">${escapeHtml(String(cVerte || ''))}</div>
+                        <div class="pdf-ifco pdf-ifco-black">${escapeHtml(String(cNoire || ''))}</div>
+                        <div class="pdf-fact-mark pdf-fact-email">${factMark('email')}</div>
+                        <div class="pdf-fact-mark pdf-fact-poste">${factMark('poste')}</div>
+                        <div class="pdf-fact-mark pdf-fact-other">${factMark('autre')}</div>
+                        <div class="pdf-client-bottom">${escapeHtml(clientBottom)}</div>
                     ` : ''}
-                    <div class="pdf-page-footer">
-                        <span>BL-${escapeHtml(blNum)} · Page ${pageNumber} / ${pageCount}</span>
-                    </div>
+                    ${pageCount > 1 ? `<div class="pdf-page-footer">BL-${escapeHtml(blNum)} · Page ${pageNumber} / ${pageCount}</div>` : ''}
                 </div>
             `;
         }
 
         const css = `
             * { box-sizing: border-box; }
-            html, body { margin: 0; padding: 0; background: #fff; color: #1f1f1f; font-family: 'Helvetica Neue', Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            html, body { margin: 0; padding: 0; background: #fff; color: #1f1f1f; font-family: Calibri, Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             .no-print { position: fixed; top: 12px; right: 12px; z-index: 1000; }
             .no-print button { background: #1f1f1f; color: #fff; border: none; padding: 10px 18px; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
             .no-print button:hover { background: #000; }
             @page { size: A4; margin: 0; }
-            .pdf-page { width: 210mm; height: 297mm; padding: 16mm 16mm 18mm 16mm; margin: 0 auto; background: #fff; page-break-after: always; display: flex; flex-direction: column; overflow: hidden; }
-            .pdf-page:last-child { page-break-after: auto; }
-            .pdf-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12mm; }
-            .pdf-header-left { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 80mm; }
-            .pdf-logo { width: 28mm; height: 28mm; object-fit: contain; }
-            .pdf-tagline { font-size: 9.5px; color: #5D7B3E; font-style: italic; letter-spacing: 0.2px; margin-top: 2px; }
-            .pdf-contact { width: 58mm; max-width: 100%; height: auto; margin-top: 4px; object-fit: contain; }
-            .pdf-header-right { display: flex; flex-direction: column; align-items: flex-end; text-align: right; flex: 1; }
-            .pdf-title-img { width: 80mm; max-width: 100%; height: auto; object-fit: contain; margin-bottom: 2px; }
-            .pdf-blnum { font-size: 14px; font-weight: 600; color: #1f1f1f; letter-spacing: 0.4px; margin: 2px 0 2px 0; }
-            .pdf-date-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; color: #2a2a2a; margin-bottom: 6px; }
-            .pdf-recipient { display: flex; align-items: flex-start; gap: 4mm; margin-top: 4px; text-align: left; }
-            .pdf-to { width: 14mm; height: auto; object-fit: contain; flex-shrink: 0; }
-            .pdf-recipient-body { display: flex; flex-direction: column; gap: 1px; font-size: 11px; color: #1f1f1f; line-height: 1.45; }
-            .pdf-recipient-line { white-space: pre-wrap; }
-            .pdf-subtitle { font-size: 10px; color: #888; font-style: italic; margin: 8px 0 4px 0; text-align: right; }
-            .pdf-table { width: 125mm; max-width: 100%; border-collapse: collapse; font-size: 11px; color: #1f1f1f; margin-top: 8px; }
-            .pdf-table thead th { background: transparent; color: #1f1f1f; padding: 0 8px 2px; text-align: left; font-weight: 700; font-size: 11px; border: none; }
-            .pdf-table thead th.col-qtt { width: 14%; text-align: center; }
-            .pdf-table thead th.col-desc { width: 44%; }
-            .pdf-table thead th.col-arome { width: 26%; }
-            .pdf-table thead th.col-format { width: 16%; text-align: right; }
-            .pdf-table tbody td { padding: 5px 8px; border: 1px solid #000; }
-            .pdf-table tbody td.col-qtt { text-align: center; font-weight: 600; }
-            .pdf-table tbody td.col-desc { color: #1f1f1f; }
-            .pdf-table tbody td.col-arome { font-weight: 600; }
-            .pdf-table tbody td.col-format { text-align: right; }
-            .pdf-foot { margin-top: auto; padding-top: 10px; }
-            .pdf-foot-grid { display: flex; justify-content: space-between; align-items: flex-start; gap: 12mm; margin-bottom: 10px; }
-            .pdf-ifco { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
-            .pdf-ifco-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #1f1f1f; }
-            .pdf-ifco-mark { display: inline-block; min-width: 22px; padding: 1px 6px; border: 1px solid #000; background: #fff; color: #000; text-align: center; font-weight: 700; font-size: 11px; line-height: 1.2; }
-            .pdf-facturation { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #1f1f1f; text-align: left; }
-            .pdf-fact-title { font-weight: 700; margin-bottom: 1px; }
-            .pdf-fact-line { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-            .pdf-fact-mark { display: inline-block; width: 5mm; min-height: 4mm; border-right: 1px solid #000; text-align: center; font-weight: 700; line-height: 4mm; }
-            .pdf-fact-place { margin-top: 2px; white-space: nowrap; }
-            .pdf-client-line-bottom { font-size: 11px; color: #1f1f1f; margin-top: 4px; }
-            .pdf-author { font-size: 11px; color: #1f1f1f; font-style: italic; margin-top: 2px; }
-            .pdf-foot-art { display: flex; justify-content: space-between; align-items: flex-end; gap: 8mm; margin-top: 6px; }
-            .pdf-signature { height: 28mm; width: auto; object-fit: contain; }
-            .pdf-mountain { height: 22mm; width: auto; object-fit: contain; }
-            .pdf-page-footer { font-size: 9px; color: #888; margin-top: 8px; padding-top: 4px; text-align: center; }
+            .pdf-page { position: relative; width: 210mm; height: 297mm; margin: 0 auto; padding: 0; overflow: hidden; break-after: page; page-break-after: always; }
+            .pdf-page:last-child { break-after: auto; page-break-after: auto; }
+            .pdf-template-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; z-index: 0; }
+            .pdf-blnum, .pdf-date, .pdf-recipient, .pdf-suite, .pdf-table-head, .pdf-rows, .pdf-ifco, .pdf-fact-mark, .pdf-client-bottom, .pdf-page-footer { position: absolute; z-index: 1; }
+            .pdf-blnum { left: 101.3mm; top: 16mm; width: 10mm; font-size: 14px; font-weight: 700; text-align: center; }
+            .pdf-date { left: 163.5mm; top: 50.8mm; width: 17.7mm; font-family: Calibri, Arial, sans-serif; font-size: 11pt; text-align: right; white-space: nowrap; }
+            .pdf-recipient { left: 144.5mm; top: 61.7mm; width: 36.8mm; max-height: 21.4mm; overflow: visible; font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 5.29mm; text-align: right; white-space: nowrap; }
+            .pdf-suite { left: 121mm; top: 21mm; width: 42mm; color: #666; font-size: 8.5px; text-align: center; }
+            .pdf-table-head { top: 97.3mm; color: #000; font-family: Calibri, Arial, sans-serif; font-size: 11pt; font-weight: 400; line-height: 4mm; }
+            .pdf-table-arome { left: 86.1mm; width: 29mm; }
+            .pdf-table-format { left: 115.7mm; width: 11mm; text-align: left; }
+            .pdf-rows { left: 25.4mm; top: 101mm; width: 101mm; font-family: Calibri, Arial, sans-serif; font-size: 11pt; }
+            .pdf-row { display: grid; grid-template-columns: 13% 47% 29% 11%; width: 100%; height: 5.29mm; font-family: Calibri, Arial, sans-serif; font-size: 11pt; }
+            .pdf-cell { display: flex; align-items: center; min-width: 0; padding: 0 1mm; overflow: hidden; white-space: nowrap; }
+            .pdf-qtt { justify-content: center; font-weight: 600; }
+            .pdf-format { justify-content: flex-end; text-align: right; }
+            .pdf-ifco { left: 25.4mm; width: 13mm; font-size: 10.5px; font-weight: 700; text-align: center; }
+            .pdf-ifco-green { top: 154.7mm; }
+            .pdf-ifco-black { top: 160mm; }
+            .pdf-fact-mark { left: 115.5mm; width: 8mm; font-size: 10.5px; font-weight: 700; text-align: center; }
+            .pdf-fact-email { top: 149mm; }
+            .pdf-fact-poste { top: 154.35mm; }
+            .pdf-fact-other { top: 159.7mm; }
+            .pdf-client-bottom { left: 27mm; top: 192.65mm; width: 75mm; font-family: Calibri, Arial, sans-serif; font-size: 16pt; }
+            .pdf-page-footer { left: 0; bottom: 3mm; width: 100%; color: #777; font-size: 8.5px; text-align: center; }
             @media print {
                 .no-print { display: none !important; }
-                .pdf-page { margin: 0; box-shadow: none; }
+                .pdf-page { margin: 0; }
             }
         `;
 

@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.10**
+**v11.11**
 
 ## Adresse
 
@@ -43,7 +43,7 @@ Application de gestion pour votre entreprise de thé froid.
 ### Livraisons
 - Génération de Bulletins de Livraison (BL) depuis les commandes livrées
 - Export Excel des BL avec template pré-formaté
-- Export PDF des BL — reproduction fidèle du template Excel (logo, coordonnées, tableau, IFCO, signature) via aperçu HTML A4 imprimable
+- Export PDF des BL — rendu pixel-perfect avec fonds A4 rasterisés (`page-full.png` / `page-continuation.png`) issus du template Excel ; données variables (numéro BL, date, destinataire, lignes articles, IFCO, facturation) superposées en Calibri aux positions exactes du modèle via `window.print()`
 - Remplissage automatique des lignes par arôme/format, triés alphabétiquement
 - Saisie des caisses IFCO vertes/noires livrées
 
@@ -130,6 +130,19 @@ Application de gestion pour votre entreprise de thé froid.
   - **Notes internes** : non imprimées dans le PDF.
   - **Sans dépendance** : pas de bibliothèque externe — le PDF est généré via `window.print()` depuis une fenêtre ouverte. L'export enregistre uniquement la date locale d'export (`thecol_bl_export_dates`) et ne crée pas d'opération V11.
   - **L'export Excel reste inchangé** et disponible en parallèle.
+
+### Nouveautés v11.11
+
+- **📄 PDF BL pixel-perfect avec fonds A4 rasterisés** — L'export PDF des Bulletins de Livraison (`exportBLPDF`) a été repensé pour un rendu pixel-perfect. Au lieu d'assembler 6 médias individuels (v11.10), il utilise désormais **deux fonds A4 rasterisés** extraits du template Excel :
+  - `page-full.png` — fond complet de la dernière page (logo, coordonnées, titre, grille, IFCO, signature, montagne)
+  - `page-continuation.png` — fond des pages de continuation
+  - Les données variables (numéro BL, date, destinataire, lignes articles, caisses IFCO, marques de facturation, société cliente) sont superposées en **Calibri** aux positions exactes en mm du modèle via des `position: absolute` en CSS.
+  - Les lignes articles utilisent une grille CSS avec hauteur de ligne fixe **5,29 mm**.
+  - **Pagination** : 18 articles par page de continuation, **5 maximum** sur la dernière page (réduit depuis 11 pour s'aligner au template rasterisé).
+  - Typographie `Calibri` pour correspondre au template Excel.
+  - Pied de page « BL-XXX · Page X / N » uniquement si plusieurs pages.
+  - **L'export Excel reste inchangé** et disponible en parallèle.
+  - Les 6 médias individuels de v11.10 (`logo.jpeg`, `contact.png`, `title.png`, `to.jpeg`, `signature.png`, `mountain.png`) sont conservés mais ne sont plus utilisés par `exportBLPDF`.
 
 ### Nouveautés v11.10
 

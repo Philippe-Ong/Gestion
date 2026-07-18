@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.10
+**Version:** v11.11
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -216,26 +216,37 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 }
 ```
 
-**Export PDF des BL (`exportBLPDF`, v11.10 — design fidèle au template) :**
-Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`). Depuis v11.10, le rendu visuel reproduit fidèlement la mise en page du template Excel `templates/bl_template.xlsx` en utilisant 6 médias extraits dans `icons/bl-template/`.
+**Export PDF des BL (`exportBLPDF`, v11.11 — pixel-perfect avec fonds A4 rasterisés) :**
+Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`). Depuis v11.11, le rendu est **pixel-perfect** : plutôt que d'assembler des médias individuels, l'export superpose des données variables (Calibri, positionnées en mm) sur deux fonds A4 rasterisés extraits du template Excel lui-même.
 
-- **Médias utilisés :**
-  - `icons/bl-template/logo.jpeg` — logo ThéCol
-  - `icons/bl-template/contact.png` — coordonnées postales ThéCol
-  - `icons/bl-template/title.png` — titre « Bulletin de Livraison »
-  - `icons/bl-template/to.jpeg` — glyphe « À » (destinataire)
-  - `icons/bl-template/signature.png` — signature Noah Bevegni
-  - `icons/bl-template/mountain.png` — décor montagne
+- **Fonds rasterisés (depuis v11.11) :**
+  - `icons/bl-template/page-full.png` — fond complet de la dernière page (inclut logo, coordonnées, titre, tableau, IFCO, facturation, signature, décor montagne)
+  - `icons/bl-template/page-continuation.png` — fond des pages de continuation (en-tête avec logo, coordonnées, titre, tableau vide)
+  - Ces images sont rendues en `position: absolute; inset: 0; object-fit: fill` et couvrent intégralement la page A4 (210×297 mm). Tous les éléments fixes du template Excel (logo, trames, titres, grille du tableau, blocs IFCO/facturation/signature/montagne) sont dans le raster ; seules les données variables sont superposées en HTML/CSS.
+- **Données variables superposées :**
+  - Numéro BL (positionné à 101,3 mm de la gauche, 16 mm du haut)
+  - Date (163,5 mm × 50,8 mm)
+  - Bloc destinataire (144,5 mm × 61,7 mm, jusqu'à 4 lignes, aligné à droite, Calibri 11 pt, interligne 5,29 mm)
+  - En-têtes de colonnes « Arôme » (86,1 mm) et « Format » (115,7 mm), superposés séparément (pas de `<table>` native — les en-têtes sont des `<div>` positionnés)
+  - Lignes articles (à partir de 25,4 mm × 101 mm, largeur 101 mm) : chaque ligne est une grille CSS (`grid-template-columns: 13% 47% 29% 11%`) de hauteur fixe 5,29 mm, avec `font-family: Calibri; font-size: 11 pt`
+  - Caisses IFCO verte et noire (25,4 mm de la gauche, positions 154,7 mm et 160 mm du haut)
+  - Marques de facturation (115,5 mm de la gauche, positions 149 / 154,35 / 159,7 mm du haut)
+  - Société cliente en bas (27 mm × 192,65 mm, Calibri 16 pt)
+  - Pied de page « BL-XXX · Page X / N » (centré, en bas de page) — uniquement si `pageCount > 1`
+  - Mention « Suite — page X » sur les pages de continuation (121 mm × 21 mm)
+- **Typographie :** `font-family: Calibri, Arial, sans-serif` — correspond exactement à la police du template Excel.
 - **Fusion et tri :** les lignes de livraison de même arôme+format sont fusionnées (quantité cumulée). Les articles sont triés alphabétiquement par arôme puis par format.
-- **Données imprimées :** logo ThéCol + coordonnées, titre « Bulletin de Livraison », numéro BL discret, date, bloc destinataire avec glyphe « À » (société, contact, adresse, localité), tableau des articles (QTT, description, arôme, format) à grille noire, caisses IFCO vertes/noires (livrées et retour), mode de facturation (cases à cocher par marque `x`), société cliente, auteur « Noah Bevegni, ThéCol », image de signature et décor montagne.
-- **Données non imprimées :** numéro de commande, total bouteilles, notes internes (`livraison.notes`), zones de signature vierges.
+- **Données imprimées :** fond complet du template (logo, coordonnées, titre, grille, IFCO, signature, montagne) via raster + numéro BL, date, destinataire, en-têtes Arôme/Format, lignes article, caisses IFCO livrées, cases de facturation, société cliente.
+- **Données non imprimées :** numéro de commande, notes internes (`livraison.notes`), total bouteilles.
 - **Pagination :**
-  - 18 lignes articles maximum par page.
-  - Dernière page : 11 lignes maximum pour ménager l'espace des blocs finaux (IFCO, facturation, signature, montagne).
-  - En-têtes (logo, contact, titre, numéro BL, date, destinataire) répétés sur chaque page.
-  - Pied de page avec « BL-XXX · Page X / N » sur chaque page.
+  - 18 lignes articles maximum par page de continuation.
+  - Dernière page : **5** lignes maximum (réduit depuis 11 en v11.10 pour s'aligner sur le template rasterisé).
+  - Chaque page est un conteneur `position: relative` de 210×297 mm avec `break-after: page`.
+  - Le fond raster est utilisé : `page-continuation.png` pour toutes les pages sauf la dernière, `page-full.png` pour la dernière.
+  - Pas d'en-tête répété en HTML — le fond raster contient déjà les éléments fixes.
+- **Évolution depuis v11.10 :** l'approche précédente (assemblage de 6 médias individuels — `logo.jpeg`, `contact.png`, `title.png`, `to.jpeg`, `signature.png`, `mountain.png`) est remplacée par deux fonds A4 complets rasterisés. Les 6 médias individuels sont conservés dans `icons/bl-template/` mais ne sont plus utilisés par `exportBLPDF`.
 - **Horodatage d'export :** seul `recordBLExportDate()` est appelé (clé locale `thecol_bl_export_dates`). Aucune opération V11 ni écriture Firestore.
-- **Export Excel (`exportBLExcel`) :** inchangé, toujours disponible. Le choix du format (Excel ou PDF) se fait depuis la modale Préparer BL via les boutons `data-click="export-bl-excel"` / `data-click="export-bl-pdf"`.
+- **Export Excel (`exportBLExcel`) :** inchangé (toujours basé sur `templates/bl_template.xlsx`), disponible en parallèle. Le choix du format se fait depuis la modale Préparer BL via les boutons `data-click="export-bl-excel"` / `data-click="export-bl-pdf"`.
 - **Fonction de dispatch :** `exportPreparedBL(livraisonId, format)` — appelle `exportBLExcel` ou `exportBLPDF` selon le format.
 
 ### Pointages
