@@ -51,11 +51,21 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::error::Secret ANDROID_KEYSTORE_BASE64 manquant"
+          missing=0
+          for s in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!s}" ]; then
+              echo "::error::Secret ANDROID_$s manquant ou vide"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
+          printf '%s' "$KEYSTORE_BASE64" | tr -d ' \r\n' | base64 --decode > android/release.keystore
+          echo "SHA-256 du keystore : $(sha256sum android/release.keystore | cut -d' ' -f1)"
+          if ! keytool -list -keystore android/release.keystore -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /tmp/keytool.log 2>&1; then
+            echo "::error::Keystore invalide : $(grep -m1 -iE 'exception|error|erreur|does not exist|incorrect' /tmp/keytool.log)"
             exit 1
           fi
-          echo "$KEYSTORE_BASE64" | base64 --decode > android/release.keystore
           cat > android/keystore.properties <<EOF
           storeFile=release.keystore
           storePassword=$KEYSTORE_PASSWORD
