@@ -1,5 +1,13 @@
 apply plugin: 'com.android.application'
 
+// Signature release : lue depuis android/keystore.properties (non commité).
+// Voir android/keystore.properties.example. Sans ce fichier, assembleRelease produit un APK non signé.
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace = "ch.thecol.gestion"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +15,9 @@ android {
         applicationId "ch.thecol.gestion"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        // Surchargés par la CI (-PappVersionCode / -PappVersionName) à partir du tag git.
+        versionCode((project.findProperty('appVersionCode') ?: '1') as Integer)
+        versionName(project.findProperty('appVersionName') ?: '1.0')
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +25,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            release {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

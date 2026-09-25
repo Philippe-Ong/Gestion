@@ -24,7 +24,9 @@ android/captures/
 android/*.iml
 android/app/release/
 *.keystore
+*.jks
 !debug.keystore
+android/keystore.properties
 
 # iOS
 ios/App/Pods/
