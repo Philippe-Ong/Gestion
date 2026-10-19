@@ -2118,9 +2118,9 @@ const v11StartListener = (table) => {
             V11._debounceTimer = setTimeout(() => {
                 V11._debounceTimer = null;
                 if (sessionGen !== _appSessionGen) return;
-                const hash = window.location.hash.slice(1) || 'dashboard';
+                const hash = window.location.hash.slice(1) || 'jumeau';
                 const page = hash.split('?')[0];
-                if (page !== 'dashboard' && page !== 'stock' && page !== 'commandes' &&
+                if (page !== 'jumeau' && page !== 'dashboard' && page !== 'stock' && page !== 'commandes' &&
                     page !== 'pointage' && page !== 'livraisons' && page !== 'production' &&
                     page !== 'inventaire' && page !== 'parametres' && page !== 'archives' &&
                     page !== 'historique') return;
@@ -3051,10 +3051,13 @@ let _appSessionGen = 0;
 // Navigation
 const router = () => {
     if (!window.firebaseReady || !window._appStarted) return;
-    const hash = window.location.hash.slice(1) || 'dashboard';
+    const hash = window.location.hash.slice(1) || 'jumeau';
     const page = hash.split('?')[0];
     navigateTo(page);
 };
+
+let _lastRenderedPage = null;
+let _contentEnterTimer = 0;
 
 const navigateTo = (page) => {
     document.querySelectorAll('.nav-item, .bottom-nav-item').forEach(el => el.classList.remove('active'));
@@ -3064,13 +3067,14 @@ const navigateTo = (page) => {
         document.querySelectorAll('[data-page="stock"]').forEach(el => el.classList.add('active'));
     }
     // Pages du menu « Plus » : allumer le bouton Plus
-    const morePages = ['pointage', 'livraisons', 'inventaire', 'parametres'];
+    const morePages = ['dashboard', 'pointage', 'livraisons', 'inventaire', 'parametres'];
     if (morePages.includes(page)) {
         document.getElementById('moreNavBtn')?.classList.add('active');
     }
 
     const titles = {
-        dashboard: 'Dashboard',
+        jumeau: 'Jumeau numérique',
+        dashboard: 'Tableau de bord',
         stock: 'Gestion du stock',
         pointage: 'Pointage',
         commandes: 'Commandes',
@@ -3082,9 +3086,10 @@ const navigateTo = (page) => {
         parametres: 'Paramètres'
     };
     const titleEl = document.getElementById('pageTitle');
-    if (titleEl) titleEl.textContent = titles[page] || 'Dashboard';
+    if (titleEl) titleEl.textContent = titles[page] || titles.jumeau;
 
     const views = {
+        jumeau: renderJumeau,
         dashboard: renderDashboard,
         stock: renderStock,
         pointage: renderPointage,
@@ -3100,18 +3105,24 @@ const navigateTo = (page) => {
     const contentEl = document.getElementById('content');
     if (!contentEl) return;
 
-    const viewFn = views[page];
-    if (typeof viewFn === 'function') {
-        viewFn();
-    } else {
-        renderDashboard();
+    const target = typeof views[page] === 'function' ? page : 'jumeau';
+    contentEl.classList.toggle('content--twin', target === 'jumeau');
+    // Transition d'entrée uniquement au changement de page (pas sur un re-rendu temps réel)
+    if (_lastRenderedPage !== target) {
+        _lastRenderedPage = target;
+        contentEl.classList.remove('content-enter');
+        void contentEl.offsetWidth;
+        contentEl.classList.add('content-enter');
+        clearTimeout(_contentEnterTimer);
+        _contentEnterTimer = setTimeout(() => contentEl.classList.remove('content-enter'), 450);
     }
+    views[target]();
 };
 
 // Render Current View dynamically
 const renderCurrentView = () => {
     if (!window.firebaseReady || !window._appStarted) return;
-    const hash = window.location.hash.slice(1) || 'dashboard';
+    const hash = window.location.hash.slice(1) || 'jumeau';
     const page = hash.split('?')[0];
     navigateTo(page);
 };
@@ -3300,6 +3311,2063 @@ const renderDashboard = () => {
         </div>
     `);
 };
+
+// =============================================================================
+// Jumeau numérique 3D (v12.0) — TWIN-3D
+// L'atelier ThéCol reconstruit en 3D à partir des données synchronisées :
+// cuves (besoins de production), entrepôt (lots par arôme × format), quai
+// d'expédition (commandes actives), magasin (consommables) et équipe
+// (pointages du jour). Three.js est embarqué dans vendor/three/ et chargé à la
+// demande via import() : aucun coût pour les autres pages, fonctionne hors ligne.
+// =============================================================================
+
+const TWIN_ZONES = [
+    { id: 'production', label: 'Production', key: '1', bounds: [-20, -13, -3, -1.5], token: '--primary' },
+    { id: 'stock', label: 'Entrepôt', key: '2', bounds: [3, -13, 20, -1.5], token: '--info' },
+    { id: 'expedition', label: 'Expédition', key: '3', bounds: [3, 2.5, 20, 13], token: '--warning' },
+    { id: 'magasin', label: 'Consommables', key: '4', bounds: [-20, 2.5, -3, 13], token: '--warning-dark' },
+    { id: 'equipe', label: 'Équipe', key: '5', bounds: [-2.2, 2.5, 2.2, 13], token: '--success' }
+];
+const TWIN_VIEW_OVERVIEW = { target: [3, 0, 0.5], pos: [8, 31, 35] };
+const TWIN_STAFF_COLORS = ['#5D7B3E', '#2E72B8', '#B9770E', '#8E44AD', '#C0392B', '#16A085', '#D35400', '#34495E'];
+
+const twinClamp = (v, min, max) => Math.min(max, Math.max(min, v));
+const twinFmtInt = (n) => Math.round(Number(n) || 0).toLocaleString('fr-CH');
+const twinFmtLitres = (l) => `${(Math.round((Number(l) || 0) * 10) / 10).toLocaleString('fr-CH')} L`;
+const twinFmtDuration = (minutes) => {
+    const m = Math.max(0, Math.round(Number(minutes) || 0));
+    return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`;
+};
+const twinDaysUntil = (dateStr) => {
+    if (!dateStr || !isValidDateOnly(dateStr)) return null;
+    return Math.round((dateOnly(dateStr).getTime() - dateOnly(new Date()).getTime()) / 86400000);
+};
+const twinRelativeDay = (days) => {
+    if (days === null) return 'sans date';
+    if (days === 0) return "aujourd'hui";
+    if (days === 1) return 'demain';
+    if (days === -1) return 'hier';
+    return days > 0 ? `dans ${days} j` : `en retard de ${-days} j`;
+};
+const twinCrateSize = (contenanceCl) => (contenanceCl <= 30 ? 24 : contenanceCl <= 60 ? 12 : 6);
+const twinPresenceMinutes = (p, nowMin) => {
+    const debut = parseHHMM(p.heureDebut);
+    if (debut === null) return 0;
+    if (!p.heureFin) return computePointageMinutes(debut, nowMin, 0) || 0;
+    return computePointageMinutes(debut, parseHHMM(p.heureFin), Number(p.pause) || 0) || 0;
+};
+
+// --- Modèle : projection des tables métier vers les objets de l'atelier ---
+const buildTwinModel = () => {
+    const now = new Date();
+    const todayKey = getLocalDateISOString();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const lots = DB.get('lots') || [];
+    const commandes = DB.get('commandes') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const clients = DB.get('clients') || [];
+    const recettes = DB.get('recettes') || [];
+    const inventaire = DB.get('inventaire') || [];
+    const employees = DB.get('employees') || [];
+    const pointages = DB.get('pointages') || [];
+
+    const findArome = (nom) => aromes.find(a => normalizeName(a.nom) === normalizeName(nom));
+    const aromeColor = (nom) => safeColor(findArome(nom)?.couleur || DEFAULT_COULEURS[String(nom || '').toLowerCase()]);
+    const aromeNames = new Map();
+    const formatNames = new Map();
+    const addName = (map, nom) => {
+        const k = normalizeName(nom);
+        if (k && !map.has(k)) map.set(k, nom);
+    };
+    aromes.filter(a => a.actif !== false).forEach(a => addName(aromeNames, a.nom));
+    [...formats]
+        .sort((a, b) => (Number(a.contenanceCl) || 0) - (Number(b.contenanceCl) || 0))
+        .forEach(f => addName(formatNames, f.nom));
+
+    const activeCommandes = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
+    const demand = new Map();
+    activeCommandes.forEach(cmd => getItems(cmd).forEach(item => {
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = resolveCommandeFormat(item, formats)?.format;
+        const qty = Number(item.quantite) || 0;
+        if (!arome || !format || qty <= 0) return;
+        addName(aromeNames, arome.nom);
+        addName(formatNames, format.nom);
+        const key = `${normalizeName(arome.nom)}|${normalizeName(format.nom)}`;
+        demand.set(key, (demand.get(key) || 0) + qty);
+    }));
+
+    const groups = new Map();
+    lots.forEach(lot => {
+        if ((Number(lot.quantite) || 0) <= 0) return;
+        addName(aromeNames, lot.arome);
+        addName(formatNames, lot.format);
+        const key = `${normalizeName(lot.arome)}|${normalizeName(lot.format)}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(lot);
+    });
+
+    const slotKeys = new Set([...groups.keys(), ...demand.keys()]);
+    const slotList = [...slotKeys];
+    const rowKeys = [...aromeNames.keys()].filter(ak => slotList.some(k => k.startsWith(`${ak}|`)));
+    const colKeys = [...formatNames.keys()].filter(fk => slotList.some(k => k.endsWith(`|${fk}`)));
+
+    const stacks = [];
+    rowKeys.forEach((ak, row) => colKeys.forEach((fk, col) => {
+        const key = `${ak}|${fk}`;
+        if (!slotKeys.has(key)) return;
+        const arome = aromeNames.get(ak);
+        const format = formatNames.get(fk);
+        const contenanceCl = resolveFormatContenance(format, formats);
+        const lotsInfo = (groups.get(key) || [])
+            .slice()
+            .sort((a, b) => String(a.dlc || '').localeCompare(String(b.dlc || '')))
+            .map(lot => ({
+                id: lot.id,
+                numero: getLotNumero(lot),
+                quantite: Number(lot.quantite) || 0,
+                dlc: lot.dlc || '',
+                dateProduction: lot.dateProduction || '',
+                status: getStatus(lot.dlc),
+                sellable: isLotSellable(lot, now)
+            }));
+        const total = lotsInfo.reduce((s, l) => s + l.quantite, 0);
+        const sellable = lotsInfo.filter(l => l.sellable).reduce((s, l) => s + l.quantite, 0);
+        const expired = lotsInfo.filter(l => l.status === 'expired').length;
+        const warning = lotsInfo.filter(l => l.status === 'warning').length;
+        const demande = demand.get(key) || 0;
+        const manque = Math.max(0, demande - sellable);
+        stacks.push({
+            id: `stack:${key}`, zone: 'stock', kind: 'stack', row, col,
+            arome, format, couleur: aromeColor(arome), contenanceCl, crateSize: twinCrateSize(contenanceCl),
+            total, sellable, demande, manque, expired, warning, lots: lotsInfo,
+            status: expired ? 'expired' : manque > 0 ? 'rupture' : warning ? 'warning' : 'ok',
+            label: `${arome} · ${format}`,
+            sub: manque > 0 ? `${twinFmtInt(sellable)} vendables · manque ${twinFmtInt(manque)}` : `${twinFmtInt(sellable)} bt vendables`
+        });
+    }));
+
+    const needs = new Map();
+    stacks.forEach(s => {
+        if (s.manque <= 0) return;
+        const ak = normalizeName(s.arome);
+        const need = needs.get(ak) || { litres: 0, besoins: [] };
+        const litres = s.manque * (s.contenanceCl || 0) / 100;
+        need.litres += litres;
+        need.besoins.push({ format: s.format, bouteilles: s.manque, litres });
+        needs.set(ak, need);
+    });
+    const tankKeys = [...new Set([
+        ...aromes.filter(a => a.actif !== false).map(a => normalizeName(a.nom)),
+        ...needs.keys()
+    ])].filter(Boolean).slice(0, 12);
+    const tanks = tankKeys.map(ak => {
+        const arome = aromeNames.get(ak) || ak;
+        const need = needs.get(ak) || { litres: 0, besoins: [] };
+        const litres = Math.round(need.litres * 10) / 10;
+        const recette = recettes.find(r => r.aromeId === findArome(arome)?.id);
+        return {
+            id: `tank:${ak}`, zone: 'production', kind: 'tank',
+            arome, couleur: aromeColor(arome), litres,
+            cuves: litres > 0 ? Math.ceil(litres / CONSTANTS.CUVE_MAX_L) : 0,
+            fill: twinClamp(litres / CONSTANTS.CUVE_MAX_L, 0, 1),
+            besoins: need.besoins,
+            bouteilles: need.besoins.reduce((s, b) => s + b.bouteilles, 0),
+            ingredients: recette ? calculerIngredientsRecipient(recette, litres) : [],
+            hasRecette: !!recette,
+            status: litres > 0 ? 'active' : 'idle',
+            label: arome,
+            sub: litres > 0 ? `${twinFmtLitres(litres)} à produire` : 'Aucune production requise'
+        };
+    });
+
+    const orders = activeCommandes
+        .filter(c => c.statut === 'en_attente' || c.statut === 'produite')
+        .map(cmd => {
+            const client = clients.find(c => c.id === cmd.clientId);
+            const days = twinDaysUntil(cmd.dateLivraison);
+            const items = getItems(cmd).map(item => {
+                const arome = aromes.find(a => a.id === item.aromeId);
+                const format = resolveCommandeFormat(item, formats)?.format;
+                return {
+                    arome: arome?.nom || '—',
+                    format: format?.nom || '—',
+                    quantite: Number(item.quantite) || 0,
+                    couleur: safeColor(arome?.couleur)
+                };
+            });
+            const totalBt = items.reduce((s, i) => s + i.quantite, 0);
+            const late = days !== null && days < 0;
+            const urgent = !late && cmd.statut === 'en_attente' && days !== null && days <= 3;
+            let montant = null;
+            try { montant = getCommandeMontant(cmd, clients, formats); } catch (_) { montant = null; }
+            const numero = getCommandeNumero(cmd);
+            return {
+                id: `order:${cmd.id}`, zone: 'expedition', kind: 'order', commandeId: cmd.id,
+                numero, client: getClientLabel(client), statut: cmd.statut,
+                dateLivraison: cmd.dateLivraison || '', days, late, urgent, totalBt, items, montant,
+                status: late ? 'late' : urgent ? 'urgent' : cmd.statut === 'produite' ? 'ready' : 'waiting',
+                label: `#${numero} · ${getClientLabel(client)}`,
+                sub: `${twinFmtInt(totalBt)} bt · livraison ${twinRelativeDay(days)}`
+            };
+        })
+        .sort((a, b) => (a.days ?? 9999) - (b.days ?? 9999));
+
+    const bins = inventaire
+        .filter(i => i.categorie === 'consommable')
+        .sort((a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr'))
+        .map(i => {
+            const quantite = Number(i.quantite) || 0;
+            const seuil = Number(i.seuilAlerte) || 0;
+            const state = seuil > 0
+                ? (quantite <= seuil ? 'critical' : quantite <= seuil * 2 ? 'low' : 'ok')
+                : (quantite <= 0 ? 'empty' : 'unknown');
+            return {
+                id: `bin:${i.id}`, zone: 'magasin', kind: 'bin', itemId: i.id,
+                nom: i.nom || 'Article', quantite, unite: i.unite, seuil, state,
+                level: seuil > 0 ? twinClamp(quantite / (seuil * 4), 0.06, 1) : (quantite > 0 ? 0.55 : 0),
+                label: i.nom || 'Article',
+                sub: `${quantite} ${displayUnit(i.unite)}${seuil > 0 ? ` · seuil ${seuil}` : ''}`
+            };
+        });
+
+    const staff = employees.filter(e => e.actif).map((emp, index) => {
+        const todays = pointages.filter(p => p.employeId === emp.id && p.date === todayKey);
+        const open = todays.find(p => p.heureDebut && !p.heureFin);
+        const minutes = todays.reduce((s, p) => s + twinPresenceMinutes(p, nowMin), 0);
+        const nom = `${emp.prenom || ''} ${emp.nom || ''}`.trim() || 'Employé';
+        return {
+            id: `staff:${emp.id}`, zone: 'equipe', kind: 'staff', employeId: emp.id, nom,
+            initiales: nom.split(/\s+/).map(p => p[0] || '').join('').slice(0, 2).toUpperCase(),
+            present: !!open, since: open?.heureDebut || '', minutes,
+            couleur: TWIN_STAFF_COLORS[index % TWIN_STAFF_COLORS.length],
+            status: open ? 'present' : 'absent',
+            label: nom,
+            sub: open ? `Présent depuis ${open.heureDebut}` : (minutes > 0 ? `Parti · ${twinFmtDuration(minutes)} aujourd'hui` : 'Absent')
+        };
+    });
+
+    const alerts = [];
+    orders.forEach(o => {
+        if (o.late) alerts.push({ level: 'danger', id: o.id, title: `Commande #${o.numero} en retard`, text: `${o.client} · prévue le ${formatDate(o.dateLivraison)}` });
+        else if (o.urgent) alerts.push({ level: 'warning', id: o.id, title: `Livraison ${twinRelativeDay(o.days)} · #${o.numero}`, text: `${o.client} · encore à produire` });
+    });
+    stacks.forEach(s => {
+        if (s.expired) alerts.push({ level: 'danger', id: s.id, title: `${s.label} : ${s.expired} lot${s.expired > 1 ? 's' : ''} expiré${s.expired > 1 ? 's' : ''}`, text: 'À retirer ou corriger dans le stock' });
+        else if (s.warning) alerts.push({ level: 'info', id: s.id, title: `${s.label} : DLC < ${CONSTANTS.STOCK_WARN_DAYS} j`, text: `${s.warning} lot${s.warning > 1 ? 's' : ''} à écouler en priorité` });
+    });
+    tanks.forEach(t => {
+        if (t.litres > 0) alerts.push({ level: 'warning', id: t.id, title: `${t.arome} : ${twinFmtLitres(t.litres)} à produire`, text: `${twinFmtInt(t.bouteilles)} bt manquantes · ${t.cuves} cuve${t.cuves > 1 ? 's' : ''}` });
+    });
+    bins.forEach(b => {
+        if (b.state === 'critical') alerts.push({ level: 'danger', id: b.id, title: `${b.nom} sous le seuil`, text: `${b.quantite} ${displayUnit(b.unite)} (seuil ${b.seuil})` });
+        else if (b.state === 'low') alerts.push({ level: 'warning', id: b.id, title: `${b.nom} bientôt épuisé`, text: `${b.quantite} ${displayUnit(b.unite)} (seuil ${b.seuil})` });
+    });
+    const levelOrder = { danger: 0, warning: 1, info: 2 };
+    alerts.sort((a, b) => levelOrder[a.level] - levelOrder[b.level]);
+
+    const kpis = {
+        aProduireL: Math.round(tanks.reduce((s, t) => s + t.litres, 0) * 10) / 10,
+        aProduireBt: tanks.reduce((s, t) => s + t.bouteilles, 0),
+        cuves: tanks.reduce((s, t) => s + t.cuves, 0),
+        stockVendable: stacks.reduce((s, x) => s + x.sellable, 0),
+        lotsExpires: stacks.reduce((s, x) => s + x.expired, 0),
+        lotsWarning: stacks.reduce((s, x) => s + x.warning, 0),
+        commandes: orders.length,
+        urgentes: orders.filter(o => o.urgent).length,
+        enRetard: orders.filter(o => o.late).length,
+        pretes: orders.filter(o => o.statut === 'produite').length,
+        consoCritiques: bins.filter(b => b.state === 'critical').length,
+        consoBas: bins.filter(b => b.state === 'low').length,
+        consoTotal: bins.length,
+        presents: staff.filter(s => s.present).length,
+        effectif: staff.length
+    };
+
+    const items = [...tanks, ...stacks, ...orders, ...bins, ...staff];
+    return {
+        builtAt: now, tanks, stacks, orders, bins, staff, alerts, kpis, items,
+        byId: new Map(items.map(i => [i.id, i])),
+        grid: { rows: rowKeys.map(k => aromeNames.get(k)), cols: colKeys.map(k => formatNames.get(k)) }
+    };
+};
+
+// --- Moteur 3D ---
+const Twin = {
+    lib: null,
+    loading: null,
+    supported: null,
+    renderer: null,
+    scene: null,
+    camera: null,
+    controls: null,
+    raycaster: null,
+    ndc: null,
+    dynamic: null,
+    markers: null,
+    container: null,
+    labelsEl: null,
+    tooltipEl: null,
+    model: null,
+    objects: new Map(),
+    pickables: [],
+    labels: [],
+    signatures: new Map(),
+    prevFill: new Map(),
+    fills: [],
+    flashes: [],
+    bobbers: [],
+    pulseMats: [],
+    selectedId: null,
+    hoveredId: null,
+    focusZone: 'overview',
+    tween: null,
+    raf: 0,
+    needsRender: true,
+    pointer: null,
+    pointerDirty: false,
+    downAt: null,
+    resizeObserver: null,
+    viewInitialized: false,
+    size: null,
+    viewOffset: { x: 0, y: 0 },
+    viewOffsetTarget: { x: 0, y: 0 },
+    geo: {},
+    mats: {},
+    palette: null,
+    tmp: null
+};
+
+const _twinMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+const twinReducedMotion = () => !!_twinMotionQuery?.matches;
+
+const twinIsSupported = () => {
+    if (Twin.supported !== null) return Twin.supported;
+    try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+        Twin.supported = !!gl;
+        gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch (_) {
+        Twin.supported = false;
+    }
+    return Twin.supported;
+};
+
+const twinLoadLibrary = () => {
+    if (Twin.lib) return Promise.resolve(Twin.lib);
+    if (!Twin.loading) {
+        Twin.loading = Promise.all([
+            import('./vendor/three/three.module.min.js'),
+            import('./vendor/three/OrbitControls.js')
+        ]).then(([THREE, controls]) => {
+            Twin.lib = { THREE, OrbitControls: controls.OrbitControls };
+            return Twin.lib;
+        }).catch(err => {
+            Twin.loading = null;
+            throw err;
+        });
+    }
+    return Twin.loading;
+};
+
+const twinCssColor = (name, fallback) => {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return /^#[0-9a-f]{3,8}$/i.test(v) ? v : fallback;
+};
+
+const twinGeo = (key, factory) => Twin.geo[key] || (Twin.geo[key] = factory());
+const twinMat = (key, factory) => Twin.mats[key] || (Twin.mats[key] = factory());
+const twinStd = (key, color, opts = {}) => twinMat(`std:${key}:${color}`, () =>
+    new Twin.lib.THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.05, ...opts }));
+const twinBasic = (key, color, opts = {}) => twinMat(`basic:${key}:${color}`, () =>
+    new Twin.lib.THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, ...opts }));
+
+const twinGeometries = () => {
+    const { THREE } = Twin.lib;
+    return {
+        box: twinGeo('box', () => new THREE.BoxGeometry(1, 1, 1)),
+        cyl: twinGeo('cyl', () => new THREE.CylinderGeometry(1, 1, 1, 36)),
+        cylOpen: twinGeo('cylOpen', () => new THREE.CylinderGeometry(1, 1, 1, 40, 1, true)),
+        sphere: twinGeo('sphere', () => new THREE.SphereGeometry(1, 24, 16)),
+        ring: twinGeo('ring', () => new THREE.RingGeometry(0.86, 1, 56)),
+        plane: twinGeo('plane', () => new THREE.PlaneGeometry(1, 1)),
+        capsule: twinGeo('capsule', () => new THREE.CapsuleGeometry(0.26, 0.62, 6, 16)),
+        cone: twinGeo('cone', () => new THREE.ConeGeometry(1, 1, 24)),
+        band: twinGeo('band', () => new THREE.TorusGeometry(1.07, 0.07, 10, 56)),
+        edges: twinGeo('edges', () => new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1))),
+        bottle: twinGeo('bottle', () => new THREE.LatheGeometry(
+            [[0, 0], [0.3, 0], [0.33, 0.04], [0.33, 0.58], [0.29, 0.68], [0.15, 0.8], [0.11, 0.86], [0.11, 1], [0, 1]]
+                .map(([x, y]) => new THREE.Vector2(x, y)), 20))
+    };
+};
+
+const twinMesh = (geometry, material, { cast = true, receive = false } = {}) => {
+    const mesh = new Twin.lib.THREE.Mesh(geometry, material);
+    mesh.castShadow = cast;
+    mesh.receiveShadow = receive;
+    return mesh;
+};
+
+const twinPlaceBox = (group, material, sx, sy, sz, x, y, z, opts) => {
+    const mesh = twinMesh(twinGeometries().box, material, opts);
+    mesh.scale.set(sx, sy, sz);
+    mesh.position.set(x, y, z);
+    group.add(mesh);
+    return mesh;
+};
+
+const twinPlaceCyl = (group, material, r, h, x, y, z, opts) => {
+    const mesh = twinMesh(twinGeometries().cyl, material, opts);
+    mesh.scale.set(r, h, r);
+    mesh.position.set(x, y, z);
+    group.add(mesh);
+    return mesh;
+};
+
+const twinFloorDecal = (group, material, w, d, x, z, y = 0.006) => {
+    const mesh = twinMesh(twinGeometries().plane, material, { cast: false, receive: false });
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.scale.set(w, d, 1);
+    mesh.position.set(x, y, z);
+    group.add(mesh);
+    return mesh;
+};
+
+const twinRing = (group, material, radius, y = 0.012) => {
+    const mesh = twinMesh(twinGeometries().ring, material, { cast: false });
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.scale.set(radius, radius, 1);
+    mesh.position.y = y;
+    group.add(mesh);
+    return mesh;
+};
+
+const twinMaterials = () => {
+    const p = Twin.palette;
+    return {
+        floor: twinStd('floor', p.floor, { roughness: 0.95 }),
+        ground: twinStd('ground', p.ground, { roughness: 1 }),
+        wall: twinStd('wall', '#FBFAF6', { roughness: 0.9 }),
+        steel: twinStd('steel', '#B9C2C9', { metalness: 0.7, roughness: 0.32 }),
+        steelDark: twinStd('steelDark', '#6E7880', { metalness: 0.55, roughness: 0.42 }),
+        rack: twinStd('rack', '#4A6C8F', { metalness: 0.35, roughness: 0.5 }),
+        tankShell: twinMat('tankShell', () => new Twin.lib.THREE.MeshStandardMaterial({
+            color: '#E3EAEE', metalness: 0.85, roughness: 0.2, transparent: true, opacity: 0.3,
+            depthWrite: false, side: Twin.lib.THREE.DoubleSide
+        })),
+        wood: twinStd('wood', '#B98E5C', { roughness: 0.88 }),
+        kraft: twinStd('kraft', '#C9A878', { roughness: 0.92 }),
+        kraftTape: twinStd('kraftTape', '#A9844F', { roughness: 0.6 }),
+        film: twinStd('film', p.primaryLight, { roughness: 0.35, transparent: true, opacity: 0.92 }),
+        binShell: twinMat('binShell', () => new Twin.lib.THREE.MeshStandardMaterial({
+            color: '#D9D4C7', roughness: 0.6, transparent: true, opacity: 0.42, depthWrite: false
+        })),
+        skin: twinStd('skin', '#F0E0CC', { roughness: 0.8 }),
+        absent: twinMat('absent', () => new Twin.lib.THREE.MeshStandardMaterial({
+            color: '#B9B6AE', roughness: 0.9, transparent: true, opacity: 0.5
+        })),
+        marking: twinBasic('marking', '#E2C25A', { opacity: 0.85 }),
+        dark: twinStd('dark', '#2F3438', { roughness: 0.7 }),
+        glassDark: twinStd('glassDark', '#3B4A55', { roughness: 0.15, metalness: 0.3 }),
+        white: twinStd('white', '#F7F7F2', { roughness: 0.7 }),
+        brand: twinStd('brand', p.primary, { roughness: 0.6 }),
+        screen: twinStd('screen', p.primaryLight, { emissive: p.primaryLight, emissiveIntensity: 0.9 }),
+        ringDanger: twinBasic('ringDanger', p.danger, { opacity: 0.85 }),
+        ringWarning: twinBasic('ringWarning', p.warning, { opacity: 0.85 }),
+        ringWarningSoft: twinBasic('ringWarningSoft', p.warning, { opacity: 0.4 }),
+        ringSuccess: twinBasic('ringSuccess', p.success, { opacity: 0.7 }),
+        beaconDanger: twinStd('beaconDanger', p.danger, { emissive: p.danger, emissiveIntensity: 0.8 }),
+        beaconWarning: twinStd('beaconWarning', p.warning, { emissive: p.warning, emissiveIntensity: 0.8 }),
+        ghost: twinMat('ghost', () => new Twin.lib.THREE.LineBasicMaterial({ color: p.danger, transparent: true, opacity: 0.75 })),
+        ghostFill: twinBasic('ghostFill', p.danger, { opacity: 0.06 }),
+        stateDanger: twinStd('stateDanger', p.danger, { roughness: 0.6 }),
+        stateWarning: twinStd('stateWarning', p.warning, { roughness: 0.6 }),
+        stateOk: twinStd('stateOk', p.success, { roughness: 0.6 }),
+        stateUnknown: twinStd('stateUnknown', '#9AA39A', { roughness: 0.7 })
+    };
+};
+
+const twinColorMats = (color) => ({
+    crate: twinStd('crate', color, { roughness: 0.78 }),
+    glass: twinStd('glass', color, { roughness: 0.12, transparent: true, opacity: 0.82 }),
+    liquid: twinStd('liquid', color, { roughness: 0.25, emissive: color, emissiveIntensity: 0.14, transparent: true, opacity: 0.9 }),
+    band: twinStd('band', color, { roughness: 0.45, emissive: color, emissiveIntensity: 0.25 }),
+    figure: twinStd('figure', color, { roughness: 0.65 })
+});
+
+const twinInitEngine = () => {
+    const { THREE, OrbitControls } = Twin.lib;
+    Twin.palette = {
+        primary: twinCssColor('--primary', '#5D7B3E'),
+        primaryLight: twinCssColor('--primary-light', '#8BA66B'),
+        danger: twinCssColor('--danger', '#C0392B'),
+        warning: twinCssColor('--warning', '#C8960A'),
+        success: twinCssColor('--success', '#5C8A3C'),
+        info: twinCssColor('--info', '#2E72B8'),
+        bg: twinCssColor('--bg', '#F5F5F0'),
+        floor: twinCssColor('--bg-secondary', '#FAFAF7'),
+        ground: twinCssColor('--bg-tertiary', '#EFECE4'),
+        zones: Object.fromEntries(TWIN_ZONES.map(z => [z.id, twinCssColor(z.token, '#5D7B3E')]))
+    };
+    const compact = window.matchMedia?.('(max-width: 768px)').matches;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, compact ? 1.75 : 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.domElement.className = 'twin-gl';
+    renderer.domElement.setAttribute('role', 'img');
+    renderer.domElement.setAttribute('aria-label', "Vue 3D de l'atelier ThéCol. Utilisez la liste des objets pour une navigation au clavier.");
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(Twin.palette.bg);
+    scene.fog = new THREE.Fog(Twin.palette.bg, 80, 160);
+
+    const camera = new THREE.PerspectiveCamera(38, 1.6, 0.5, 400);
+    camera.position.set(...TWIN_VIEW_OVERVIEW.pos);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 6;
+    controls.maxDistance = 95;
+    controls.maxPolarAngle = Math.PI * 0.45;
+    controls.screenSpacePanning = false;
+    controls.autoRotateSpeed = 0.5;
+    controls.target.set(...TWIN_VIEW_OVERVIEW.target);
+    controls.addEventListener('change', () => {
+        twinClampTarget();
+        twinWake();
+    });
+    controls.addEventListener('start', () => { Twin.tween = null; });
+    controls.update();
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xd9d2c0, 1.2));
+    const sun = new THREE.DirectionalLight(0xfff4e2, 2.2);
+    sun.position.set(-16, 34, 22);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(compact ? 1024 : 2048, compact ? 1024 : 2048);
+    Object.assign(sun.shadow.camera, { left: -34, right: 34, top: 26, bottom: -26, near: 5, far: 95 });
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.03;
+    scene.add(sun);
+
+    Object.assign(Twin, {
+        renderer, scene, camera, controls,
+        raycaster: new THREE.Raycaster(),
+        ndc: new THREE.Vector2(),
+        tmp: new THREE.Vector3(),
+        dynamic: new THREE.Group(),
+        markers: new THREE.Group()
+    });
+    scene.add(Twin.dynamic);
+    scene.add(Twin.markers);
+    twinBuildEnvironment();
+    twinBuildMarkers();
+
+    const canvas = renderer.domElement;
+    canvas.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'touch') return;
+        Twin.pointer = { x: e.clientX, y: e.clientY };
+        Twin.pointerDirty = true;
+        twinWake();
+    });
+    canvas.addEventListener('pointerleave', () => {
+        Twin.pointer = null;
+        Twin.pointerDirty = true;
+        twinWake();
+    });
+    canvas.addEventListener('pointerdown', (e) => {
+        Twin.downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+        Twin.tween = null;
+    });
+    canvas.addEventListener('pointerup', (e) => {
+        const down = Twin.downAt;
+        Twin.downAt = null;
+        if (!down || e.button > 0) return;
+        if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6 || performance.now() - down.t > 600) return;
+        const id = twinPick(e.clientX, e.clientY);
+        twinSelect(id, { fly: false });
+    });
+    canvas.addEventListener('dblclick', (e) => {
+        const id = twinPick(e.clientX, e.clientY);
+        if (id) twinSelect(id, { fly: true });
+    });
+};
+
+const twinBuildEnvironment = () => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const env = new THREE.Group();
+    const ground = twinMesh(twinGeometries().plane, m.ground, { cast: false, receive: true });
+    ground.rotation.x = -Math.PI / 2;
+    ground.scale.set(180, 180, 1);
+    ground.position.y = -0.31;
+    env.add(ground);
+    twinPlaceBox(env, m.floor, 46, 0.3, 32, 0, -0.15, 0, { cast: false, receive: true });
+
+    TWIN_ZONES.forEach(zone => {
+        const [x0, z0, x1, z1] = zone.bounds;
+        const color = Twin.palette.zones[zone.id];
+        const w = x1 - x0;
+        const d = z1 - z0;
+        const cx = (x0 + x1) / 2;
+        const cz = (z0 + z1) / 2;
+        twinFloorDecal(env, twinBasic(`zoneTint:${zone.id}`, color, { opacity: 0.07 }), w, d, cx, cz, 0.004);
+        const border = twinBasic(`zoneBorder:${zone.id}`, color, { opacity: 0.6 });
+        twinFloorDecal(env, border, w, 0.1, cx, z0, 0.008);
+        twinFloorDecal(env, border, w, 0.1, cx, z1, 0.008);
+        twinFloorDecal(env, border, 0.1, d, x0, cz, 0.008);
+        twinFloorDecal(env, border, 0.1, d, x1, cz, 0.008);
+    });
+
+    for (let x = -20; x < 20; x += 1.6) twinFloorDecal(env, m.marking, 0.85, 0.09, x + 0.42, 0.5, 0.009);
+    for (let z = -13; z < 1.8; z += 1.6) twinFloorDecal(env, m.marking, 0.09, 0.85, 0, z + 0.42, 0.009);
+
+    twinPlaceBox(env, m.wall, 46.2, 1.4, 0.3, 0, 0.55, -15.85, { receive: true });
+    twinPlaceBox(env, m.wall, 0.3, 1.4, 31.7, -22.95, 0.55, 0, { receive: true });
+    twinPlaceBox(env, m.wall, 0.3, 1.4, 19.4, 22.95, 0.55, -6.15, { receive: true });
+    twinPlaceBox(env, m.wall, 0.3, 1.4, 3.6, 22.95, 0.55, 14.05, { receive: true });
+    twinPlaceBox(env, m.steelDark, 0.6, 0.35, 8.6, 22.6, 0.05, 7.95, { receive: true });
+
+    twinFloorDecal(env, twinBasic('presentArea', Twin.palette.success, { opacity: 0.1 }), 4, 5.2, 0, 5.4, 0.007);
+    twinFloorDecal(env, twinBasic('absentArea', '#8C8A84', { opacity: 0.08 }), 4, 4.2, 0, 10.7, 0.007);
+    twinPlaceBox(env, m.steelDark, 0.12, 1.2, 0.12, 1.75, 0.6, 2.85);
+    twinPlaceBox(env, m.dark, 0.5, 0.62, 0.2, 1.75, 1.4, 2.85);
+    twinPlaceBox(env, m.screen, 0.36, 0.3, 0.02, 1.75, 1.48, 2.96, { cast: false });
+
+    const truck = new THREE.Group();
+    truck.position.set(27.3, 0, 7.95);
+    twinPlaceBox(truck, m.white, 7.4, 2.7, 2.5, 0, 1.75, 0);
+    twinPlaceBox(truck, m.brand, 7.42, 0.36, 2.52, 0, 1.25, 0);
+    twinPlaceBox(truck, m.brand, 2.1, 2.3, 2.4, 4.9, 1.55, 0);
+    twinPlaceBox(truck, m.glassDark, 0.05, 0.85, 2.0, 5.96, 2.15, 0, { cast: false });
+    [-2.6, -1.3, 4.6].forEach(x => [-1.2, 1.2].forEach(z => {
+        const wheel = twinMesh(twinGeometries().cyl, m.dark);
+        wheel.scale.set(0.48, 0.34, 0.48);
+        wheel.rotation.x = Math.PI / 2;
+        wheel.position.set(x, 0.48, z);
+        truck.add(wheel);
+    }));
+    env.add(truck);
+
+    env.traverse(o => { o.matrixAutoUpdate = true; });
+    Twin.scene.add(env);
+};
+
+const twinBuildMarkers = () => {
+    const { THREE } = Twin.lib;
+    const p = Twin.palette;
+    const hover = twinMesh(twinGeometries().ring, new THREE.MeshBasicMaterial({ color: p.primary, transparent: true, opacity: 0.45, depthWrite: false }), { cast: false });
+    hover.rotation.x = -Math.PI / 2;
+    hover.visible = false;
+    const select = twinMesh(twinGeometries().ring, new THREE.MeshBasicMaterial({ color: p.primary, transparent: true, opacity: 0.95, depthWrite: false }), { cast: false });
+    select.rotation.x = -Math.PI / 2;
+    select.visible = false;
+    const pin = new THREE.Group();
+    const pinMat = new THREE.MeshStandardMaterial({ color: p.primary, emissive: p.primary, emissiveIntensity: 0.5 });
+    const stem = twinMesh(twinGeometries().cyl, pinMat, { cast: false });
+    stem.scale.set(0.03, 0.9, 0.03);
+    stem.position.y = 0.75;
+    const tip = twinMesh(twinGeometries().cone, pinMat, { cast: false });
+    tip.scale.set(0.2, 0.36, 0.2);
+    tip.rotation.x = Math.PI;
+    tip.position.y = 0.18;
+    pin.add(stem, tip);
+    pin.visible = false;
+    Twin.markers.add(hover, select, pin);
+    Object.assign(Twin, { hoverRing: hover, selectRing: select, pin });
+};
+
+const twinRegister = (item, group, radius, topY, extra = {}) => {
+    group.traverse(o => {
+        if (o.isMesh) {
+            o.userData.twinId = item.id;
+            Twin.pickables.push(o);
+        }
+    });
+    const base = group.position.clone();
+    const top = base.clone();
+    top.y += topY;
+    Twin.objects.set(item.id, { id: item.id, zone: item.zone, group, base, top, radius, ...extra });
+};
+
+const twinGridPositions = (count, bounds, { maxCols = 4, spacing = [4, 4.6], margin = [1.4, 1.4] } = {}) => {
+    const [x0, z0, x1, z1] = bounds;
+    const cols = Math.max(1, Math.min(maxCols, count));
+    const rows = Math.max(1, Math.ceil(count / cols));
+    const sx = Math.min(spacing[0], (x1 - x0 - margin[0] * 2) / Math.max(1, cols - 1 || 1));
+    const sz = Math.min(spacing[1], (z1 - z0 - margin[1] * 2) / Math.max(1, rows - 1 || 1));
+    const cx = (x0 + x1) / 2;
+    const cz = (z0 + z1) / 2;
+    return Array.from({ length: count }, (_, i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        return [cx + (col - (cols - 1) / 2) * sx, cz + (row - (rows - 1) / 2) * sz];
+    });
+};
+
+const twinBuildTank = (t, x, z) => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const cm = twinColorMats(t.couleur);
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    const R = 1.05;
+    const H = 3;
+    const base = 0.62;
+    for (let i = 0; i < 4; i++) {
+        const a = Math.PI / 4 + i * Math.PI / 2;
+        twinPlaceCyl(g, m.steelDark, 0.07, base, Math.cos(a) * R * 0.78, base / 2, Math.sin(a) * R * 0.78);
+    }
+    twinPlaceCyl(g, m.steel, R * 1.02, 0.1, 0, base, 0);
+    const shell = twinMesh(twinGeometries().cylOpen, m.tankShell, { cast: false });
+    shell.scale.set(R, H, R);
+    shell.position.y = base + 0.05 + H / 2;
+    shell.renderOrder = 2;
+    g.add(shell);
+    twinPlaceCyl(g, m.steel, R * 1.04, 0.12, 0, base + 0.05 + H + 0.06, 0);
+    twinPlaceCyl(g, m.steelDark, 0.3, 0.2, 0, base + H + 0.3, 0);
+    const outlet = twinPlaceCyl(g, m.steel, 0.08, 0.6, R + 0.2, base + 0.3, 0);
+    outlet.rotation.z = Math.PI / 2;
+    const band = twinMesh(twinGeometries().band, cm.band, { cast: false });
+    band.rotation.x = Math.PI / 2;
+    band.scale.setScalar(R);
+    band.position.y = base + H * 0.86;
+    g.add(band);
+    let liquid = null;
+    if (t.fill > 0) {
+        liquid = twinMesh(twinGeometries().cyl, cm.liquid, { cast: false });
+        liquid.renderOrder = 1;
+        g.add(liquid);
+    }
+    if (t.status === 'active') twinRing(g, m.ringWarningSoft, R * 1.45);
+    Twin.dynamic.add(g);
+    const fillTo = Math.max(0.04, t.fill * H * 0.97);
+    if (liquid) {
+        const from = Twin.prevFill.has(t.id) ? Twin.prevFill.get(t.id) : fillTo;
+        Twin.fills.push({ mesh: liquid, from, to: fillTo, start: performance.now(), base: base + 0.05, radius: R * 0.93 });
+        twinSetLiquid(liquid, base + 0.05, R * 0.93, twinReducedMotion() ? fillTo : from);
+    }
+    Twin.prevFill.set(t.id, t.fill > 0 ? fillTo : 0);
+    twinRegister(t, g, R * 1.35, base + H + 0.6);
+};
+
+const twinSetLiquid = (mesh, base, radius, h) => {
+    mesh.scale.set(radius, h, radius);
+    mesh.position.y = base + h / 2;
+};
+
+const twinBuildStack = (s, x, z) => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const cm = twinColorMats(s.couleur);
+    const geos = twinGeometries();
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    twinPlaceBox(g, m.wood, 1.5, 0.16, 1.15, 0, 0.08, 0, { receive: true });
+    const n = s.total > 0 ? twinClamp(Math.ceil(s.total / s.crateSize), 1, 7) : 0;
+    for (let i = 0; i < n; i++) twinPlaceBox(g, cm.crate, 1.34, 0.36, 1.0, 0, 0.16 + 0.2 + i * 0.38, 0);
+    const top = 0.16 + n * 0.38;
+    if (n > 0) {
+        const h = 0.42 + (s.contenanceCl || 50) / 100 * 0.5;
+        [-0.42, 0, 0.42].forEach(bx => {
+            const bottle = twinMesh(geos.bottle, cm.glass, { cast: true });
+            bottle.scale.set(h * 0.95, h, h * 0.95);
+            bottle.position.set(bx, top + 0.01, 0);
+            g.add(bottle);
+            twinPlaceCyl(g, m.dark, h * 0.12, h * 0.08, bx, top + h + 0.03, 0, { cast: false });
+        });
+    } else {
+        const ghost = new THREE.LineSegments(geos.edges, m.ghost);
+        ghost.scale.set(1.34, 0.9, 1.0);
+        ghost.position.y = 0.16 + 0.45;
+        g.add(ghost);
+        twinPlaceBox(g, m.ghostFill, 1.34, 0.9, 1.0, 0, 0.16 + 0.45, 0, { cast: false });
+    }
+    if (s.status === 'expired') twinRing(g, m.ringDanger, 1.08);
+    else if (s.status === 'rupture') twinRing(g, m.ringWarning, 1.08);
+    else if (s.status === 'warning') twinRing(g, m.ringWarningSoft, 1.08);
+    Twin.dynamic.add(g);
+    twinRegister(s, g, 1.08, Math.max(top + (n ? 1.0 : 1.2), 1.3));
+};
+
+const twinBuildOrder = (o, x, z) => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    twinPlaceBox(g, m.wood, 1.5, 0.16, 1.2, 0, 0.08, 0, { receive: true });
+    const layers = twinClamp(Math.ceil(o.totalBt / 48), 1, 5);
+    const mat = o.statut === 'produite' ? m.film : m.kraft;
+    for (let i = 0; i < layers; i++) twinPlaceBox(g, mat, 1.38, 0.4, 1.08, 0, 0.16 + 0.21 + i * 0.42, 0);
+    const top = 0.16 + layers * 0.42;
+    if (o.statut !== 'produite') twinPlaceBox(g, m.kraftTape, 0.2, 0.014, 1.09, 0, top + 0.004, 0, { cast: false });
+    if (o.late || o.urgent) {
+        twinPlaceCyl(g, m.steelDark, 0.035, 0.55, 0.56, top + 0.27, 0.42);
+        const beacon = twinMesh(twinGeometries().sphere, o.late ? m.beaconDanger : m.beaconWarning, { cast: false });
+        beacon.scale.setScalar(0.15);
+        beacon.position.set(0.56, top + 0.62, 0.42);
+        g.add(beacon);
+        twinRing(g, o.late ? m.ringDanger : m.ringWarning, 1.1);
+    } else if (o.statut === 'produite') {
+        twinRing(g, m.ringSuccess, 1.1);
+    }
+    Twin.dynamic.add(g);
+    twinRegister(o, g, 1.1, top + 0.9);
+};
+
+const twinBuildShelving = (x, z) => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    [-3.1, 3.1].forEach(px => [-0.55, 0.55].forEach(pz => twinPlaceBox(g, m.rack, 0.08, 3.25, 0.08, px, 1.625, pz)));
+    [0.3, 1.38, 2.46].forEach(y => twinPlaceBox(g, m.steel, 6.3, 0.06, 1.18, 0, y, 0, { receive: true }));
+    Twin.dynamic.add(g);
+    const slots = [];
+    [0.33, 1.41, 2.49].forEach(y => [-2.3, -0.77, 0.77, 2.3].forEach(sx => slots.push([x + sx, y, z])));
+    return slots;
+};
+
+const twinBuildBin = (b, x, y, z) => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const g = new THREE.Group();
+    g.position.set(x, y, z);
+    const shell = twinPlaceBox(g, m.binShell, 1.36, 0.62, 0.95, 0, 0.31, 0, { cast: false });
+    shell.renderOrder = 2;
+    if (b.level > 0) {
+        const mat = { critical: m.stateDanger, low: m.stateWarning, ok: m.stateOk }[b.state] || m.stateUnknown;
+        const h = Math.max(0.04, 0.56 * b.level);
+        twinPlaceBox(g, mat, 1.26, h, 0.86, 0, h / 2 + 0.02, 0);
+    }
+    if (b.state === 'critical') twinRing(g, m.ringDanger, 0.82, 0.01);
+    Twin.dynamic.add(g);
+    twinRegister(b, g, 0.82, 0.95);
+};
+
+const twinBuildFigure = (s, x, z, phase) => {
+    const { THREE } = Twin.lib;
+    const m = twinMaterials();
+    const cm = twinColorMats(s.couleur);
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    const body = new THREE.Group();
+    const torso = twinMesh(twinGeometries().capsule, s.present ? cm.figure : m.absent);
+    torso.position.y = 0.6;
+    const head = twinMesh(twinGeometries().sphere, s.present ? m.skin : m.absent);
+    head.scale.setScalar(0.22);
+    head.position.y = 1.4;
+    body.add(torso, head);
+    g.add(body);
+    if (s.present) {
+        twinRing(g, m.ringSuccess, 0.55);
+        Twin.bobbers.push({ mesh: body, phase });
+    }
+    Twin.dynamic.add(g);
+    twinRegister(s, g, 0.6, 1.95);
+};
+
+const twinSignature = (item) => {
+    switch (item.kind) {
+        case 'tank': return `${item.litres}`;
+        case 'stack': return `${item.total}|${item.sellable}|${item.status}`;
+        case 'order': return `${item.statut}|${item.totalBt}|${item.status}`;
+        case 'bin': return `${item.quantite}|${item.state}`;
+        case 'staff': return `${item.present}`;
+        default: return '';
+    }
+};
+
+const twinClearDynamic = () => {
+    Twin.dynamic.clear();
+    Twin.objects.clear();
+    Twin.pickables = [];
+    Twin.fills = [];
+    Twin.bobbers = [];
+};
+
+const twinBuildDynamic = (model) => {
+    twinClearDynamic();
+    const zone = (id) => TWIN_ZONES.find(z => z.id === id).bounds;
+
+    const tankPos = twinGridPositions(model.tanks.length, zone('production'), {
+        maxCols: model.tanks.length > 8 ? 6 : 4, spacing: [4, 4.4], margin: [1.8, 1.8]
+    });
+    model.tanks.forEach((t, i) => twinBuildTank(t, ...tankPos[i]));
+
+    const [sx0, sz0, sx1, sz1] = zone('stock');
+    const cols = Math.max(1, model.grid.cols.length);
+    const rows = Math.max(1, model.grid.rows.length);
+    const stepX = Math.min(3.2, (sx1 - sx0 - 4.2) / Math.max(1, cols));
+    const stepZ = Math.min(2.6, (sz1 - sz0 - 1.4) / Math.max(1, rows));
+    const gridX0 = sx0 + 3.4 + stepX / 2;
+    const gridZ0 = sz0 + 0.9 + stepZ / 2;
+    Twin.stockLayout = { gridX0, gridZ0, stepX, stepZ, rows, cols };
+    model.stacks.forEach(s => twinBuildStack(s, gridX0 + s.col * stepX, gridZ0 + s.row * stepZ));
+
+    const shown = model.orders.slice(0, 15);
+    shown.forEach((o, i) => twinBuildOrder(o, 18.2 - (i % 5) * 3.1, 4.4 + Math.floor(i / 5) * 3.2));
+
+    const unitCenters = [[-15.6, 4.4], [-7.4, 4.4], [-15.6, 8], [-7.4, 8], [-15.6, 11.6], [-7.4, 11.6]];
+    const units = Math.min(unitCenters.length, Math.ceil(model.bins.length / 12));
+    const slots = [];
+    for (let u = 0; u < units; u++) slots.push(...twinBuildShelving(...unitCenters[u]));
+    model.bins.slice(0, slots.length).forEach((b, i) => twinBuildBin(b, ...slots[i]));
+
+    let present = 0;
+    let absent = 0;
+    model.staff.forEach((s, i) => {
+        if (s.present && present < 8) {
+            twinBuildFigure(s, present % 2 ? 0.85 : -0.85, 3.7 + Math.floor(present / 2) * 1.25, i);
+            present++;
+        } else if (!s.present && absent < 9) {
+            twinBuildFigure(s, (absent % 3 - 1) * 1.25, 9.3 + Math.floor(absent / 3) * 1.2, i);
+            absent++;
+        }
+    });
+
+    const nextSignatures = new Map(model.items.map(i => [i.id, twinSignature(i)]));
+    if (Twin.signatures.size) {
+        nextSignatures.forEach((sig, id) => {
+            const prev = Twin.signatures.get(id);
+            if (prev !== sig) twinFlash(id);
+        });
+    }
+    Twin.signatures = nextSignatures;
+    Twin.pulseMats = [twinMaterials().ringDanger, twinMaterials().ringWarning, twinMaterials().beaconDanger, twinMaterials().beaconWarning];
+    Twin.pulsing = model.items.some(i => ['expired', 'rupture', 'late', 'urgent'].includes(i.status) || i.state === 'critical');
+};
+
+const twinFlash = (id) => {
+    const obj = Twin.objects.get(id);
+    if (!obj || twinReducedMotion()) return;
+    const { THREE } = Twin.lib;
+    const mesh = twinMesh(twinGeometries().ring, new THREE.MeshBasicMaterial({
+        color: Twin.palette.info, transparent: true, opacity: 0.9, depthWrite: false
+    }), { cast: false });
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.copy(obj.base);
+    mesh.position.y += 0.03;
+    Twin.markers.add(mesh);
+    Twin.flashes.push({ mesh, radius: obj.radius, start: performance.now() });
+};
+
+// --- Labels HTML projetés sur la scène ---
+const twinAddLabel = (pos, html, cls, { id = null, far = 999, near = 0 } = {}) => {
+    const el = document.createElement(id ? 'button' : 'div');
+    el.className = `twin-label ${cls}`;
+    el.innerHTML = html;
+    if (id) {
+        el.type = 'button';
+        el.tabIndex = -1;
+        el.setAttribute('data-click', 'twin-select');
+        el.setAttribute('data-id', id);
+    }
+    Twin.labelsEl.appendChild(el);
+    Twin.labels.push({ el, pos, far, near });
+};
+
+const twinBuildLabels = (model) => {
+    if (!Twin.labelsEl) return;
+    const { THREE } = Twin.lib;
+    Twin.labelsEl.innerHTML = '';
+    Twin.labels = [];
+    const k = model.kpis;
+    const zoneSub = {
+        production: k.aProduireL > 0 ? `${twinFmtLitres(k.aProduireL)} · ${k.cuves} cuve${k.cuves > 1 ? 's' : ''}` : 'Rien à produire',
+        stock: `${twinFmtInt(k.stockVendable)} bt vendables`,
+        expedition: `${k.commandes} commande${k.commandes > 1 ? 's' : ''}${model.orders.length > 15 ? ` (+${model.orders.length - 15})` : ''}`,
+        magasin: `${k.consoTotal} articles${k.consoCritiques ? ` · ${k.consoCritiques} sous seuil` : ''}`,
+        equipe: `${k.presents}/${k.effectif} présents`
+    };
+    TWIN_ZONES.forEach(zone => {
+        const [x0, , , z1] = zone.bounds;
+        twinAddLabel(new THREE.Vector3(x0 + 0.3, 0.05, z1 + 0.35),
+            `<strong>${escapeHtml(zone.label)}</strong><span>${escapeHtml(zoneSub[zone.id])}</span>`,
+            `twin-label--zone twin-label--${zone.id}`, { near: 16 });
+    });
+    const sl = Twin.stockLayout;
+    if (sl) {
+        model.grid.rows.forEach((nom, row) => twinAddLabel(
+            new THREE.Vector3(sl.gridX0 - sl.stepX / 2 - 0.25, 0.05, sl.gridZ0 + row * sl.stepZ),
+            escapeHtml(nom), 'twin-label--tag twin-label--right', { far: 48 }));
+        model.grid.cols.forEach((nom, col) => twinAddLabel(
+            new THREE.Vector3(sl.gridX0 + col * sl.stepX, 0.05, sl.gridZ0 + (sl.rows - 0.5) * sl.stepZ + 0.35),
+            escapeHtml(nom), 'twin-label--tag', { far: 48 }));
+    }
+    model.items.forEach(item => {
+        const obj = Twin.objects.get(item.id);
+        if (!obj) return;
+        let badge = null;
+        if (item.kind === 'tank' && item.litres > 0) badge = [`${twinFmtLitres(item.litres)}`, 'info'];
+        else if (item.status === 'expired') badge = ['Expiré', 'danger'];
+        else if (item.status === 'rupture') badge = [`−${twinFmtInt(item.manque)}`, 'warning'];
+        else if (item.status === 'late') badge = ['Retard', 'danger'];
+        else if (item.status === 'urgent') badge = [item.days === 0 ? "Auj." : `J-${item.days}`, 'warning'];
+        else if (item.kind === 'bin' && item.state === 'critical') badge = ['Seuil', 'danger'];
+        else if (item.kind === 'staff') badge = [item.initiales, item.present ? 'success' : 'muted'];
+        if (badge) twinAddLabel(obj.top.clone(), escapeHtml(badge[0]), `twin-label--badge twin-badge--${badge[1]}`, { id: item.id, far: item.kind === 'staff' ? 40 : 75 });
+    });
+    Twin.needsRender = true;
+};
+
+const twinUpdateLabels = () => {
+    if (!Twin.labelsEl || !Twin.labels.length) return;
+    const w = Twin.labelsEl.clientWidth;
+    const h = Twin.labelsEl.clientHeight;
+    const v = Twin.tmp;
+    const camPos = Twin.camera.position;
+    const zoom = camPos.distanceTo(Twin.controls.target);
+    Twin.labels.forEach(label => {
+        v.copy(label.pos).project(Twin.camera);
+        const dist = camPos.distanceTo(label.pos);
+        const visible = v.z < 1 && v.x > -1.15 && v.x < 1.15 && v.y > -1.15 && v.y < 1.15
+            && dist < label.far && zoom >= label.near;
+        if (!visible) {
+            if (label.el.style.display !== 'none') label.el.style.display = 'none';
+            return;
+        }
+        if (label.el.style.display === 'none') label.el.style.display = '';
+        const x = (v.x * 0.5 + 0.5) * w;
+        const y = (-v.y * 0.5 + 0.5) * h;
+        label.el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+    });
+};
+
+// --- Interaction : sélection, survol, caméra ---
+const twinPick = (clientX, clientY) => {
+    if (!Twin.renderer || !Twin.pickables.length) return null;
+    const rect = Twin.renderer.domElement.getBoundingClientRect();
+    Twin.ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    Twin.raycaster.setFromCamera(Twin.ndc, Twin.camera);
+    const hit = Twin.raycaster.intersectObjects(Twin.pickables, false)[0];
+    return hit ? hit.object.userData.twinId : null;
+};
+
+const twinUpdateHover = () => {
+    Twin.pointerDirty = false;
+    const id = Twin.pointer && !Twin.downAt ? twinPick(Twin.pointer.x, Twin.pointer.y) : null;
+    const tooltip = Twin.tooltipEl;
+    if (id !== Twin.hoveredId) {
+        Twin.hoveredId = id;
+        Twin.renderer.domElement.style.cursor = id ? 'pointer' : '';
+        twinPositionMarkers();
+        Twin.needsRender = true;
+    }
+    if (!tooltip) return;
+    const item = id ? Twin.model?.byId.get(id) : null;
+    if (!item || !Twin.pointer) {
+        tooltip.hidden = true;
+        return;
+    }
+    const html = `<strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.sub)}</span>`;
+    if (tooltip.innerHTML !== html) tooltip.innerHTML = html;
+    tooltip.hidden = false;
+    const rect = Twin.container.getBoundingClientRect();
+    tooltip.style.transform = `translate3d(${Math.round(Twin.pointer.x - rect.left + 14)}px, ${Math.round(Twin.pointer.y - rect.top + 16)}px, 0)`;
+};
+
+const twinPositionMarkers = () => {
+    if (!Twin.selectRing) return;
+    const sel = Twin.selectedId ? Twin.objects.get(Twin.selectedId) : null;
+    Twin.selectRing.visible = !!sel;
+    Twin.pin.visible = !!sel;
+    if (sel) {
+        Twin.selectRing.position.set(sel.base.x, sel.base.y + 0.02, sel.base.z);
+        Twin.selectRing.scale.set(sel.radius * 1.12, sel.radius * 1.12, 1);
+        Twin.pin.position.set(sel.top.x, sel.top.y, sel.top.z);
+    }
+    const hov = Twin.hoveredId && Twin.hoveredId !== Twin.selectedId ? Twin.objects.get(Twin.hoveredId) : null;
+    Twin.hoverRing.visible = !!hov;
+    if (hov) {
+        Twin.hoverRing.position.set(hov.base.x, hov.base.y + 0.02, hov.base.z);
+        Twin.hoverRing.scale.set(hov.radius * 1.12, hov.radius * 1.12, 1);
+    }
+};
+
+const twinClampTarget = () => {
+    const t = Twin.controls?.target;
+    if (!t) return;
+    t.x = twinClamp(t.x, -26, 30);
+    t.z = twinClamp(t.z, -18, 18);
+    t.y = twinClamp(t.y, 0, 4);
+};
+
+const twinAspectView = ({ target, pos }) => {
+    const aspect = Twin.camera?.aspect || 1.6;
+    const k = aspect < 1.5 ? Math.pow(1.5 / aspect, 0.8) : 1;
+    return {
+        target,
+        pos: pos.map((v, i) => target[i] + (v - target[i]) * k)
+    };
+};
+
+const twinViewForZone = (zoneId) => {
+    const zone = TWIN_ZONES.find(z => z.id === zoneId);
+    if (!zone) return twinAspectView(TWIN_VIEW_OVERVIEW);
+    const [x0, z0, x1, z1] = zone.bounds;
+    const cx = (x0 + x1) / 2;
+    const cz = (z0 + z1) / 2;
+    const d = Math.max(x1 - x0, (z1 - z0) * 1.3) * 0.95 + 3;
+    return twinAspectView({ target: [cx, 0.8, cz], pos: [cx + d * 0.15, d * 0.8, cz + d * 0.92] });
+};
+
+const twinViewForObject = (id) => {
+    const obj = Twin.objects.get(id);
+    if (!obj) return null;
+    const s = Math.max(1, obj.radius);
+    const target = [obj.base.x, obj.top.y * 0.45, obj.base.z];
+    return twinAspectView({ target, pos: [target[0] + 2.6 * s, target[1] + 6 * s, target[2] + 8 * s] });
+};
+
+const twinFlyTo = (view, duration = 850) => {
+    if (!view || !Twin.camera) return;
+    const { THREE } = Twin.lib;
+    const toPos = new THREE.Vector3(...view.pos);
+    const toTarget = new THREE.Vector3(...view.target);
+    if (twinReducedMotion() || duration <= 0) {
+        Twin.tween = null;
+        Twin.camera.position.copy(toPos);
+        Twin.controls.target.copy(toTarget);
+        Twin.controls.update();
+        twinWake();
+        return;
+    }
+    Twin.tween = {
+        fromPos: Twin.camera.position.clone(),
+        fromTarget: Twin.controls.target.clone(),
+        toPos, toTarget,
+        start: performance.now(),
+        duration
+    };
+    twinWake();
+};
+
+const twinSetActiveZone = (zoneId) => {
+    Twin.focusZone = TWIN_ZONES.some(z => z.id === zoneId) ? zoneId : 'overview';
+    DB.setFilter('twin_zone', Twin.focusZone);
+    document.querySelectorAll('.twin-zone-btn').forEach(btn => {
+        const active = btn.getAttribute('data-zone') === Twin.focusZone;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', String(active));
+    });
+};
+
+const twinFocusZone = (zoneId, { instant = false } = {}) => {
+    twinSetActiveZone(zoneId);
+    if (Twin.camera) twinFlyTo(twinViewForZone(Twin.focusZone), instant ? 0 : 850);
+};
+
+const twinSelect = (id, { fly = false, focusInspector = false } = {}) => {
+    const next = id && Twin.model?.byId.has(id) ? id : null;
+    Twin.selectedId = next;
+    twinPositionMarkers();
+    if (next && fly) twinSetActiveZone(Twin.model.byId.get(next).zone);
+    if (next && fly && Twin.camera) twinFlyTo(twinViewForObject(next));
+    twinRenderInspector({ focus: focusInspector });
+    twinRenderPanel();
+    twinWake();
+};
+
+const twinCycle = (dir) => {
+    const model = Twin.model;
+    if (!model) return;
+    const current = Twin.selectedId ? model.byId.get(Twin.selectedId) : null;
+    const zone = current?.zone || (Twin.focusZone !== 'overview' ? Twin.focusZone : 'production');
+    const list = model.items.filter(i => i.zone === zone);
+    if (!list.length) return;
+    const idx = current ? list.findIndex(i => i.id === current.id) : -1;
+    const next = list[(idx + dir + list.length) % list.length];
+    twinSelect(next.id, { fly: true });
+};
+
+// --- Boucle de rendu (à la demande : s'arrête quand rien ne bouge) ---
+const twinWake = () => {
+    Twin.needsRender = true;
+    if (!Twin.raf && Twin.container?.isConnected && Twin.renderer) {
+        Twin.raf = requestAnimationFrame(twinFrame);
+    }
+};
+
+const twinEase = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+
+const twinAnimate = (now) => {
+    let active = false;
+    if (Twin.tween) {
+        const tw = Twin.tween;
+        const k = Math.min(1, (now - tw.start) / tw.duration);
+        const e = twinEase(k);
+        Twin.camera.position.lerpVectors(tw.fromPos, tw.toPos, e);
+        Twin.controls.target.lerpVectors(tw.fromTarget, tw.toTarget, e);
+        Twin.camera.lookAt(Twin.controls.target);
+        if (k >= 1) Twin.tween = null;
+        active = true;
+    }
+    if (Twin.fills.length) {
+        Twin.fills = Twin.fills.filter(f => {
+            const k = Math.min(1, (now - f.start) / 1100);
+            twinSetLiquid(f.mesh, f.base, f.radius, f.from + (f.to - f.from) * twinEase(k));
+            return k < 1;
+        });
+        active = true;
+    }
+    if (Twin.flashes.length) {
+        Twin.flashes = Twin.flashes.filter(f => {
+            const k = Math.min(1, (now - f.start) / 1400);
+            const s = f.radius * (1 + k * 1.6);
+            f.mesh.scale.set(s, s, 1);
+            f.mesh.material.opacity = 0.9 * (1 - k);
+            if (k >= 1) {
+                Twin.markers.remove(f.mesh);
+                f.mesh.material.dispose();
+                return false;
+            }
+            return true;
+        });
+        active = true;
+    }
+    if (twinViewOffsetPending()) {
+        const vo = Twin.viewOffset;
+        const vt = Twin.viewOffsetTarget;
+        const k = twinReducedMotion() ? 1 : 0.2;
+        vo.x += (vt.x - vo.x) * k;
+        vo.y += (vt.y - vo.y) * k;
+        twinApplyViewOffset();
+        active = true;
+    }
+    if (twinReducedMotion()) return active;
+    if (Twin.pulsing) {
+        const k = (Math.sin(now / 320) + 1) / 2;
+        Twin.pulseMats.forEach(mat => {
+            if (mat.emissiveIntensity !== undefined && mat.emissive) mat.emissiveIntensity = 0.3 + 1.1 * k;
+            else mat.opacity = 0.35 + 0.6 * k;
+        });
+        active = true;
+    }
+    if (Twin.bobbers.length) {
+        Twin.bobbers.forEach(b => { b.mesh.position.y = Math.sin(now / 520 + b.phase) * 0.035; });
+        active = true;
+    }
+    if (Twin.pin?.visible) {
+        Twin.pin.position.y = (Twin.objects.get(Twin.selectedId)?.top.y || 0) + Math.sin(now / 380) * 0.1;
+        active = true;
+    }
+    return active;
+};
+
+const twinFrame = (now) => {
+    Twin.raf = 0;
+    if (!Twin.container || !Twin.container.isConnected) {
+        twinSuspend();
+        return;
+    }
+    const moved = Twin.tween ? false : Twin.controls.update();
+    const smooth = moved || twinViewOffsetPending() || !!(Twin.tween || Twin.fills.length || Twin.flashes.length || Twin.controls.autoRotate);
+    // Animations d'ambiance (pulsations, personnages) limitées à ~30 i/s pour la batterie
+    if (!smooth && !Twin.needsRender && !Twin.pointerDirty && now - (Twin.lastFrame || 0) < 33) {
+        Twin.raf = requestAnimationFrame(twinFrame);
+        return;
+    }
+    const active = twinAnimate(now) || smooth;
+    if (Twin.pointerDirty) twinUpdateHover();
+    Twin.lastFrame = now;
+    Twin.renderer.render(Twin.scene, Twin.camera);
+    twinUpdateLabels();
+    Twin.needsRender = false;
+    if (active) Twin.raf = requestAnimationFrame(twinFrame);
+};
+
+const twinSuspend = () => {
+    if (Twin.raf) cancelAnimationFrame(Twin.raf);
+    Twin.raf = 0;
+    Twin.resizeObserver?.disconnect();
+    Twin.container = null;
+    Twin.labelsEl = null;
+    Twin.tooltipEl = null;
+    Twin.hoveredId = null;
+    Twin.tween = null;
+    if (Twin.controls) Twin.controls.autoRotate = false;
+};
+
+const twinResize = () => {
+    const stage = Twin.container?.querySelector('.twin-stage');
+    if (!stage || !Twin.renderer) return;
+    const w = stage.clientWidth;
+    const h = stage.clientHeight;
+    if (!w || !h) return;
+    Twin.size = { w, h };
+    Twin.renderer.setSize(w, h, false);
+    Twin.camera.aspect = w / h;
+    twinRefreshViewOffset({ instant: true });
+    twinWake();
+};
+
+// Recentre la projection sur la zone libre (entre panneau, inspecteur et indicateurs)
+const twinViewOffsetPending = () => Math.abs(Twin.viewOffset.x - Twin.viewOffsetTarget.x) > 0.5
+    || Math.abs(Twin.viewOffset.y - Twin.viewOffsetTarget.y) > 0.5;
+
+const twinApplyViewOffset = () => {
+    const { w, h } = Twin.size || {};
+    if (!w || !h || !Twin.camera) return;
+    Twin.camera.setViewOffset(w, h, Twin.viewOffset.x, Twin.viewOffset.y, w, h);
+};
+
+const twinRefreshViewOffset = ({ instant = false } = {}) => {
+    const root = Twin.container;
+    if (!root || !Twin.camera) return;
+    const box = root.getBoundingClientRect();
+    const mobile = !!window.matchMedia?.('(max-width: 768px)').matches;
+    const panel = root.querySelector('.twin-panel');
+    const insp = root.querySelector('.twin-inspector');
+    const kpis = root.querySelector('.twin-kpis');
+    const toolbar = root.querySelector('.twin-toolbar');
+    let left = 0;
+    let right = 0;
+    let top = toolbar ? toolbar.getBoundingClientRect().bottom - box.top : 0;
+    let bottom = kpis ? box.bottom - kpis.getBoundingClientRect().top : 0;
+    if (!mobile && panel && panel.offsetParent !== null) left = panel.getBoundingClientRect().right - box.left;
+    if (insp && !insp.hidden) {
+        if (mobile) bottom = Math.max(bottom, box.bottom - insp.getBoundingClientRect().top);
+        else right = box.right - insp.getBoundingClientRect().left;
+    }
+    top = Math.max(0, top);
+    Twin.viewOffsetTarget = { x: Math.round((right - left) / 2), y: Math.round((bottom - top) / 2) };
+    if (instant) {
+        Twin.viewOffset = { ...Twin.viewOffsetTarget };
+        twinApplyViewOffset();
+    }
+    twinWake();
+};
+
+const twinMount = (root) => {
+    if (!Twin.renderer) twinInitEngine();
+    Twin.container = root;
+    Twin.labelsEl = root.querySelector('.twin-labels');
+    Twin.tooltipEl = root.querySelector('.twin-tooltip');
+    root.querySelector('.twin-stage').appendChild(Twin.renderer.domElement);
+    Twin.resizeObserver = Twin.resizeObserver || new ResizeObserver(() => twinResize());
+    Twin.resizeObserver.observe(root.querySelector('.twin-stage'));
+    Twin.controls.autoRotate = false;
+    twinResize();
+    if (!Twin.viewInitialized) {
+        Twin.viewInitialized = true;
+        twinFocusZone(DB.getFilter('twin_zone') || 'overview', { instant: true });
+    } else {
+        twinFocusZone(Twin.focusZone, { instant: true });
+    }
+    twinWake();
+};
+
+const twinApplyModel = (model) => {
+    Twin.model = model;
+    if (!Twin.renderer || !Twin.container) return;
+    twinBuildDynamic(model);
+    twinBuildLabels(model);
+    if (Twin.selectedId && !model.byId.has(Twin.selectedId)) Twin.selectedId = null;
+    if (Twin.hoveredId && !model.byId.has(Twin.hoveredId)) Twin.hoveredId = null;
+    twinPositionMarkers();
+    twinWake();
+};
+
+// --- Interface (HUD) ---
+const TWIN_ICONS = {
+    list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/></svg>',
+    rotate: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>',
+    full: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+    reset: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/></svg>',
+    prev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>',
+    next: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>',
+    target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/></svg>',
+    close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+};
+
+const twinLiveStatus = () => {
+    if (!navigator.onLine) return { cls: 'offline', label: 'Hors ligne' };
+    if (V11._isReady && Object.keys(V11._listeners || {}).length > 0) return { cls: 'live', label: 'En direct' };
+    return { cls: 'local', label: 'Local' };
+};
+
+const twinShellHtml = () => {
+    const fullscreen = !!document.fullscreenEnabled;
+    const panelClosed = DB.getFilter('twin_panel') === 'closed';
+    const panelExpanded = !twinCompactLayout() && !panelClosed;
+    return `
+        <section class="twin ${panelClosed ? 'is-panel-closed' : ''}" id="twinRoot" aria-label="Jumeau numérique de l'atelier">
+            <div class="twin-stage" id="twinStage">
+                <div class="twin-loading" id="twinLoading"><span class="spinner" aria-hidden="true"></span>Construction de l'atelier 3D…</div>
+            </div>
+            <div class="twin-labels" aria-hidden="true"></div>
+            <div class="twin-tooltip" role="tooltip" hidden></div>
+            <div class="twin-toolbar">
+                <div class="twin-zones" role="toolbar" aria-label="Zones de l'atelier">
+                    <button type="button" class="twin-zone-btn" data-click="twin-zone" data-zone="overview" aria-pressed="false"><kbd>0</kbd>Vue d'ensemble</button>
+                    ${TWIN_ZONES.map(z => `<button type="button" class="twin-zone-btn" data-click="twin-zone" data-zone="${z.id}" aria-pressed="false"><span class="twin-zone-dot twin-zone-dot--${z.id}"></span><kbd>${z.key}</kbd>${escapeHtml(z.label)}</button>`).join('')}
+                </div>
+                <div class="twin-tools">
+                    <span class="twin-live" id="twinLive"></span>
+                    <button type="button" class="twin-icon-btn twin-panel-toggle" data-click="twin-toggle-panel" aria-controls="twinPanel" aria-expanded="${panelExpanded}" title="Liste et alertes">${TWIN_ICONS.list}</button>
+                    <button type="button" class="twin-icon-btn" data-click="twin-zone" data-zone="overview" title="Réinitialiser la vue (R)">${TWIN_ICONS.reset}</button>
+                    <button type="button" class="twin-icon-btn" data-click="twin-autorotate" aria-pressed="false" title="Rotation automatique">${TWIN_ICONS.rotate}</button>
+                    ${fullscreen ? `<button type="button" class="twin-icon-btn" data-click="twin-fullscreen" title="Plein écran (F)">${TWIN_ICONS.full}</button>` : ''}
+                </div>
+            </div>
+            <aside class="twin-panel" id="twinPanel" aria-label="Alertes et objets de l'atelier"></aside>
+            <aside class="twin-inspector" id="twinInspector" aria-label="Détails de l'objet sélectionné" hidden></aside>
+            <div class="twin-kpis" id="twinKpis"></div>
+            <div class="twin-hint" aria-hidden="true">Glisser : pivoter · Clic droit ou 2 doigts : déplacer · Molette : zoom · Clic : inspecter · ←/→ : objet suivant</div>
+        </section>`;
+};
+
+const twinRenderKpis = (model) => {
+    const el = document.getElementById('twinKpis');
+    if (!el) return;
+    const k = model.kpis;
+    const cards = [
+        { zone: 'production', label: 'À produire', value: twinFmtLitres(k.aProduireL), sub: k.aProduireBt ? `${twinFmtInt(k.aProduireBt)} bt · ${k.cuves} cuve${k.cuves > 1 ? 's' : ''}` : 'Stock suffisant', state: k.aProduireL > 0 ? 'warning' : 'ok' },
+        { zone: 'stock', label: 'Stock vendable', value: `${twinFmtInt(k.stockVendable)} bt`, sub: k.lotsExpires ? `${k.lotsExpires} lot${k.lotsExpires > 1 ? 's' : ''} expiré${k.lotsExpires > 1 ? 's' : ''}` : k.lotsWarning ? `${k.lotsWarning} DLC proche${k.lotsWarning > 1 ? 's' : ''}` : 'DLC en ordre', state: k.lotsExpires ? 'danger' : k.lotsWarning ? 'warning' : 'ok' },
+        { zone: 'expedition', label: 'Commandes', value: twinFmtInt(k.commandes), sub: k.enRetard ? `${k.enRetard} en retard` : k.urgentes ? `${k.urgentes} urgente${k.urgentes > 1 ? 's' : ''}` : `${k.pretes} prête${k.pretes > 1 ? 's' : ''} à livrer`, state: k.enRetard ? 'danger' : k.urgentes ? 'warning' : 'ok' },
+        { zone: 'magasin', label: 'Consommables', value: k.consoCritiques ? `${k.consoCritiques} sous seuil` : 'OK', sub: k.consoBas ? `${k.consoBas} bientôt épuisé${k.consoBas > 1 ? 's' : ''}` : `${k.consoTotal} articles suivis`, state: k.consoCritiques ? 'danger' : k.consoBas ? 'warning' : 'ok' },
+        { zone: 'equipe', label: 'Équipe', value: `${k.presents}/${k.effectif}`, sub: 'présents aujourd\'hui', state: 'neutral' }
+    ];
+    el.innerHTML = cards.map(c => `
+        <button type="button" class="twin-kpi twin-kpi--${c.state}" data-click="twin-zone" data-zone="${c.zone}">
+            <span class="twin-kpi-label"><span class="twin-zone-dot twin-zone-dot--${c.zone}"></span>${escapeHtml(c.label)}</span>
+            <span class="twin-kpi-value">${escapeHtml(c.value)}</span>
+            <span class="twin-kpi-sub">${escapeHtml(c.sub)}</span>
+        </button>`).join('');
+};
+
+const twinRenderLive = (model) => {
+    const el = document.getElementById('twinLive');
+    if (!el) return;
+    const status = twinLiveStatus();
+    el.className = `twin-live twin-live--${status.cls}`;
+    el.textContent = `${status.label} · ${model.builtAt.toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+};
+
+const twinRenderPanel = () => {
+    const el = document.getElementById('twinPanel');
+    const model = Twin.model;
+    if (!el || !model) return;
+    const tab = DB.getFilter('twin_tab') || 'alertes';
+    const scroll = el.querySelector('.twin-panel-body')?.scrollTop || 0;
+    const alertsHtml = model.alerts.length === 0
+        ? '<p class="twin-empty">Aucune alerte — l\'atelier est en ordre ✓</p>'
+        : model.alerts.map(a => `
+            <button type="button" class="twin-alert twin-alert--${a.level} ${a.id === Twin.selectedId ? 'is-selected' : ''}" data-click="twin-select" data-id="${escapeHtml(a.id)}" data-fly="1">
+                <span class="twin-alert-dot" aria-hidden="true"></span>
+                <span class="twin-alert-text"><strong>${escapeHtml(a.title)}</strong><small>${escapeHtml(a.text)}</small></span>
+            </button>`).join('');
+    const objectsHtml = TWIN_ZONES.map(zone => {
+        const list = model.items.filter(i => i.zone === zone.id);
+        return `
+            <div class="twin-group">
+                <h4 class="twin-group-title"><span class="twin-zone-dot twin-zone-dot--${zone.id}"></span>${escapeHtml(zone.label)}<small>${list.length}</small></h4>
+                ${list.length === 0 ? '<p class="twin-empty twin-empty--sm">Vide</p>' : list.map(i => `
+                    <button type="button" class="twin-item twin-item--${escapeHtml(i.status || i.state || '')} ${i.id === Twin.selectedId ? 'is-selected' : ''}" data-click="twin-select" data-id="${escapeHtml(i.id)}" data-fly="1" aria-current="${i.id === Twin.selectedId}">
+                        <span class="twin-item-swatch" style="background:${safeColor(i.couleur || '')}"></span>
+                        <span class="twin-item-label">${escapeHtml(i.label)}</span>
+                        <span class="twin-item-meta">${escapeHtml(i.sub)}</span>
+                    </button>`).join('')}
+            </div>`;
+    }).join('');
+    el.innerHTML = `
+        <div class="twin-tabs" role="tablist" aria-label="Contenu du panneau">
+            <button type="button" role="tab" class="twin-tab" aria-selected="${tab === 'alertes'}" data-click="twin-tab" data-tab="alertes">Alertes${model.alerts.length ? ` <span class="twin-count">${model.alerts.length}</span>` : ''}</button>
+            <button type="button" role="tab" class="twin-tab" aria-selected="${tab === 'objets'}" data-click="twin-tab" data-tab="objets">Objets <span class="twin-count twin-count--muted">${model.items.length}</span></button>
+        </div>
+        <div class="twin-panel-body" role="tabpanel">${tab === 'objets' ? objectsHtml : alertsHtml}</div>`;
+    const body = el.querySelector('.twin-panel-body');
+    if (body) body.scrollTop = scroll;
+};
+
+const twinStatusChip = (item) => {
+    const map = {
+        expired: ['Lots expirés', 'danger'], rupture: ['Stock insuffisant', 'warning'], warning: ['DLC proche', 'warning'], ok: ['En ordre', 'success'],
+        late: ['En retard', 'danger'], urgent: ['Urgente', 'warning'], ready: ['Prête à livrer', 'success'], waiting: ['En attente', 'info'],
+        active: ['Production requise', 'warning'], idle: ['Au repos', 'default'],
+        critical: ['Sous le seuil', 'danger'], low: ['Bientôt épuisé', 'warning'], unknown: ['Sans seuil', 'default'], empty: ['Épuisé', 'danger'],
+        present: ['Présent', 'success'], absent: ['Absent', 'default']
+    };
+    const [label, cls] = map[item.status || item.state] || ['—', 'default'];
+    return `<span class="badge badge-${cls}">${escapeHtml(label)}</span>`;
+};
+
+const twinInspectorBody = (item) => {
+    if (item.kind === 'tank') {
+        return `
+            <div class="twin-insp-hero">
+                <div class="twin-gauge" aria-hidden="true"><div class="twin-gauge-fill" style="height:${Math.round(item.fill * 100)}%; background:${safeColor(item.couleur)}"></div></div>
+                <div>
+                    <div class="twin-insp-big">${escapeHtml(twinFmtLitres(item.litres))}</div>
+                    <div class="twin-insp-sub">${item.litres > 0 ? `à produire · ${item.cuves} cuve${item.cuves > 1 ? 's' : ''} de ${CONSTANTS.CUVE_MAX_L} L` : 'Le stock couvre les commandes actives'}</div>
+                </div>
+            </div>
+            ${item.besoins.length ? `<h4 class="twin-insp-h">Bouteilles manquantes</h4>
+                <ul class="twin-rows">${item.besoins.map(b => `<li><span>${escapeHtml(b.format)}</span><strong>${twinFmtInt(b.bouteilles)} bt · ${escapeHtml(twinFmtLitres(b.litres))}</strong></li>`).join('')}</ul>` : ''}
+            ${item.ingredients.length ? `<h4 class="twin-insp-h">Ingrédients estimés</h4>
+                <ul class="twin-rows twin-rows--compact">${item.ingredients.map(i => `<li><span>${escapeHtml(i.nom)}</span><strong>${escapeHtml(String(i.quantite))} ${escapeHtml(displayUnit(i.unite))}</strong></li>`).join('')}</ul>` : ''}
+            ${item.litres > 0 && !item.hasRecette ? '<p class="twin-note">Aucune recette définie pour cet arôme (Paramètres › Recettes).</p>' : ''}
+            <div class="twin-insp-actions">
+                <a href="#production" class="btn btn-primary btn-sm">Planifier la production</a>
+                <button type="button" class="btn btn-secondary btn-sm" data-click="twin-goto-stock" data-arome="${escapeHtml(item.arome)}">Voir le stock</button>
+            </div>`;
+    }
+    if (item.kind === 'stack') {
+        return `
+            <div class="twin-insp-stats">
+                <div><span class="twin-stat-val">${twinFmtInt(item.sellable)}</span><span class="twin-stat-lbl">vendables</span></div>
+                <div><span class="twin-stat-val">${twinFmtInt(item.total)}</span><span class="twin-stat-lbl">en stock</span></div>
+                <div><span class="twin-stat-val">${twinFmtInt(item.demande)}</span><span class="twin-stat-lbl">commandées</span></div>
+            </div>
+            <h4 class="twin-insp-h">Lots (${item.lots.length})</h4>
+            ${item.lots.length === 0 ? `<p class="twin-empty">Aucun lot en stock${item.manque ? ` — il manque ${twinFmtInt(item.manque)} bt pour les commandes` : ''}.</p>` : `
+            <ul class="twin-lots">${item.lots.map(l => `
+                <li class="twin-lot">
+                    <div class="twin-lot-main">
+                        <strong>Lot ${escapeHtml(l.numero)}</strong>
+                        <span>${twinFmtInt(l.quantite)} bt · DLC ${l.dlc ? escapeHtml(formatDate(l.dlc)) : '—'}</span>
+                    </div>
+                    <span class="badge badge-${l.status === 'expired' ? 'danger' : l.status === 'warning' ? 'warning' : 'success'}">${l.status === 'expired' ? 'Expiré' : l.status === 'warning' ? '< 1 mois' : 'OK'}</span>
+                    <div class="twin-lot-actions">
+                        <button type="button" class="btn btn-sm btn-primary" data-click="sell-lot" data-id="${escapeHtml(l.id)}">Vendre</button>
+                        <button type="button" class="btn btn-sm btn-secondary" data-click="edit-lot" data-id="${escapeHtml(l.id)}">Modifier</button>
+                        <button type="button" class="btn btn-sm btn-secondary" data-click="show-lot-trace" data-id="${escapeHtml(l.id)}">Traçabilité</button>
+                    </div>
+                </li>`).join('')}
+            </ul>`}
+            <div class="twin-insp-actions">
+                <button type="button" class="btn btn-secondary btn-sm" data-click="twin-goto-stock" data-arome="${escapeHtml(item.arome)}" data-format="${escapeHtml(item.format)}">Ouvrir dans Stock</button>
+            </div>`;
+    }
+    if (item.kind === 'order') {
+        return `
+            <div class="twin-insp-meta">${escapeHtml(item.client)}</div>
+            <div class="twin-insp-stats">
+                <div><span class="twin-stat-val">${item.dateLivraison ? escapeHtml(formatDate(item.dateLivraison)) : '—'}</span><span class="twin-stat-lbl">${escapeHtml(twinRelativeDay(item.days))}</span></div>
+                <div><span class="twin-stat-val">${twinFmtInt(item.totalBt)}</span><span class="twin-stat-lbl">bouteilles</span></div>
+                ${item.montant !== null ? `<div><span class="twin-stat-val">${escapeHtml(formatChf(item.montant))}</span><span class="twin-stat-lbl">montant</span></div>` : ''}
+            </div>
+            ${renderStepTracker(item.statut)}
+            <h4 class="twin-insp-h">Articles</h4>
+            <ul class="twin-rows">${item.items.map(i => `<li><span><span class="twin-item-swatch" style="background:${safeColor(i.couleur)}"></span>${escapeHtml(i.arome)} · ${escapeHtml(i.format)}</span><strong>${twinFmtInt(i.quantite)}</strong></li>`).join('')}</ul>
+            <div class="twin-insp-actions">
+                ${item.statut === 'en_attente' ? `<button type="button" class="btn btn-primary btn-sm" data-click="marquer-commande-produite" data-id="${escapeHtml(item.commandeId)}">Marquer produite</button>` : ''}
+                ${item.statut === 'produite' ? `<button type="button" class="btn btn-primary btn-sm" data-click="livrer-commande" data-id="${escapeHtml(item.commandeId)}">Livrer</button>` : ''}
+                <button type="button" class="btn btn-secondary btn-sm" data-click="show-commande-details" data-id="${escapeHtml(item.commandeId)}">Détails</button>
+                <button type="button" class="btn btn-secondary btn-sm" data-click="edit-commande" data-id="${escapeHtml(item.commandeId)}">Modifier</button>
+            </div>`;
+    }
+    if (item.kind === 'bin') {
+        const unit = escapeHtml(displayUnit(item.unite));
+        return `
+            <div class="twin-insp-hero">
+                <div class="twin-gauge" aria-hidden="true"><div class="twin-gauge-fill twin-gauge-fill--${escapeHtml(item.state)}" style="height:${Math.round(item.level * 100)}%"></div></div>
+                <div>
+                    <div class="twin-insp-big">${escapeHtml(String(item.quantite))} <small>${unit}</small></div>
+                    <div class="twin-insp-sub">${item.seuil > 0 ? `Seuil d'alerte : ${escapeHtml(String(item.seuil))} ${unit}` : 'Aucun seuil défini'}</div>
+                </div>
+            </div>
+            <div class="twin-stepper" role="group" aria-label="Ajuster la quantité">
+                ${[-10, -1, 1, 10].map(d => `<button type="button" class="btn btn-secondary btn-sm" data-click="update-inventaire-qty" data-id="${escapeHtml(item.itemId)}" data-delta="${d}" aria-label="${d > 0 ? 'Ajouter' : 'Retirer'} ${Math.abs(d)}">${d > 0 ? '+' : '−'}${Math.abs(d)}</button>`).join('')}
+            </div>
+            <div class="twin-insp-actions">
+                <button type="button" class="btn btn-secondary btn-sm" data-click="show-inventaire-modal" data-type="consommable" data-id="${escapeHtml(item.itemId)}">Modifier l'article</button>
+                <a href="#inventaire" class="btn btn-secondary btn-sm">Inventaire complet</a>
+            </div>`;
+    }
+    if (item.kind === 'staff') {
+        return `
+            <div class="twin-insp-hero">
+                <div class="twin-avatar" style="background:${item.present ? safeColor(item.couleur) : 'var(--text-lighter)'}">${escapeHtml(item.initiales)}</div>
+                <div>
+                    <div class="twin-insp-big">${item.present ? 'Présent' : 'Absent'}</div>
+                    <div class="twin-insp-sub">${item.present ? `Arrivé à ${escapeHtml(item.since)} · ` : ''}${escapeHtml(twinFmtDuration(item.minutes))} aujourd'hui</div>
+                </div>
+            </div>
+            <div class="twin-insp-actions">
+                ${item.present
+                    ? `<button type="button" class="btn btn-depart btn-sm" data-click="twin-clock-out" data-id="${escapeHtml(item.employeId)}">Pointer le départ</button>`
+                    : `<button type="button" class="btn btn-arrivee btn-sm" data-click="twin-clock-in" data-id="${escapeHtml(item.employeId)}">Pointer l'arrivée</button>`}
+                <a href="#pointage" class="btn btn-secondary btn-sm">Ouvrir le pointage</a>
+            </div>`;
+    }
+    return '';
+};
+
+const twinRenderInspector = ({ focus = false } = {}) => {
+    const el = document.getElementById('twinInspector');
+    const root = document.getElementById('twinRoot');
+    if (!el || !root) return;
+    const model = Twin.model;
+    const item = Twin.selectedId && model ? model.byId.get(Twin.selectedId) : null;
+    if (!item) {
+        el.hidden = true;
+        el.innerHTML = '';
+        root.classList.remove('has-inspector');
+        twinRefreshViewOffset();
+        return;
+    }
+    const zone = TWIN_ZONES.find(z => z.id === item.zone);
+    const siblings = model.items.filter(i => i.zone === item.zone);
+    const pos = siblings.findIndex(i => i.id === item.id) + 1;
+    const active = el.contains(document.activeElement) ? document.activeElement : null;
+    const focusKey = active ? ['data-click', 'data-id', 'data-delta', 'data-dir']
+        .map(a => active.hasAttribute(a) ? `[${a}="${CSS.escape(active.getAttribute(a))}"]` : '').join('') : '';
+    const sameItem = el.dataset.itemId === item.id;
+    const scroll = sameItem ? el.scrollTop : 0;
+    el.dataset.itemId = item.id;
+    el.hidden = false;
+    root.classList.add('has-inspector');
+    el.innerHTML = `
+        <div class="twin-insp-head">
+            <div class="twin-insp-kicker"><span class="twin-zone-dot twin-zone-dot--${zone.id}"></span>${escapeHtml(zone.label)} · ${pos}/${siblings.length}</div>
+            <div class="twin-insp-nav">
+                <button type="button" class="twin-icon-btn" data-click="twin-cycle" data-dir="-1" aria-label="Objet précédent" title="Précédent (←)">${TWIN_ICONS.prev}</button>
+                <button type="button" class="twin-icon-btn" data-click="twin-cycle" data-dir="1" aria-label="Objet suivant" title="Suivant (→)">${TWIN_ICONS.next}</button>
+                <button type="button" class="twin-icon-btn" data-click="twin-center" aria-label="Centrer la vue sur l'objet" title="Centrer">${TWIN_ICONS.target}</button>
+                <button type="button" class="twin-icon-btn" data-click="twin-close-inspector" aria-label="Fermer le panneau" title="Fermer (Échap)">${TWIN_ICONS.close}</button>
+            </div>
+            <h3 class="twin-insp-title" tabindex="-1">${escapeHtml(item.label)}</h3>
+            ${twinStatusChip(item)}
+        </div>
+        <div class="twin-insp-body">${twinInspectorBody(item)}</div>`;
+    el.scrollTop = scroll;
+    if (focus) el.querySelector('.twin-insp-title')?.focus({ preventScroll: true });
+    else if (focusKey) el.querySelector(focusKey)?.focus({ preventScroll: true });
+    twinRefreshViewOffset();
+};
+
+const twinShowFallback = (root, reason) => {
+    root.classList.add('twin--fallback', 'is-panel-open');
+    root.classList.remove('is-panel-closed');
+    const stage = root.querySelector('.twin-stage');
+    if (stage) {
+        stage.innerHTML = `<div class="twin-fallback">
+            <strong>${reason === 'webgl' ? 'Affichage 3D indisponible sur cet appareil' : "Le moteur 3D n'a pas pu être chargé"}</strong>
+            <span>Toutes les données de l'atelier restent accessibles dans la liste ci-contre.</span>
+        </div>`;
+    }
+    if (!DB.getFilter('twin_tab')) DB.setFilter('twin_tab', 'objets');
+    twinRenderPanel();
+};
+
+const renderJumeau = () => {
+    const model = buildTwinModel();
+    const existing = document.getElementById('twinRoot');
+    if (existing && existing.isConnected) {
+        Twin.model = model;
+        twinRenderKpis(model);
+        twinRenderLive(model);
+        if (Twin.container === existing) twinApplyModel(model);
+        twinRenderPanel();
+        twinRenderInspector();
+        return;
+    }
+    safeRender(twinShellHtml());
+    const root = document.getElementById('twinRoot');
+    Twin.model = model;
+    if (Twin.selectedId && !model.byId.has(Twin.selectedId)) Twin.selectedId = null;
+    twinRenderKpis(model);
+    twinRenderLive(model);
+    twinRenderPanel();
+    twinRenderInspector();
+    if (!twinIsSupported()) {
+        twinShowFallback(root, 'webgl');
+        return;
+    }
+    root.classList.add('is-loading');
+    twinLoadLibrary().then(() => {
+        if (!root.isConnected) return;
+        root.classList.remove('is-loading');
+        document.getElementById('twinLoading')?.remove();
+        twinMount(root);
+        twinApplyModel(Twin.model);
+        if (Twin.selectedId) twinFlyTo(twinViewForObject(Twin.selectedId), 0);
+        twinRenderInspector();
+    }).catch(err => {
+        console.error('Jumeau 3D : chargement impossible', err);
+        if (root.isConnected) twinShowFallback(root, 'load');
+    });
+};
+
+const twinToggleFullscreen = () => {
+    const root = document.getElementById('twinRoot');
+    if (!root || !document.fullscreenEnabled) return;
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else root.requestFullscreen?.().catch(() => showToast('Plein écran indisponible', 'error'));
+};
+
+// --- Pointage rapide réutilisable (page Pointage + jumeau 3D) ---
+const clockInEmployee = (empId) => {
+    if (!empId) {
+        showToast('Sélectionne un employé', 'error');
+        return false;
+    }
+    const today = getLocalDateISOString();
+    const pointages = DB.get('pointages') || [];
+    if (pointages.some(p => p.date === today && p.employeId === empId && !p.heureFin)) {
+        showToast('Pointage déjà en cours pour cet employé', 'error');
+        return false;
+    }
+    const now = new Date();
+    const heureDebut = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    pointages.push({ id: generateId(), employeId: empId, date: today, heureDebut, heureFin: '', pause: 0 });
+    DB.set('pointages', pointages);
+    showToast(`Arrivée pointée à ${heureDebut}`);
+    return true;
+};
+
+const clockOutEmployee = (empId) => {
+    if (!empId) {
+        showToast('Sélectionne un employé', 'error');
+        return false;
+    }
+    const today = getLocalDateISOString();
+    const pointages = DB.get('pointages') || [];
+    const enCours = pointages.find(p => p.date === today && p.employeId === empId && !p.heureFin);
+    if (!enCours) {
+        showToast('Aucun pointage en cours pour cet employé', 'error');
+        return false;
+    }
+    const now = new Date();
+    enCours.heureFin = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    DB.set('pointages', pointages);
+    showToast(`Départ pointé à ${enCours.heureFin}`);
+    return true;
+};
+
+CLICK_HANDLERS['twin-zone'] = (el) => twinFocusZone(el.getAttribute('data-zone'));
+CLICK_HANDLERS['twin-select'] = (el) => {
+    const id = el.getAttribute('data-id');
+    const fromList = el.hasAttribute('data-fly');
+    twinSelect(id, { fly: true, focusInspector: fromList });
+    if (fromList && window.matchMedia?.('(max-width: 768px)').matches) {
+        document.getElementById('twinRoot')?.classList.remove('is-panel-open');
+    }
+};
+CLICK_HANDLERS['twin-close-inspector'] = () => twinSelect(null);
+CLICK_HANDLERS['twin-cycle'] = (el) => twinCycle(Number(el.getAttribute('data-dir')) || 1);
+CLICK_HANDLERS['twin-center'] = () => { if (Twin.selectedId) twinFlyTo(twinViewForObject(Twin.selectedId)); };
+CLICK_HANDLERS['twin-tab'] = (el) => {
+    DB.setFilter('twin_tab', el.getAttribute('data-tab') || 'alertes');
+    twinRenderPanel();
+};
+const twinCompactLayout = () => !!window.matchMedia?.('(max-width: 1024px)').matches;
+CLICK_HANDLERS['twin-toggle-panel'] = (el) => {
+    const root = document.getElementById('twinRoot');
+    if (!root) return;
+    if (twinCompactLayout()) {
+        el.setAttribute('aria-expanded', String(root.classList.toggle('is-panel-open')));
+    } else {
+        const closed = root.classList.toggle('is-panel-closed');
+        DB.setFilter('twin_panel', closed ? 'closed' : '');
+        el.setAttribute('aria-expanded', String(!closed));
+    }
+    twinRefreshViewOffset();
+};
+CLICK_HANDLERS['twin-autorotate'] = (el) => {
+    if (!Twin.controls) return;
+    Twin.controls.autoRotate = !Twin.controls.autoRotate;
+    el.setAttribute('aria-pressed', String(Twin.controls.autoRotate));
+    twinWake();
+};
+CLICK_HANDLERS['twin-fullscreen'] = () => twinToggleFullscreen();
+CLICK_HANDLERS['twin-goto-stock'] = (el) => {
+    DB.setFilter('stockQuery', '');
+    DB.setFilter('stockArome', el.getAttribute('data-arome') || '');
+    DB.setFilter('stockFormat', el.getAttribute('data-format') || '');
+    DB.setFilter('stockStatut', '');
+    window.location.hash = '#stock';
+};
+CLICK_HANDLERS['twin-clock-in'] = (el) => { if (clockInEmployee(el.getAttribute('data-id'))) renderCurrentView(); };
+CLICK_HANDLERS['twin-clock-out'] = (el) => { if (clockOutEmployee(el.getAttribute('data-id'))) renderCurrentView(); };
+
+window.addEventListener('online', () => { if (document.getElementById('twinRoot') && Twin.model) twinRenderLive(Twin.model); });
+window.addEventListener('offline', () => { if (document.getElementById('twinRoot') && Twin.model) twinRenderLive(Twin.model); });
+
+// =============================================================================
+// Palette de commandes (Ctrl/⌘ + K) et raccourcis clavier (v12.0)
+// =============================================================================
+const PALETTE_PAGES = [
+    { page: 'jumeau', label: 'Jumeau 3D — atelier', keys: 'G J' },
+    { page: 'dashboard', label: 'Tableau de bord', keys: 'G D' },
+    { page: 'commandes', label: 'Commandes', keys: 'G C' },
+    { page: 'production', label: 'Planificateur de production', keys: 'G P' },
+    { page: 'stock', label: 'Stock — lots', keys: 'G S' },
+    { page: 'historique', label: 'Historique de production' },
+    { page: 'livraisons', label: 'Livraisons (BL)', keys: 'G L' },
+    { page: 'pointage', label: 'Pointage des heures', keys: 'G H' },
+    { page: 'inventaire', label: 'Inventaire', keys: 'G I' },
+    { page: 'archives', label: 'Archives des commandes', keys: 'G A' },
+    { page: 'parametres', label: 'Paramètres', keys: 'G R' }
+];
+const GOTO_KEYS = { j: 'jumeau', d: 'dashboard', c: 'commandes', p: 'production', s: 'stock', l: 'livraisons', h: 'pointage', i: 'inventaire', a: 'archives', r: 'parametres' };
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+
+const Palette = { items: [], index: 0, lastFocus: null };
+
+const paletteNorm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const paletteScore = (text, query) => {
+    const tokens = paletteNorm(query).split(/\s+/).filter(Boolean);
+    if (!tokens.length) return 1;
+    const t = paletteNorm(text);
+    let score = 0;
+    for (const tok of tokens) {
+        const i = t.indexOf(tok);
+        if (i < 0) return 0;
+        score += i === 0 ? 4 : /[\s·—\-#(]/.test(t[i - 1]) ? 3 : 1;
+    }
+    return score;
+};
+
+const gotoPage = (page) => {
+    if (window.location.hash.slice(1).split('?')[0] === page) renderCurrentView();
+    else window.location.hash = `#${page}`;
+};
+
+const getPaletteEntries = (query) => {
+    const entries = [];
+    PALETTE_PAGES.forEach(p => entries.push({ group: 'Aller à', label: p.label, keys: p.keys, run: () => gotoPage(p.page) }));
+    [
+        { label: 'Nouvelle commande', run: () => showCommandeModal() },
+        { label: 'Nouveau lot de production', run: () => showNouveauLotModal() },
+        { label: 'Ajouter un consommable', run: () => showInventaireModal('consommable') },
+        { label: 'Nouveau client', run: () => showClientModal() },
+        { label: 'Ajouter une tâche au tableau de bord', run: () => { gotoPage('dashboard'); setTimeout(() => document.getElementById('todoInput')?.focus(), 80); } },
+        { label: 'Synchroniser avec le cloud', run: () => window.forceFirebaseSync?.(), hidden: !window.firebaseReady },
+        { label: 'Afficher les raccourcis clavier', keys: '?', run: () => showShortcutsHelp() }
+    ].filter(a => !a.hidden).forEach(a => entries.push({ group: 'Actions', ...a }));
+    TWIN_ZONES.forEach(z => entries.push({
+        group: 'Jumeau 3D', label: `Zone ${z.label}`, keys: z.key,
+        run: () => { DB.setFilter('twin_zone', z.id); Twin.focusZone = z.id; gotoPage('jumeau'); setTimeout(() => twinFocusZone(z.id), 60); }
+    }));
+    (DB.get('employees') || []).filter(e => e.actif).forEach(emp => {
+        const nom = `${emp.prenom || ''} ${emp.nom || ''}`.trim();
+        const today = getLocalDateISOString();
+        const present = (DB.get('pointages') || []).some(p => p.employeId === emp.id && p.date === today && !p.heureFin);
+        entries.push({
+            group: 'Pointage', label: present ? `Pointer le départ — ${nom}` : `Pointer l'arrivée — ${nom}`,
+            run: () => { if (present ? clockOutEmployee(emp.id) : clockInEmployee(emp.id)) renderCurrentView(); }
+        });
+    });
+
+    const q = String(query || '').trim();
+    let ranked = entries
+        .map((e, order) => ({ ...e, score: paletteScore(`${e.label} ${e.group}`, q), order }))
+        .filter(e => e.score > 0);
+    if (q) ranked.sort((a, b) => b.score - a.score || a.order - b.order);
+
+    if (q.length >= 2) {
+        const twinModel = Twin.model || null;
+        if (twinModel) {
+            twinModel.items
+                .map(i => ({ i, score: paletteScore(`${i.label} ${i.sub}`, q) }))
+                .filter(x => x.score > 0)
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 5)
+                .forEach(({ i }) => ranked.push({
+                    group: 'Dans l\'atelier 3D', label: i.label, meta: i.sub,
+                    run: () => { gotoPage('jumeau'); setTimeout(() => twinSelect(i.id, { fly: true, focusInspector: true }), 120); }
+                }));
+        }
+        getGlobalSearchMatches(q).forEach(match => ranked.push({
+            group: 'Résultats', label: match.label, meta: match.meta,
+            run: () => openGlobalSearchResult(match.type, match.id)
+        }));
+    }
+    if (!q) ranked = ranked.filter(e => e.group !== 'Pointage');
+    return ranked.slice(0, 40);
+};
+
+const paletteRender = () => {
+    const list = document.getElementById('cmdkList');
+    const input = document.getElementById('cmdkInput');
+    if (!list || !input) return;
+    Palette.items = getPaletteEntries(input.value);
+    Palette.index = Math.min(Palette.index, Math.max(0, Palette.items.length - 1));
+    if (!Palette.items.length) {
+        list.innerHTML = '<div class="cmdk-empty">Aucun résultat</div>';
+        input.removeAttribute('aria-activedescendant');
+        return;
+    }
+    let lastGroup = null;
+    list.innerHTML = Palette.items.map((item, i) => {
+        const header = item.group !== lastGroup ? `<div class="cmdk-group" role="presentation">${escapeHtml(item.group)}</div>` : '';
+        lastGroup = item.group;
+        return `${header}<div class="cmdk-item ${i === Palette.index ? 'is-active' : ''}" role="option" id="cmdk-opt-${i}" data-index="${i}" aria-selected="${i === Palette.index}">
+            <span class="cmdk-item-label">${escapeHtml(item.label)}</span>
+            ${item.meta ? `<span class="cmdk-item-meta">${escapeHtml(item.meta)}</span>` : ''}
+            ${item.keys ? `<span class="cmdk-item-keys">${item.keys.split(' ').map(k => `<kbd>${escapeHtml(k)}</kbd>`).join('')}</span>` : ''}
+        </div>`;
+    }).join('');
+    input.setAttribute('aria-activedescendant', `cmdk-opt-${Palette.index}`);
+};
+
+const paletteMove = (delta) => {
+    if (!Palette.items.length) return;
+    Palette.index = (Palette.index + delta + Palette.items.length) % Palette.items.length;
+    const list = document.getElementById('cmdkList');
+    list?.querySelectorAll('.cmdk-item').forEach(el => {
+        const active = Number(el.getAttribute('data-index')) === Palette.index;
+        el.classList.toggle('is-active', active);
+        el.setAttribute('aria-selected', String(active));
+        if (active) el.scrollIntoView({ block: 'nearest' });
+    });
+    document.getElementById('cmdkInput')?.setAttribute('aria-activedescendant', `cmdk-opt-${Palette.index}`);
+};
+
+const paletteIsOpen = () => !document.getElementById('cmdkOverlay')?.hidden;
+
+const openPalette = (initial = '') => {
+    const overlay = document.getElementById('cmdkOverlay');
+    const input = document.getElementById('cmdkInput');
+    if (!overlay || !input || !window._appStarted) return;
+    if (document.getElementById('modalOverlay')?.classList.contains('active')) return;
+    closeBottomSheet();
+    Palette.lastFocus = document.activeElement;
+    Palette.index = 0;
+    input.value = initial;
+    overlay.hidden = false;
+    document.body.classList.add('cmdk-open');
+    paletteRender();
+    requestAnimationFrame(() => input.focus());
+};
+
+const closePalette = ({ restoreFocus = true } = {}) => {
+    const overlay = document.getElementById('cmdkOverlay');
+    if (!overlay || overlay.hidden) return;
+    overlay.hidden = true;
+    document.body.classList.remove('cmdk-open');
+    if (restoreFocus && Palette.lastFocus?.focus) Palette.lastFocus.focus();
+    Palette.lastFocus = null;
+};
+
+const paletteRun = (index) => {
+    const item = Palette.items[index];
+    if (!item) return;
+    closePalette({ restoreFocus: false });
+    try {
+        item.run();
+    } catch (e) {
+        console.error('Palette : action en échec', e);
+        showToast('Action impossible', 'error');
+    }
+};
+
+const showShortcutsHelp = () => {
+    const mod = IS_MAC ? '⌘' : 'Ctrl';
+    const rows = [
+        [`${mod} K`, 'Ouvrir la palette de commandes'],
+        ['/', 'Rechercher (commande, client, BL, lot)'],
+        ['?', 'Afficher cette aide'],
+        ['G puis J / D / C / P / S', 'Aller au jumeau, tableau de bord, commandes, production, stock'],
+        ['G puis L / H / I / A / R', 'Livraisons, pointage, inventaire, archives, paramètres'],
+        ['0 – 5', 'Jumeau 3D : vue d\'ensemble ou zone'],
+        ['← / →', 'Jumeau 3D : objet précédent / suivant'],
+        ['R · F · Échap', 'Jumeau 3D : réinitialiser la vue · plein écran · fermer le panneau']
+    ];
+    modal.show('Raccourcis clavier', `
+        <table class="shortcuts-table">
+            <tbody>${rows.map(([k, d]) => `<tr><td>${k.split(' ').map(part => /^(puis|\/|·|–)$/.test(part) ? `<span class="shortcuts-sep">${escapeHtml(part)}</span>` : `<kbd>${escapeHtml(part)}</kbd>`).join(' ')}</td><td>${escapeHtml(d)}</td></tr>`).join('')}</tbody>
+        </table>`,
+        '<button type="button" class="btn btn-primary" data-click="close-modal">Fermer</button>');
+};
+
+const isTypingTarget = (el) => {
+    if (!el) return false;
+    const tag = (el.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+};
+
+let _gotoPending = 0;
+
+const initPaletteAndShortcuts = () => {
+    if (window._paletteReady) return;
+    window._paletteReady = true;
+    const overlay = document.getElementById('cmdkOverlay');
+    const input = document.getElementById('cmdkInput');
+    const list = document.getElementById('cmdkList');
+    document.getElementById('cmdkTrigger')?.addEventListener('click', () => openPalette());
+    document.querySelectorAll('.cmdk-trigger-key').forEach(el => { el.textContent = IS_MAC ? '⌘K' : 'Ctrl K'; });
+    if (overlay && input && list) {
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closePalette(); });
+        input.addEventListener('input', () => { Palette.index = 0; paletteRender(); });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); paletteMove(1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); paletteMove(-1); }
+            else if (e.key === 'Enter') { e.preventDefault(); paletteRun(Palette.index); }
+            else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+            else if (e.key === 'Tab') e.preventDefault();
+        });
+        list.addEventListener('mousemove', (e) => {
+            const opt = e.target.closest('.cmdk-item');
+            if (!opt) return;
+            const idx = Number(opt.getAttribute('data-index'));
+            if (idx !== Palette.index) paletteMove(idx - Palette.index);
+        });
+        list.addEventListener('click', (e) => {
+            const opt = e.target.closest('.cmdk-item');
+            if (opt) paletteRun(Number(opt.getAttribute('data-index')));
+        });
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (!window._appStarted || document.body.classList.contains('body--locked') || !e.key) return;
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+            e.preventDefault();
+            if (paletteIsOpen()) closePalette();
+            else openPalette();
+            return;
+        }
+        if (paletteIsOpen() || e.ctrlKey || e.metaKey || e.altKey) return;
+        if (document.getElementById('modalOverlay')?.classList.contains('active')) return;
+        if (isTypingTarget(e.target)) return;
+
+        const key = e.key;
+        const page = (window.location.hash.slice(1) || 'jumeau').split('?')[0];
+        if (_gotoPending && Date.now() - _gotoPending < 1200) {
+            _gotoPending = 0;
+            const target = GOTO_KEYS[key.toLowerCase()];
+            if (target) {
+                e.preventDefault();
+                gotoPage(target);
+            }
+            return;
+        }
+        if (key === 'g' || key === 'G') { _gotoPending = Date.now(); return; }
+        if (key === '?') { e.preventDefault(); showShortcutsHelp(); return; }
+        if (key === '/') {
+            const search = document.getElementById('globalSearchInput');
+            if (search && search.offsetParent !== null) { e.preventDefault(); search.focus(); }
+            else { e.preventDefault(); openPalette(); }
+            return;
+        }
+        if (page !== 'jumeau' || !document.getElementById('twinRoot')) return;
+        if (key === 'Escape') {
+            if (Twin.selectedId) { e.preventDefault(); twinSelect(null); }
+            return;
+        }
+        if (/^[0-5]$/.test(key)) {
+            e.preventDefault();
+            twinFocusZone(key === '0' ? 'overview' : TWIN_ZONES.find(z => z.key === key)?.id);
+        } else if (key === 'ArrowRight' || key === 'ArrowLeft') {
+            e.preventDefault();
+            twinCycle(key === 'ArrowRight' ? 1 : -1);
+        } else if (key === 'r' || key === 'R') {
+            twinFocusZone('overview');
+        } else if (key === 'f' || key === 'F') {
+            twinToggleFullscreen();
+        }
+    });
+};
+
 
 // Toggles de filtres Stock
 const toggleStockAromeFilter = (aromeNom) => {
@@ -4026,7 +6094,7 @@ const deleteLot = (id) => {
         const lots = DB.get('lots').filter(l => l.id !== id);
         DB.set('lots', lots);
         showToast('Lot supprimé');
-        renderStock();
+        renderCurrentView();
     });
 };
 
@@ -4100,7 +6168,7 @@ const vendreLot = (lotId) => {
     DB.set('history', history);
     modal.hide();
     showToast(`${quantite} bouteille(s) vendu(e)s`);
-    renderStock();
+    renderCurrentView();
 };
 
 // --- Traçabilité des bouteilles : parcours complet d'un lot ---
@@ -4330,7 +6398,7 @@ const saveEditLot = (event, lotId) => {
             DB.set('lots', lots);
             modal.hide();
             showToast('Lot modifié');
-            renderStock();
+            renderCurrentView();
         }
     } catch (e) {
         console.error('Error editing lot:', e);
@@ -4347,53 +6415,11 @@ const pointageSelectEmployee = (empId) => {
 };
 
 const pointageQuickArrivee = () => {
-    if (!pointageSelectedEmployeId) {
-        showToast('Sélectionne un employé', 'error');
-        return;
-    }
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    const heureDebut = `${hh}:${mm}`;
-    const today = getLocalDateISOString();
-    const pointages = DB.get('pointages') || [];
-    const enCours = pointages.find(p => p.date === today && p.employeId === pointageSelectedEmployeId && !p.heureFin);
-    if (enCours) {
-        showToast('Pointage déjà en cours pour cet employé', 'error');
-        return;
-    }
-    pointages.push({
-        id: generateId(),
-        employeId: pointageSelectedEmployeId,
-        date: today,
-        heureDebut,
-        heureFin: '',
-        pause: 0
-    });
-    DB.set('pointages', pointages);
-    showToast(`Arrivée pointée à ${heureDebut}`);
-    renderPointage();
+    if (clockInEmployee(pointageSelectedEmployeId)) renderPointage();
 };
 
 const pointageQuickDepart = () => {
-    if (!pointageSelectedEmployeId) {
-        showToast('Sélectionne un employé', 'error');
-        return;
-    }
-    const today = getLocalDateISOString();
-    const pointages = DB.get('pointages') || [];
-    const enCours = pointages.find(p => p.date === today && p.employeId === pointageSelectedEmployeId && !p.heureFin);
-    if (!enCours) {
-        showToast('Aucun pointage en cours pour cet employé', 'error');
-        return;
-    }
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    enCours.heureFin = `${hh}:${mm}`;
-    DB.set('pointages', pointages);
-    showToast(`Départ pointé à ${enCours.heureFin}`);
-    renderPointage();
+    if (clockOutEmployee(pointageSelectedEmployeId)) renderPointage();
 };
 
 const showPointageStatsModal = () => {
@@ -5384,7 +7410,7 @@ const saveCommande = (event, id) => {
 
         modal.hide();
         showToast('Commande enregistrée');
-        renderCommandes();
+        renderCurrentView();
     } catch (e) {
         console.error('Error saving commande:', e);
         showToast('Erreur lors de l\'enregistrement de la commande', 'error');
@@ -5413,7 +7439,7 @@ const updateCommandeStatut = (id, statut, { fromLivraison = false } = {}) => {
         if (statut === 'annulee') {
             deleteBLForCommande(id);
         }
-        renderCommandes();
+        renderCurrentView();
         return true;
     }
     return false;
@@ -8950,7 +10976,7 @@ const saveInventaireItem = (event, id) => {
 
         modal.hide();
         showToast('Item enregistré');
-        renderInventaire();
+        renderCurrentView();
     } catch (e) {
         console.error('Error saving inventaire item:', e);
         showToast('Erreur lors de l\'enregistrement de l\'item', 'error');
@@ -8966,7 +10992,7 @@ const updateInventaireQty = (id, delta) => {
     if (item) {
         item.quantite = Math.max(0, (item.quantite || 0) + delta);
         DB.set('inventaire', items);
-        renderInventaire();
+        renderCurrentView();
     }
 };
 
@@ -8993,7 +11019,7 @@ const deleteInventaireItem = (id) => {
         const items = DB.get('inventaire').filter(i => i.id !== id);
         DB.set('inventaire', items);
         showToast('Item supprimé');
-        renderInventaire();
+        renderCurrentView();
     });
 };
 
@@ -9836,7 +11862,7 @@ const saveClient = (event, id) => {
 
         modal.hide();
         showToast('Client enregistré');
-        renderParametres();
+        renderCurrentView();
     } catch (e) {
         console.error('Error saving client:', e);
         showToast('Erreur lors de l\'enregistrement du client', 'error');
@@ -10396,6 +12422,7 @@ window.resetAppSession = resetAppSession;
 const bootLocal = () => {
     DB.init();
     initGlobalSearch();
+    initPaletteAndShortcuts();
     // Migration silencieuse : normalise les valeurs legacy de client.tarifs
     try { migrateClientTarifs(); } catch (e) { console.warn('[migration] initiale', e); }
     // Renumérote les anciens lots « _ab12… » en numéros séquentiels (idempotent)

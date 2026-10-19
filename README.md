@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.11**
+**v12.0**
 
 ## Adresse
 
@@ -117,6 +117,20 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.0
+
+- **🏭 Jumeau numérique 3D (`#jumeau`, nouvelle page d'accueil)** — L'atelier est reconstruit en 3D à partir des données synchronisées, et se met à jour en temps réel (flash sur les objets modifiés depuis un autre appareil) :
+  - **Production** : une cuve par arôme, remplie des litres restant à produire (commandes actives − stock vendable).
+  - **Entrepôt** : une palette par arôme × format, hauteur selon le stock ; anneau rouge pulsé si lots expirés, orange si stock insuffisant, palette fantôme en cas de rupture.
+  - **Expédition** : une palette par commande active (carton = en attente, film vert = produite), gyrophare sur les commandes urgentes (≤ 3 j) ou en retard.
+  - **Consommables** : bacs sur étagères, niveau et couleur selon le seuil d'alerte.
+  - **Équipe** : personnages présents (pointage ouvert) ou absents.
+- **Interactions** : survol = info-bulle, clic = inspecteur avec actions directes (vendre/modifier un lot, marquer produite, livrer, ±1/±10 sur un consommable, pointer arrivée/départ), double-clic = zoom sur l'objet, puces de zones et indicateurs cliquables, panneau « Alertes / Objets » navigable au clavier, rotation automatique et plein écran (affichage mural).
+- **⚡ Palette de commandes (Ctrl/⌘ + K)** — navigation, actions (nouvelle commande, nouveau lot, pointage…), recherche dans l'atelier 3D et dans les données.
+- **⌨️ Raccourcis clavier** — `?` aide, `/` recherche, `G` puis une lettre pour changer de page, `0–5` / `←` `→` / `R` / `F` / `Échap` dans le jumeau.
+- **Transitions de page** discrètes (désactivées si « réduire les animations » est actif).
+- **Three.js 0.185.1** embarqué dans `vendor/three/` (chargé à la demande, fonctionne hors ligne dans l'APK) ; repli automatique sur la liste des objets si WebGL est indisponible.
 
 ### Nouveautés v11.8
 

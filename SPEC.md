@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.11
+**Version:** v12.0
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -295,14 +295,29 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 ## 3. Pages/Vues
 
 ### Navigation principale
-- Dashboard (accueil)
+- Jumeau 3D (accueil, `#jumeau`)
+- Tableau de bord (`#dashboard`)
 - Stock
 - Pointage (heures)
 - Commandes
 - Production (planificateur)
 - Paramètres (employés, aromes, recettes, clients)
 
-### 3.1 Dashboard
+### 3.0 Jumeau numérique 3D (v12.0)
+Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaque rendu de `renderJumeau()`. Les re-rendus (snapshots V11, actions) mettent à jour la scène sur place sans recréer le contexte WebGL.
+- **Zones** (`TWIN_ZONES`) : Production (cuves), Entrepôt (palettes arôme × format), Expédition (commandes `en_attente`/`produite`), Consommables (bacs d'inventaire `consommable`), Équipe (employés actifs, présents = pointage du jour sans `heureFin`).
+- **Cuve** : litres à produire = Σ max(0, demande des commandes actives − stock vendable) × contenance ; remplissage = litres / `CUVE_MAX_L`.
+- **Statuts** : lot expiré → anneau rouge pulsé ; stock < demande → anneau orange ; commande en retard (date passée) ou urgente (`en_attente`, ≤ 3 j) → gyrophare ; consommable ≤ seuil → critique, ≤ 2 × seuil → bas.
+- **Inspecteur** : actions réutilisant les gestionnaires existants (`sell-lot`, `edit-lot`, `show-lot-trace`, `marquer-commande-produite`, `livrer-commande`, `update-inventaire-qty`, `show-inventaire-modal`) et `clockInEmployee` / `clockOutEmployee`.
+- **Préférences locales** (non synchronisées) : `thecol_filter_twin_zone`, `thecol_filter_twin_tab`, `thecol_filter_twin_panel`.
+- **Moteur** : Three.js 0.185.1 embarqué (`vendor/three/`), importé dynamiquement ; rendu à la demande (boucle arrêtée quand rien ne bouge, animations d'ambiance limitées à ~30 i/s, respect de `prefers-reduced-motion`). Sans WebGL : repli sur la liste des objets et l'inspecteur.
+
+### 3.0bis Palette de commandes et raccourcis (v12.0)
+- `Ctrl/⌘ + K` : palette (pages, actions, pointage par employé, zones du jumeau, objets de l'atelier, résultats de la recherche globale).
+- `?` aide · `/` recherche · `G` puis `J/D/C/P/S/L/H/I/A/R` navigation · jumeau : `0–5` zones, `←/→` objet suivant, `R` vue d'ensemble, `F` plein écran, `Échap` fermer l'inspecteur.
+- Les actions d'enregistrement (lots, commandes, inventaire, clients) re-rendent la vue courante (`renderCurrentView()`), ce qui permet de les déclencher depuis n'importe quelle page.
+
+### 3.1 Tableau de bord (Dashboard)
 - Résumé du stock (total bouteilles, expiré, < 1 mois)
 - Commandes en attente
 - Heures aujourd'hui
@@ -423,6 +438,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - Pas de framework (simplicité)
 - localStorage pour persistance locale
 - Firebase Firestore v12.16.0 pour synchronisation cloud optionnelle
+- Three.js 0.185.1 (licence MIT) embarqué dans `vendor/three/` pour le jumeau 3D — `OrbitControls.js` est importé depuis `./three.module.min.js` (import réécrit, pas d'importmap)
 - **Firebase Auth — Authentification par mot de passe partagé (Email/Password) :**
   - L'application utilise un compte technique fixe `gestion@thecol.ch` (Email/Password).
   - L'adresse email n'est jamais affichée dans l'interface utilisateur — elle est définie comme constante `FIREBASE_AUTH_EMAIL` dans le module Firebase d'`index.html`.
