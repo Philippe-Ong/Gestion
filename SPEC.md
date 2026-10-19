@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.0
+**Version:** v12.1
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -306,7 +306,8 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 ### 3.0 Jumeau numérique 3D (v12.0)
 Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaque rendu de `renderJumeau()`. Les re-rendus (snapshots V11, actions) mettent à jour la scène sur place sans recréer le contexte WebGL.
 - **Zones** (`TWIN_ZONES`) : Production (cuves), Entrepôt (palettes arôme × format), Expédition (commandes `en_attente`/`produite`), Consommables (bacs d'inventaire `consommable`), Équipe (employés actifs, présents = pointage du jour sans `heureFin`).
-- **Cuve** : litres à produire = Σ max(0, demande des commandes actives − stock vendable) × contenance ; remplissage = litres / `CUVE_MAX_L`.
+- **Équipement réel (v12.1)** : `CONSTANTS.ATELIER_CUVES` cuves de `CUVE_MAX_L` (4 × 25 L) et une casserole par plaque à induction (`CONSTANTS.ATELIER_CASSEROLES_L` = [9, 4] → plaque 1 : 9 L, plaque 2 : 4 L). Les litres à produire par arôme (Σ max(0, demande des commandes actives − stock vendable) × contenance) sont découpés par `getProductionRecipients()` (même logique que le planificateur), puis affectés aux postes libres par ordre d'urgence des commandes ; le surplus forme la « prochaine fournée ». Items : `equip:cuve-N` / `equip:casserole-N` (statut `planned` ou `idle`), détail dans `model.production`.
+- **Modèles 3D (v12.1)** : cuves inox (fond conique, pieds, vanne, tube de niveau, plaque, couvercle ouvert si planifiée), plan de travail avec plaques à induction (zone de chauffe allumée si planifiée), casseroles, évier, balance, bocaux ; poste d'embouteillage ; palettes Europe, casiers par arôme avec bouteilles visibles ; cartons étiquetés et filmés ; rayonnage avec bacs (sacs, bidons, boîtes selon l'unité) ; personnages en tenue (tablier, charlotte) placés aux postes de travail ; vestiaire, quais, camion. Les pièces répétées sont instanciées (`InstancedMesh`) et la sélection passe par des volumes invisibles hors scène ; reflets inox via `RoomEnvironment`.
 - **Statuts** : lot expiré → anneau rouge pulsé ; stock < demande → anneau orange ; commande en retard (date passée) ou urgente (`en_attente`, ≤ 3 j) → gyrophare ; consommable ≤ seuil → critique, ≤ 2 × seuil → bas.
 - **Inspecteur** : actions réutilisant les gestionnaires existants (`sell-lot`, `edit-lot`, `show-lot-trace`, `marquer-commande-produite`, `livrer-commande`, `update-inventaire-qty`, `show-inventaire-modal`) et `clockInEmployee` / `clockOutEmployee`.
 - **Préférences locales** (non synchronisées) : `thecol_filter_twin_zone`, `thecol_filter_twin_tab`, `thecol_filter_twin_panel`.

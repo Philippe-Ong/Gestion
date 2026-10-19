@@ -6,6 +6,8 @@ const CONSTANTS = {
     CAPSULE_LOSS: 1.075,       // +7.5% loss buffer for capsules
     BOUCHON_MARGIN: 1.05,      // +5% margin on caps shown in the production planner
     CUVE_MAX_L: 25,            // max litres per production cuve
+    ATELIER_CUVES: 4,          // cuves de 25 L de l'atelier (jumeau 3D)
+    ATELIER_CASSEROLES_L: [9, 4], // casseroles des plaques à induction 1 et 2 (jumeau 3D)
     STOCK_WARN_DAYS: 30        // DLC warning threshold in days
 };
 
@@ -3458,29 +3460,74 @@ const buildTwinModel = () => {
         need.besoins.push({ format: s.format, bouteilles: s.manque, litres });
         needs.set(ak, need);
     });
-    const tankKeys = [...new Set([
-        ...aromes.filter(a => a.actif !== false).map(a => normalizeName(a.nom)),
-        ...needs.keys()
-    ])].filter(Boolean).slice(0, 12);
-    const tanks = tankKeys.map(ak => {
+    // Plan de production réparti sur l'équipement réel (cuves 25 L, casseroles 9 L / 4 L),
+    // par ordre d'urgence des commandes, avec la logique du planificateur (getProductionRecipients)
+    const urgency = new Map();
+    activeCommandes.forEach(cmd => {
+        const days = twinDaysUntil(cmd.dateLivraison);
+        getItems(cmd).forEach(item => {
+            const arome = aromes.find(a => a.id === item.aromeId);
+            if (!arome) return;
+            const k = normalizeName(arome.nom);
+            const d = days === null ? 9999 : days;
+            if (!urgency.has(k) || d < urgency.get(k)) urgency.set(k, d);
+        });
+    });
+    const productionAromes = [...needs.entries()].map(([ak, need]) => {
         const arome = aromeNames.get(ak) || ak;
-        const need = needs.get(ak) || { litres: 0, besoins: [] };
+        const couleur = aromeColor(arome);
         const litres = Math.round(need.litres * 10) / 10;
         const recette = recettes.find(r => r.aromeId === findArome(arome)?.id);
         return {
-            id: `tank:${ak}`, zone: 'production', kind: 'tank',
-            arome, couleur: aromeColor(arome), litres,
-            cuves: litres > 0 ? Math.ceil(litres / CONSTANTS.CUVE_MAX_L) : 0,
-            fill: twinClamp(litres / CONSTANTS.CUVE_MAX_L, 0, 1),
-            besoins: need.besoins,
-            bouteilles: need.besoins.reduce((s, b) => s + b.bouteilles, 0),
-            ingredients: recette ? calculerIngredientsRecipient(recette, litres) : [],
-            hasRecette: !!recette,
-            status: litres > 0 ? 'active' : 'idle',
-            label: arome,
-            sub: litres > 0 ? `${twinFmtLitres(litres)} à produire` : 'Aucune production requise'
+            arome, couleur, litres, besoins: need.besoins, hasRecette: !!recette,
+            bouteilles: need.besoins.reduce((sum, b) => sum + b.bouteilles, 0),
+            urgency: urgency.has(ak) ? urgency.get(ak) : 9999,
+            recipients: getProductionRecipients(litres).map(r => ({
+                ...r, arome, couleur, hasRecette: !!recette, poste: null,
+                ingredients: recette ? calculerIngredientsRecipient(recette, r.litres) : []
+            }))
         };
+    }).filter(p => p.recipients.length).sort((a, b) => a.urgency - b.urgency || b.litres - a.litres);
+
+    const cuveSlots = Array.from({ length: CONSTANTS.ATELIER_CUVES }, () => null);
+    const potSlots = CONSTANTS.ATELIER_CASSEROLES_L.map(capacite => ({ capacite, recipient: null }));
+    const enAttente = [];
+    productionAromes.forEach(p => p.recipients.forEach(r => {
+        if (r.type === 'cuve') {
+            const i = cuveSlots.indexOf(null);
+            if (i >= 0) {
+                cuveSlots[i] = r;
+                r.poste = `Cuve ${i + 1}`;
+            } else enAttente.push(r);
+            return;
+        }
+        const pot = potSlots.find(p2 => !p2.recipient && p2.capacite === r.capacite)
+            || potSlots.find(p2 => !p2.recipient && p2.capacite >= r.litres);
+        if (pot) {
+            pot.recipient = r;
+            r.poste = `Casserole ${pot.capacite} L`;
+        } else enAttente.push(r);
+    }));
+    const equipementItem = (kind, numero, capacite, r) => ({
+        id: `equip:${kind}-${numero}`, zone: 'production', kind, numero, capacite,
+        arome: r?.arome || '', couleur: r?.couleur || '', litres: r?.litres || 0,
+        fill: r ? twinClamp(r.litres / capacite, 0, 1) : 0,
+        ingredients: r?.ingredients || [], hasRecette: r ? r.hasRecette : true,
+        status: r ? 'planned' : 'idle',
+        label: kind === 'cuve' ? `Cuve ${numero} · ${capacite} L` : `Casserole ${capacite} L · plaque ${numero}`,
+        sub: r ? `${r.arome} · ${twinFmtLitres(r.litres)}` : (kind === 'cuve' ? 'Libre' : 'Plaque éteinte')
     });
+    const equipement = [
+        ...cuveSlots.map((r, i) => equipementItem('cuve', i + 1, CONSTANTS.CUVE_MAX_L, r)),
+        ...potSlots.map((p, i) => equipementItem('casserole', i + 1, p.capacite, p.recipient))
+    ];
+    const production = {
+        aromes: productionAromes,
+        enAttente,
+        litres: Math.round(productionAromes.reduce((sum, p) => sum + p.litres, 0) * 10) / 10,
+        bouteilles: productionAromes.reduce((sum, p) => sum + p.bouteilles, 0),
+        postesOccupes: equipement.filter(e => e.status === 'planned').length
+    };
 
     const orders = activeCommandes
         .filter(c => c.statut === 'en_attente' || c.statut === 'produite')
@@ -3557,9 +3604,14 @@ const buildTwinModel = () => {
         if (s.expired) alerts.push({ level: 'danger', id: s.id, title: `${s.label} : ${s.expired} lot${s.expired > 1 ? 's' : ''} expiré${s.expired > 1 ? 's' : ''}`, text: 'À retirer ou corriger dans le stock' });
         else if (s.warning) alerts.push({ level: 'info', id: s.id, title: `${s.label} : DLC < ${CONSTANTS.STOCK_WARN_DAYS} j`, text: `${s.warning} lot${s.warning > 1 ? 's' : ''} à écouler en priorité` });
     });
-    tanks.forEach(t => {
-        if (t.litres > 0) alerts.push({ level: 'warning', id: t.id, title: `${t.arome} : ${twinFmtLitres(t.litres)} à produire`, text: `${twinFmtInt(t.bouteilles)} bt manquantes · ${t.cuves} cuve${t.cuves > 1 ? 's' : ''}` });
+    productionAromes.forEach(p => {
+        const poste = equipement.find(e => e.arome === p.arome) || equipement[0];
+        if (!poste) return;
+        alerts.push({ level: 'warning', id: poste.id, title: `${p.arome} : ${twinFmtLitres(p.litres)} à produire`, text: `${twinFmtInt(p.bouteilles)} bt manquantes · ${p.recipients.map(r => r.poste || 'en attente').join(', ')}` });
     });
+    if (enAttente.length && equipement[0]) {
+        alerts.push({ level: 'info', id: equipement[0].id, title: `${enAttente.length} contenant${enAttente.length > 1 ? 's' : ''} en attente`, text: "Capacité de l'atelier atteinte : prévoir une 2e fournée" });
+    }
     bins.forEach(b => {
         if (b.state === 'critical') alerts.push({ level: 'danger', id: b.id, title: `${b.nom} sous le seuil`, text: `${b.quantite} ${displayUnit(b.unite)} (seuil ${b.seuil})` });
         else if (b.state === 'low') alerts.push({ level: 'warning', id: b.id, title: `${b.nom} bientôt épuisé`, text: `${b.quantite} ${displayUnit(b.unite)} (seuil ${b.seuil})` });
@@ -3568,9 +3620,11 @@ const buildTwinModel = () => {
     alerts.sort((a, b) => levelOrder[a.level] - levelOrder[b.level]);
 
     const kpis = {
-        aProduireL: Math.round(tanks.reduce((s, t) => s + t.litres, 0) * 10) / 10,
-        aProduireBt: tanks.reduce((s, t) => s + t.bouteilles, 0),
-        cuves: tanks.reduce((s, t) => s + t.cuves, 0),
+        aProduireL: production.litres,
+        aProduireBt: production.bouteilles,
+        postesOccupes: production.postesOccupes,
+        postesTotal: equipement.length,
+        enAttente: enAttente.length,
         stockVendable: stacks.reduce((s, x) => s + x.sellable, 0),
         lotsExpires: stacks.reduce((s, x) => s + x.expired, 0),
         lotsWarning: stacks.reduce((s, x) => s + x.warning, 0),
@@ -3585,9 +3639,9 @@ const buildTwinModel = () => {
         effectif: staff.length
     };
 
-    const items = [...tanks, ...stacks, ...orders, ...bins, ...staff];
+    const items = [...equipement, ...stacks, ...orders, ...bins, ...staff];
     return {
-        builtAt: now, tanks, stacks, orders, bins, staff, alerts, kpis, items,
+        builtAt: now, equipement, production, stacks, orders, bins, staff, alerts, kpis, items,
         byId: new Map(items.map(i => [i.id, i])),
         grid: { rows: rowKeys.map(k => aromeNames.get(k)), cols: colKeys.map(k => formatNames.get(k)) }
     };
@@ -3660,9 +3714,10 @@ const twinLoadLibrary = () => {
     if (!Twin.loading) {
         Twin.loading = Promise.all([
             import('./vendor/three/three.module.min.js'),
-            import('./vendor/three/OrbitControls.js')
-        ]).then(([THREE, controls]) => {
-            Twin.lib = { THREE, OrbitControls: controls.OrbitControls };
+            import('./vendor/three/OrbitControls.js'),
+            import('./vendor/three/RoomEnvironment.js')
+        ]).then(([THREE, controls, room]) => {
+            Twin.lib = { THREE, OrbitControls: controls.OrbitControls, RoomEnvironment: room.RoomEnvironment };
             return Twin.lib;
         }).catch(err => {
             Twin.loading = null;
@@ -3683,23 +3738,46 @@ const twinStd = (key, color, opts = {}) => twinMat(`std:${key}:${color}`, () =>
     new Twin.lib.THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.05, ...opts }));
 const twinBasic = (key, color, opts = {}) => twinMat(`basic:${key}:${color}`, () =>
     new Twin.lib.THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, ...opts }));
+const twinLathe = (points, segments) => new Twin.lib.THREE.LatheGeometry(
+    points.map(([x, y]) => new Twin.lib.THREE.Vector2(x, y)), segments);
+
+// Implantation réelle de l'atelier de production (coordonnées monde)
+const TWIN_LAB = {
+    tableX: -15.9, tableZ: -12.0, tableW: 7, tableD: 0.9, tableH: 0.92,
+    plate: (i) => [-18.5 + i * 1.4, -12.05],
+    cuve: (i) => [-18.2 + i * 2.3, -8.4],
+    bottling: [-8.4, -11.7]
+};
+
+// Postes de travail occupés par les employés présents (ordre de remplissage)
+const TWIN_STATIONS = [
+    { x: -17.8, z: -10.85, ry: Math.PI },
+    { x: -15.05, z: -7.0, ry: Math.PI },
+    { x: -8.4, z: -10.65, ry: Math.PI },
+    { x: 7.0, z: -2.4, ry: Math.PI },
+    { x: 12.0, z: 2.0, ry: 0 },
+    { x: -11.4, z: 2.0, ry: 0 }
+];
 
 const twinGeometries = () => {
     const { THREE } = Twin.lib;
     return {
         box: twinGeo('box', () => new THREE.BoxGeometry(1, 1, 1)),
-        cyl: twinGeo('cyl', () => new THREE.CylinderGeometry(1, 1, 1, 36)),
-        cylOpen: twinGeo('cylOpen', () => new THREE.CylinderGeometry(1, 1, 1, 40, 1, true)),
+        cyl: twinGeo('cyl', () => new THREE.CylinderGeometry(1, 1, 1, 32)),
+        cylLow: twinGeo('cylLow', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
         sphere: twinGeo('sphere', () => new THREE.SphereGeometry(1, 24, 16)),
+        dome: twinGeo('dome', () => new THREE.SphereGeometry(1, 20, 8, 0, Math.PI * 2, 0, Math.PI / 2)),
+        cone: twinGeo('cone', () => new THREE.ConeGeometry(1, 1, 24)),
         ring: twinGeo('ring', () => new THREE.RingGeometry(0.86, 1, 56)),
         plane: twinGeo('plane', () => new THREE.PlaneGeometry(1, 1)),
-        capsule: twinGeo('capsule', () => new THREE.CapsuleGeometry(0.26, 0.62, 6, 16)),
-        cone: twinGeo('cone', () => new THREE.ConeGeometry(1, 1, 24)),
-        band: twinGeo('band', () => new THREE.TorusGeometry(1.07, 0.07, 10, 56)),
+        capsule: twinGeo('capsule', () => new THREE.CapsuleGeometry(0.5, 1, 6, 14)),
+        torus: twinGeo('torus', () => new THREE.TorusGeometry(1, 0.06, 8, 48)),
         edges: twinGeo('edges', () => new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1))),
-        bottle: twinGeo('bottle', () => new THREE.LatheGeometry(
-            [[0, 0], [0.3, 0], [0.33, 0.04], [0.33, 0.58], [0.29, 0.68], [0.15, 0.8], [0.11, 0.86], [0.11, 1], [0, 1]]
-                .map(([x, y]) => new THREE.Vector2(x, y)), 20))
+        bottle: twinGeo('bottle', () => twinLathe([[0, 0], [0.3, 0], [0.33, 0.04], [0.33, 0.58], [0.29, 0.68], [0.15, 0.8], [0.11, 0.86], [0.11, 1], [0, 1]], 14)),
+        bottleLiquid: twinGeo('bottleLiquid', () => twinLathe([[0, 0.02], [0.29, 0.02], [0.3, 0.05], [0.3, 0.58], [0.26, 0.66], [0, 0.66]], 12)),
+        tankShell: twinGeo('tankShell', () => twinLathe([[0.1, 0], [0.13, 0.02], [1, 0.26], [1, 1], [0.985, 1.03], [0.95, 1.045]], 44)),
+        pot: twinGeo('pot', () => twinLathe([[0, 0], [0.96, 0], [1, 0.04], [1, 0.97], [1.05, 1], [1.05, 1.03], [0.97, 1.03], [0.97, 0.06], [0, 0.06]], 36)),
+        sack: twinGeo('sack', () => twinLathe([[0, 0], [0.9, 0.02], [1, 0.2], [0.96, 0.72], [0.72, 0.94], [0.3, 1], [0, 1]], 16))
     };
 };
 
@@ -3710,92 +3788,198 @@ const twinMesh = (geometry, material, { cast = true, receive = false } = {}) => 
     return mesh;
 };
 
-const twinPlaceBox = (group, material, sx, sy, sz, x, y, z, opts) => {
-    const mesh = twinMesh(twinGeometries().box, material, opts);
-    mesh.scale.set(sx, sy, sz);
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-    return mesh;
-};
-
-const twinPlaceCyl = (group, material, r, h, x, y, z, opts) => {
-    const mesh = twinMesh(twinGeometries().cyl, material, opts);
-    mesh.scale.set(r, h, r);
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-    return mesh;
-};
-
-const twinFloorDecal = (group, material, w, d, x, z, y = 0.006) => {
-    const mesh = twinMesh(twinGeometries().plane, material, { cast: false, receive: false });
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.scale.set(w, d, 1);
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-    return mesh;
-};
-
-const twinRing = (group, material, radius, y = 0.012) => {
-    const mesh = twinMesh(twinGeometries().ring, material, { cast: false });
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.scale.set(radius, radius, 1);
-    mesh.position.y = y;
-    group.add(mesh);
-    return mesh;
-};
-
 const twinMaterials = () => {
     const p = Twin.palette;
+    const { THREE } = Twin.lib;
     return {
-        floor: twinStd('floor', p.floor, { roughness: 0.95 }),
+        floor: twinStd('floor', p.floor, { roughness: 0.9 }),
         ground: twinStd('ground', p.ground, { roughness: 1 }),
-        wall: twinStd('wall', '#FBFAF6', { roughness: 0.9 }),
-        steel: twinStd('steel', '#B9C2C9', { metalness: 0.7, roughness: 0.32 }),
+        wall: twinStd('wall', '#FBFAF6', { roughness: 0.92 }),
+        wallTrim: twinStd('wallTrim', '#E4E0D6', { roughness: 0.85 }),
+        windowFrame: twinStd('windowFrame', '#3C4247', { roughness: 0.5, metalness: 0.4 }),
+        windowGlass: twinStd('windowGlass', '#BFD8E6', { roughness: 0.08, metalness: 0.1, emissive: '#9CC3DA', emissiveIntensity: 0.35 }),
+        steel: twinStd('steel', '#C3CBD1', { metalness: 0.72, roughness: 0.3 }),
+        steelShell: twinMat('steelShell', () => new THREE.MeshStandardMaterial({ color: '#CDD4D9', metalness: 0.78, roughness: 0.26, side: THREE.DoubleSide })),
         steelDark: twinStd('steelDark', '#6E7880', { metalness: 0.55, roughness: 0.42 }),
-        rack: twinStd('rack', '#4A6C8F', { metalness: 0.35, roughness: 0.5 }),
-        tankShell: twinMat('tankShell', () => new Twin.lib.THREE.MeshStandardMaterial({
-            color: '#E3EAEE', metalness: 0.85, roughness: 0.2, transparent: true, opacity: 0.3,
-            depthWrite: false, side: Twin.lib.THREE.DoubleSide
-        })),
-        wood: twinStd('wood', '#B98E5C', { roughness: 0.88 }),
+        chrome: twinStd('chrome', '#E9EEF1', { metalness: 0.95, roughness: 0.12 }),
+        rubber: twinStd('rubber', '#202427', { roughness: 0.92 }),
+        plastic: twinStd('plastic', '#25292D', { roughness: 0.45 }),
+        plasticLight: twinStd('plasticLight', '#3A3F45', { roughness: 0.4 }),
+        glassTop: twinStd('glassTop', '#0F1113', { roughness: 0.06, metalness: 0.35 }),
+        inductionOff: twinStd('inductionOff', '#4A4F55', { roughness: 0.3 }),
+        inductionOn: twinStd('inductionOn', '#FF7A1A', { emissive: '#FF5A00', emissiveIntensity: 0.9, roughness: 0.3 }),
+        ledOn: twinStd('ledOn', '#5CE07A', { emissive: '#5CE07A', emissiveIntensity: 1.2 }),
+        ledOff: twinStd('ledOff', '#555B60', { roughness: 0.5 }),
+        valveRed: twinStd('valveRed', '#C7342B', { roughness: 0.5 }),
+        sightGlass: twinStd('sightGlass', '#E8F3F6', { roughness: 0.05, transparent: true, opacity: 0.35 }),
+        jarGlass: twinStd('jarGlass', '#EAF4F2', { roughness: 0.05, transparent: true, opacity: 0.3 }),
+        bottleGlass: twinStd('bottleGlass', '#E6F0EC', { roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.38 }),
+        liquidTint: twinStd('liquidTint', '#FFFFFF', { roughness: 0.25 }),
+        cap: twinStd('cap', '#C9A64B', { metalness: 0.7, roughness: 0.35 }),
+        tint: twinStd('tint', '#FFFFFF', { roughness: 0.72 }),
+        stateTint: twinStd('stateTint', '#FFFFFF', { roughness: 0.82 }),
+        basin: twinStd('basin', '#7D878E', { metalness: 0.6, roughness: 0.35 }),
+        wood: twinStd('wood', '#BE9461', { roughness: 0.9 }),
+        woodDark: twinStd('woodDark', '#93693D', { roughness: 0.9 }),
+        woodLight: twinStd('woodLight', '#DDBF92', { roughness: 0.8 }),
         kraft: twinStd('kraft', '#C9A878', { roughness: 0.92 }),
         kraftTape: twinStd('kraftTape', '#A9844F', { roughness: 0.6 }),
-        film: twinStd('film', p.primaryLight, { roughness: 0.35, transparent: true, opacity: 0.92 }),
-        binShell: twinMat('binShell', () => new Twin.lib.THREE.MeshStandardMaterial({
-            color: '#D9D4C7', roughness: 0.6, transparent: true, opacity: 0.42, depthWrite: false
-        })),
-        skin: twinStd('skin', '#F0E0CC', { roughness: 0.8 }),
-        absent: twinMat('absent', () => new Twin.lib.THREE.MeshStandardMaterial({
-            color: '#B9B6AE', roughness: 0.9, transparent: true, opacity: 0.5
-        })),
-        marking: twinBasic('marking', '#E2C25A', { opacity: 0.85 }),
+        film: twinStd('film', p.primaryLight, { roughness: 0.2, transparent: true, opacity: 0.45 }),
+        label: twinStd('label', '#F6F5F0', { roughness: 0.7 }),
+        binPlastic: twinStd('binPlastic', '#4E7DA6', { roughness: 0.55 }),
+        rackBlue: twinStd('rackBlue', '#2F5C8A', { roughness: 0.45, metalness: 0.3 }),
+        rackOrange: twinStd('rackOrange', '#D9822B', { roughness: 0.5, metalness: 0.2 }),
+        locker: twinStd('locker', '#98A6AF', { roughness: 0.5, metalness: 0.35 }),
+        lockerDoor: twinStd('lockerDoor', '#B4C0C7', { roughness: 0.45, metalness: 0.35 }),
+        skin: twinStd('skin', '#F0DCC4', { roughness: 0.8 }),
+        apron: twinStd('apron', '#F7F7F4', { roughness: 0.85 }),
+        pants: twinStd('pants', '#3A4148', { roughness: 0.85 }),
+        absent: twinMat('absent', () => new THREE.MeshStandardMaterial({ color: '#B9B6AE', roughness: 0.9, transparent: true, opacity: 0.45 })),
+        marking: twinBasic('marking', '#E2C25A', { opacity: 0.9 }),
+        hazard: twinStd('hazard', '#E9B825', { roughness: 0.6 }),
         dark: twinStd('dark', '#2F3438', { roughness: 0.7 }),
-        glassDark: twinStd('glassDark', '#3B4A55', { roughness: 0.15, metalness: 0.3 }),
-        white: twinStd('white', '#F7F7F2', { roughness: 0.7 }),
-        brand: twinStd('brand', p.primary, { roughness: 0.6 }),
+        glassDark: twinStd('glassDark', '#34444F', { roughness: 0.12, metalness: 0.35 }),
+        white: twinStd('white', '#F7F7F2', { roughness: 0.65 }),
+        whiteDark: twinStd('whiteDark', '#E3E4DE', { roughness: 0.65 }),
+        brand: twinStd('brand', p.primary, { roughness: 0.55 }),
+        lamp: twinStd('lamp', '#FFF3D6', { emissive: '#FFE9B8', emissiveIntensity: 1 }),
         screen: twinStd('screen', p.primaryLight, { emissive: p.primaryLight, emissiveIntensity: 0.9 }),
+        extinguisher: twinStd('extinguisher', '#C7342B', { roughness: 0.4, metalness: 0.2 }),
         ringDanger: twinBasic('ringDanger', p.danger, { opacity: 0.85 }),
         ringWarning: twinBasic('ringWarning', p.warning, { opacity: 0.85 }),
         ringWarningSoft: twinBasic('ringWarningSoft', p.warning, { opacity: 0.4 }),
         ringSuccess: twinBasic('ringSuccess', p.success, { opacity: 0.7 }),
+        ringPlanned: twinBasic('ringPlanned', p.info, { opacity: 0.55 }),
         beaconDanger: twinStd('beaconDanger', p.danger, { emissive: p.danger, emissiveIntensity: 0.8 }),
         beaconWarning: twinStd('beaconWarning', p.warning, { emissive: p.warning, emissiveIntensity: 0.8 }),
-        ghost: twinMat('ghost', () => new Twin.lib.THREE.LineBasicMaterial({ color: p.danger, transparent: true, opacity: 0.75 })),
+        ghost: twinMat('ghost', () => new THREE.LineBasicMaterial({ color: p.danger, transparent: true, opacity: 0.75 })),
         ghostFill: twinBasic('ghostFill', p.danger, { opacity: 0.06 }),
-        stateDanger: twinStd('stateDanger', p.danger, { roughness: 0.6 }),
-        stateWarning: twinStd('stateWarning', p.warning, { roughness: 0.6 }),
-        stateOk: twinStd('stateOk', p.success, { roughness: 0.6 }),
-        stateUnknown: twinStd('stateUnknown', '#9AA39A', { roughness: 0.7 })
+        proxy: twinMat('proxy', () => new THREE.MeshBasicMaterial())
     };
 };
 
 const twinColorMats = (color) => ({
-    crate: twinStd('crate', color, { roughness: 0.78 }),
-    glass: twinStd('glass', color, { roughness: 0.12, transparent: true, opacity: 0.82 }),
-    liquid: twinStd('liquid', color, { roughness: 0.25, emissive: color, emissiveIntensity: 0.14, transparent: true, opacity: 0.9 }),
+    liquid: twinStd('liquid', color, { roughness: 0.2, emissive: color, emissiveIntensity: 0.12, transparent: true, opacity: 0.92 }),
     band: twinStd('band', color, { roughness: 0.45, emissive: color, emissiveIntensity: 0.25 }),
-    figure: twinStd('figure', color, { roughness: 0.65 })
+    figure: twinStd('figure', color, { roughness: 0.7 })
 });
+
+const TWIN_STATE_COLORS = { critical: '#D9776C', empty: '#D9776C', low: '#E3B85A', ok: '#8DB86A', unknown: '#B9BDB5' };
+
+// --- Textures dessinées (plaques, enseigne, carrelage) ---
+const twinCanvasMaterial = (key, w, h, draw, opts = {}) => twinMat(`tex:${key}`, () => {
+    const { THREE } = Twin.lib;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    draw(canvas.getContext('2d'), w, h);
+    const map = new THREE.CanvasTexture(canvas);
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.anisotropy = 4;
+    if (opts.repeat) {
+        map.wrapS = map.wrapT = THREE.RepeatWrapping;
+        map.repeat.set(opts.repeat[0], opts.repeat[1]);
+    }
+    return new THREE.MeshStandardMaterial({ map, roughness: opts.roughness ?? 0.6 });
+});
+
+const twinPlateMaterial = (key, title, sub, accent) => twinCanvasMaterial(`plate:${key}`, 256, 128, (g, w, h) => {
+    g.fillStyle = '#F6F5F0';
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = accent;
+    g.fillRect(0, 0, w, 16);
+    g.fillStyle = '#2A2A2A';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.font = '700 46px Outfit, sans-serif';
+    g.fillText(title, w / 2, sub ? 56 : 70);
+    if (sub) {
+        g.fillStyle = '#6B6B6B';
+        g.font = '500 30px Outfit, sans-serif';
+        g.fillText(sub, w / 2, 100);
+    }
+});
+
+const twinSignMaterial = (key, bg, fg, title, sub) => twinCanvasMaterial(`sign:${key}`, 1024, 256, (g, w, h) => {
+    g.fillStyle = bg;
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = fg;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.font = '700 132px Outfit, sans-serif';
+    g.fillText(title, w / 2, sub ? 104 : 128);
+    if (sub) {
+        g.font = '500 46px Outfit, sans-serif';
+        g.fillText(sub, w / 2, 200);
+    }
+});
+
+const twinTileMaterial = (rx, ry) => twinCanvasMaterial(`tiles:${rx}x${ry}`, 128, 128, (g) => {
+    g.fillStyle = '#F1F2EE';
+    g.fillRect(0, 0, 128, 128);
+    g.strokeStyle = '#D3D7D0';
+    g.lineWidth = 4;
+    g.strokeRect(2, 2, 124, 124);
+}, { repeat: [rx, ry], roughness: 0.5 });
+
+// --- Assemblage instancié : un InstancedMesh par couple géométrie × matériau ---
+const twinBatch = () => new Map();
+
+const twinBatchFlush = (batch, parent) => {
+    const { THREE } = Twin.lib;
+    const color = new THREE.Color();
+    batch.forEach(e => {
+        const mesh = new THREE.InstancedMesh(e.geo, e.mat, e.matrices.length);
+        e.matrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+        if (e.colors.some(Boolean)) e.colors.forEach((c, i) => mesh.setColorAt(i, color.set(c || '#ffffff')));
+        mesh.castShadow = e.cast;
+        mesh.receiveShadow = e.receive;
+        mesh.computeBoundingSphere();
+        parent.add(mesh);
+    });
+    batch.clear();
+};
+
+// Repère local (position + rotation Y) : part() alimente le lot instancié,
+// mesh() crée un objet individuel (animé), point() convertit en coordonnées monde.
+const twinBuilder = (batch, parent, x, z, rotY = 0, y = 0) => {
+    const { THREE } = Twin.lib;
+    const origin = new THREE.Matrix4().makeRotationY(rotY).setPosition(x, y, z);
+    const dummy = Twin.dummy;
+    const matrix = (p, s, o = {}) => {
+        dummy.position.set(p[0], p[1], p[2]);
+        dummy.rotation.set(o.rx || 0, o.ry || 0, o.rz || 0);
+        dummy.scale.set(s[0], s[1], s[2]);
+        dummy.updateMatrix();
+        return new THREE.Matrix4().multiplyMatrices(origin, dummy.matrix);
+    };
+    return {
+        matrix,
+        part(geo, mat, p, s, o = {}) {
+            const key = `${geo.uuid}|${mat.uuid}`;
+            let e = batch.get(key);
+            if (!e) {
+                e = { geo, mat, matrices: [], colors: [], cast: o.cast !== false && !mat.transparent, receive: o.receive !== false && !mat.transparent };
+                batch.set(key, e);
+            }
+            e.matrices.push(matrix(p, s, o));
+            e.colors.push(o.color || null);
+        },
+        mesh(geo, mat, p, s, o = {}) {
+            const mesh = twinMesh(geo, mat, { cast: o.cast !== false && !mat.transparent, receive: !!o.receive });
+            matrix(p, s, o).decompose(mesh.position, mesh.quaternion, mesh.scale);
+            if (o.renderOrder) mesh.renderOrder = o.renderOrder;
+            parent.add(mesh);
+            return mesh;
+        },
+        point(p) {
+            return new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(origin);
+        }
+    };
+};
+
+const twinFlat = (b, geo, mat, x, y, z, w, d, o = {}) =>
+    b.part(geo, mat, [x, y, z], [w, d, 1], { rx: -Math.PI / 2, cast: false, receive: false, ...o });
 
 const twinInitEngine = () => {
     const { THREE, OrbitControls } = Twin.lib;
@@ -3826,14 +4010,21 @@ const twinInitEngine = () => {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(Twin.palette.bg);
     scene.fog = new THREE.Fog(Twin.palette.bg, 80, 160);
+    // Reflets d'atelier pour l'inox (sans carte d'environnement, le métal paraît noir)
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const room = new Twin.lib.RoomEnvironment();
+    scene.environment = pmrem.fromScene(room, 0.04).texture;
+    scene.environmentIntensity = 0.55;
+    room.dispose?.();
+    pmrem.dispose();
 
-    const camera = new THREE.PerspectiveCamera(38, 1.6, 0.5, 400);
+    const camera = new THREE.PerspectiveCamera(38, 1.6, 0.3, 400);
     camera.position.set(...TWIN_VIEW_OVERVIEW.pos);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.minDistance = 6;
+    controls.minDistance = 3;
     controls.maxDistance = 95;
     controls.maxPolarAngle = Math.PI * 0.45;
     controls.screenSpacePanning = false;
@@ -3846,23 +4037,28 @@ const twinInitEngine = () => {
     controls.addEventListener('start', () => { Twin.tween = null; });
     controls.update();
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0xd9d2c0, 1.2));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xd9d2c0, 0.85));
     const sun = new THREE.DirectionalLight(0xfff4e2, 2.2);
     sun.position.set(-16, 34, 22);
     sun.castShadow = true;
     sun.shadow.mapSize.set(compact ? 1024 : 2048, compact ? 1024 : 2048);
-    Object.assign(sun.shadow.camera, { left: -34, right: 34, top: 26, bottom: -26, near: 5, far: 95 });
+    Object.assign(sun.shadow.camera, { left: -36, right: 36, top: 26, bottom: -26, near: 5, far: 95 });
     sun.shadow.bias = -0.0005;
     sun.shadow.normalBias = 0.03;
     scene.add(sun);
+    const fill = new THREE.DirectionalLight(0xe8f0ff, 0.45);
+    fill.position.set(20, 18, -14);
+    scene.add(fill);
 
     Object.assign(Twin, {
         renderer, scene, camera, controls,
         raycaster: new THREE.Raycaster(),
         ndc: new THREE.Vector2(),
         tmp: new THREE.Vector3(),
+        dummy: new THREE.Object3D(),
         dynamic: new THREE.Group(),
-        markers: new THREE.Group()
+        markers: new THREE.Group(),
+        proxies: new THREE.Group()
     });
     scene.add(Twin.dynamic);
     scene.add(Twin.markers);
@@ -3899,16 +4095,90 @@ const twinInitEngine = () => {
     });
 };
 
+// --- Éléments réutilisables ---
+const twinPallet = (b, x, z, { w = 1.5, d = 1.15 } = {}) => {
+    const g = twinGeometries();
+    const m = twinMaterials();
+    const ez = d / 2 - 0.085;
+    const ex = w / 2 - 0.085;
+    [-1, -0.5, 0, 0.5, 1].forEach(k => b.part(g.box, m.wood, [x, 0.145, z + k * ez], [w, 0.03, 0.16]));
+    [-1, 0, 1].forEach(i => [-1, 0, 1].forEach(j => b.part(g.box, m.woodDark, [x + i * ex, 0.09, z + j * ez], [0.16, 0.08, 0.16])));
+    [-1, 0, 1].forEach(j => b.part(g.box, m.wood, [x, 0.0125, z + j * ez], [w, 0.025, 0.16]));
+};
+
+const twinShade = (hex, factor) => {
+    let h = safeColor(hex).slice(1);
+    if (h.length < 6) h = h.slice(0, 3).split('').map(c => c + c).join('');
+    const n = parseInt(h.slice(0, 6), 16);
+    const ch = (shift) => Math.round(((n >> shift) & 255) * factor).toString(16).padStart(2, '0');
+    return `#${ch(16)}${ch(8)}${ch(0)}`;
+};
+
+const twinCrate = (b, x, y, z, color) => {
+    const g = twinGeometries();
+    const m = twinMaterials();
+    const rim = twinShade(color, 0.72);
+    b.part(g.box, m.tint, [x, y + 0.345, z + 0.48], [1.36, 0.03, 0.05], { color: rim });
+    b.part(g.box, m.tint, [x, y + 0.345, z - 0.48], [1.36, 0.03, 0.05], { color: rim });
+    b.part(g.box, m.tint, [x + 0.65, y + 0.345, z], [0.05, 0.03, 0.92], { color: rim });
+    b.part(g.box, m.tint, [x - 0.65, y + 0.345, z], [0.05, 0.03, 0.92], { color: rim });
+    b.part(g.box, m.tint, [x, y + 0.015, z], [1.3, 0.03, 0.96], { color });
+    b.part(g.box, m.tint, [x, y + 0.18, z + 0.48], [1.34, 0.36, 0.04], { color });
+    b.part(g.box, m.tint, [x, y + 0.18, z - 0.48], [1.34, 0.36, 0.04], { color });
+    b.part(g.box, m.tint, [x + 0.65, y + 0.18, z], [0.04, 0.36, 0.92], { color });
+    b.part(g.box, m.tint, [x - 0.65, y + 0.18, z], [0.04, 0.36, 0.92], { color });
+    b.part(g.box, m.dark, [x + 0.672, y + 0.27, z], [0.012, 0.07, 0.3], { cast: false });
+    b.part(g.box, m.dark, [x - 0.672, y + 0.27, z], [0.012, 0.07, 0.3], { cast: false });
+};
+
+const twinBottleHeight = (contenanceCl) => 0.42 + (contenanceCl || 50) / 100 * 0.5;
+
+const twinCrateBottles = (b, x, y, z, count, crateSize, contenanceCl, color) => {
+    const g = twinGeometries();
+    const m = twinMaterials();
+    const [cols, rows] = crateSize >= 24 ? [6, 4] : crateSize >= 12 ? [4, 3] : [3, 2];
+    const h = twinBottleHeight(contenanceCl);
+    const dx = 1.2 / cols;
+    const dz = 0.86 / rows;
+    const sr = Math.min(h * 0.9, (Math.min(dx, dz) / 2 - 0.012) / 0.33);
+    for (let i = 0; i < Math.min(count, cols * rows); i++) {
+        const bx = x - 0.6 + dx * (i % cols + 0.5);
+        const bz = z - 0.43 + dz * (Math.floor(i / cols) + 0.5);
+        b.part(g.bottleLiquid, m.liquidTint, [bx, y, bz], [sr, h, sr], { color });
+        b.part(g.bottle, m.bottleGlass, [bx, y, bz], [sr, h, sr]);
+        b.part(g.cylLow, m.cap, [bx, y + h * 0.965, bz], [sr * 0.125, h * 0.07, sr * 0.125]);
+    }
+};
+
+const twinFigureParts = (emit, mats) => {
+    const g = twinGeometries();
+    [-1, 1].forEach(sx => {
+        emit(g.capsule, mats.pants, [sx * 0.1, 0.46, 0], [0.14, 0.42, 0.14]);
+        emit(g.box, mats.dark, [sx * 0.1, 0.04, 0.04], [0.13, 0.08, 0.24]);
+        emit(g.capsule, mats.shirt, [sx * 0.27, 1.13, 0.02], [0.11, 0.28, 0.11], { rz: sx * 0.12 });
+        emit(g.sphere, mats.skin, [sx * 0.31, 0.84, 0.04], [0.055, 0.055, 0.055]);
+    });
+    emit(g.capsule, mats.shirt, [0, 1.17, 0], [0.42, 0.3, 0.28]);
+    emit(g.box, mats.apron, [0, 1.0, 0.135], [0.34, 0.58, 0.02]);
+    emit(g.sphere, mats.skin, [0, 1.66, 0], [0.16, 0.17, 0.16]);
+    emit(g.dome, mats.cap, [0, 1.7, -0.01], [0.175, 0.11, 0.175]);
+    [-1, 1].forEach(sx => emit(g.sphere, mats.dark, [sx * 0.055, 1.68, 0.148], [0.018, 0.018, 0.018]));
+};
+
+// --- Environnement statique ---
 const twinBuildEnvironment = () => {
     const { THREE } = Twin.lib;
     const m = twinMaterials();
+    const g = twinGeometries();
     const env = new THREE.Group();
-    const ground = twinMesh(twinGeometries().plane, m.ground, { cast: false, receive: true });
-    ground.rotation.x = -Math.PI / 2;
-    ground.scale.set(180, 180, 1);
-    ground.position.y = -0.31;
-    env.add(ground);
-    twinPlaceBox(env, m.floor, 46, 0.3, 32, 0, -0.15, 0, { cast: false, receive: true });
+    const batch = twinBatch();
+    const b = twinBuilder(batch, env, 0, 0);
+
+    const ground = b.mesh(g.plane, m.ground, [0, -0.31, 0], [180, 180, 1], { rx: -Math.PI / 2, cast: false, receive: true });
+    ground.receiveShadow = true;
+    b.part(g.box, m.floor, [0, -0.15, 0], [46, 0.3, 32], { cast: false });
+    const tiles = b.mesh(g.plane, twinTileMaterial(20, 15), [-12.9, 0.003, -8.6], [19.8, 14.2, 1], { rx: -Math.PI / 2, cast: false });
+    tiles.receiveShadow = true;
 
     TWIN_ZONES.forEach(zone => {
         const [x0, z0, x1, z1] = zone.bounds;
@@ -3917,45 +4187,182 @@ const twinBuildEnvironment = () => {
         const d = z1 - z0;
         const cx = (x0 + x1) / 2;
         const cz = (z0 + z1) / 2;
-        twinFloorDecal(env, twinBasic(`zoneTint:${zone.id}`, color, { opacity: 0.07 }), w, d, cx, cz, 0.004);
+        twinFlat(b, g.plane, twinBasic(`zoneTint:${zone.id}`, color, { opacity: 0.07 }), cx, 0.005, cz, w, d);
         const border = twinBasic(`zoneBorder:${zone.id}`, color, { opacity: 0.6 });
-        twinFloorDecal(env, border, w, 0.1, cx, z0, 0.008);
-        twinFloorDecal(env, border, w, 0.1, cx, z1, 0.008);
-        twinFloorDecal(env, border, 0.1, d, x0, cz, 0.008);
-        twinFloorDecal(env, border, 0.1, d, x1, cz, 0.008);
+        twinFlat(b, g.plane, border, cx, 0.008, z0, w, 0.1);
+        twinFlat(b, g.plane, border, cx, 0.008, z1, w, 0.1);
+        twinFlat(b, g.plane, border, x0, 0.008, cz, 0.1, d);
+        twinFlat(b, g.plane, border, x1, 0.008, cz, 0.1, d);
+    });
+    for (let x = -20; x < 20; x += 1.6) twinFlat(b, g.plane, m.marking, x + 0.42, 0.009, 0.5, 0.85, 0.09);
+    for (let z = -13; z < 1.8; z += 1.6) twinFlat(b, g.plane, m.marking, 0, 0.009, z + 0.42, 0.09, 0.85);
+    twinFlat(b, g.plane, m.dark, -15.2, 0.007, -6.55, 8.6, 0.16);
+
+    // Murs : fond haut (fenêtres + enseigne), côtés bas en coupe, quais de chargement
+    const backZ = -15.85;
+    b.part(g.box, m.wall, [0, 1.45, backZ], [46.2, 3.2, 0.3], { receive: true });
+    b.part(g.box, m.wallTrim, [0, 3.08, backZ], [46.3, 0.08, 0.36]);
+    [-22.95, -11.5, 0, 11.5, 22.95].forEach(x => b.part(g.box, m.wallTrim, [x, 1.45, backZ + 0.2], [0.45, 3.2, 0.2]));
+    [-17.4, -5.6, 5.6, 17.4].forEach(x => {
+        b.part(g.box, m.windowFrame, [x, 2.0, backZ + 0.16], [4.4, 1.35, 0.05]);
+        b.part(g.box, m.windowGlass, [x, 2.0, backZ + 0.19], [4.2, 1.17, 0.02], { cast: false });
+        [-1.05, 0, 1.05].forEach(dx => b.part(g.box, m.windowFrame, [x + dx, 2.0, backZ + 0.205], [0.05, 1.17, 0.02], { cast: false }));
+    });
+    b.mesh(g.box, twinSignMaterial('thecol', Twin.palette.primary, '#FFFFFF', 'ThéCol', 'Thé froid artisanal'), [0, 2.05, backZ + 0.2], [4.4, 1.1, 0.04], { cast: false });
+    b.part(g.box, m.wall, [-22.95, 0.55, 0], [0.3, 1.4, 31.7], { receive: true });
+    b.part(g.box, m.wallTrim, [-22.95, 1.27, 0], [0.36, 0.06, 31.7]);
+    [[-15.85, 4.1], [7.1, 8.7], [11.7, 15.85]].forEach(([z0, z1]) => {
+        b.part(g.box, m.wall, [22.95, 0.55, (z0 + z1) / 2], [0.3, 1.4, z1 - z0], { receive: true });
+        b.part(g.box, m.wallTrim, [22.95, 1.27, (z0 + z1) / 2], [0.36, 0.06, z1 - z0]);
+    });
+    [5.6, 10.2].forEach(dz => {
+        b.part(g.box, m.steelDark, [22.25, 0.03, dz], [1.3, 0.06, 2.8], { receive: true });
+        for (let k = 0; k < 11; k++) b.part(g.box, m.tint, [21.55, 0.012, dz - 1.25 + k * 0.25], [0.14, 0.014, 0.25], { color: k % 2 ? '#26282B' : '#E9B825', cast: false });
+        [-1, 1].forEach(s => {
+            b.part(g.box, m.hazard, [22.95, 0.7, dz + s * 1.58], [0.34, 1.42, 0.14]);
+            b.part(g.box, m.rubber, [23.22, 0.72, dz + s * 1.2], [0.22, 0.36, 0.3]);
+            b.part(g.cylLow, m.hazard, [21.3, 0.5, dz + s * 1.75], [0.12, 1, 0.12]);
+            b.part(g.cylLow, m.dark, [21.3, 0.82, dz + s * 1.75], [0.125, 0.08, 0.125]);
+        });
+        b.part(g.box, m.steelDark, [22.72, 1.7, dz - 1.85], [0.08, 0.08, 0.5]);
+        b.part(g.box, m.lamp, [22.72, 1.64, dz - 1.62], [0.2, 0.1, 0.2], { cast: false });
     });
 
-    for (let x = -20; x < 20; x += 1.6) twinFloorDecal(env, m.marking, 0.85, 0.09, x + 0.42, 0.5, 0.009);
-    for (let z = -13; z < 1.8; z += 1.6) twinFloorDecal(env, m.marking, 0.09, 0.85, 0, z + 0.42, 0.009);
-
-    twinPlaceBox(env, m.wall, 46.2, 1.4, 0.3, 0, 0.55, -15.85, { receive: true });
-    twinPlaceBox(env, m.wall, 0.3, 1.4, 31.7, -22.95, 0.55, 0, { receive: true });
-    twinPlaceBox(env, m.wall, 0.3, 1.4, 19.4, 22.95, 0.55, -6.15, { receive: true });
-    twinPlaceBox(env, m.wall, 0.3, 1.4, 3.6, 22.95, 0.55, 14.05, { receive: true });
-    twinPlaceBox(env, m.steelDark, 0.6, 0.35, 8.6, 22.6, 0.05, 7.95, { receive: true });
-
-    twinFloorDecal(env, twinBasic('presentArea', Twin.palette.success, { opacity: 0.1 }), 4, 5.2, 0, 5.4, 0.007);
-    twinFloorDecal(env, twinBasic('absentArea', '#8C8A84', { opacity: 0.08 }), 4, 4.2, 0, 10.7, 0.007);
-    twinPlaceBox(env, m.steelDark, 0.12, 1.2, 0.12, 1.75, 0.6, 2.85);
-    twinPlaceBox(env, m.dark, 0.5, 0.62, 0.2, 1.75, 1.4, 2.85);
-    twinPlaceBox(env, m.screen, 0.36, 0.3, 0.02, 1.75, 1.48, 2.96, { cast: false });
-
-    const truck = new THREE.Group();
-    truck.position.set(27.3, 0, 7.95);
-    twinPlaceBox(truck, m.white, 7.4, 2.7, 2.5, 0, 1.75, 0);
-    twinPlaceBox(truck, m.brand, 7.42, 0.36, 2.52, 0, 1.25, 0);
-    twinPlaceBox(truck, m.brand, 2.1, 2.3, 2.4, 4.9, 1.55, 0);
-    twinPlaceBox(truck, m.glassDark, 0.05, 0.85, 2.0, 5.96, 2.15, 0, { cast: false });
-    [-2.6, -1.3, 4.6].forEach(x => [-1.2, 1.2].forEach(z => {
-        const wheel = twinMesh(twinGeometries().cyl, m.dark);
-        wheel.scale.set(0.48, 0.34, 0.48);
-        wheel.rotation.x = Math.PI / 2;
-        wheel.position.set(x, 0.48, z);
-        truck.add(wheel);
+    // Camion à quai (porte 1)
+    const t = twinBuilder(batch, env, 27.4, 5.6);
+    t.part(g.box, m.white, [0, 1.75, 0], [7.4, 2.6, 2.45]);
+    for (let k = 0; k < 11; k++) t.part(g.box, m.whiteDark, [-3.6 + k * 0.72, 1.75, 0], [0.05, 2.63, 2.49]);
+    t.part(g.box, m.brand, [0, 0.58, 0], [7.42, 0.22, 2.47]);
+    t.part(g.box, m.dark, [-3.71, 1.75, 0], [0.02, 2.4, 2.25], { cast: false });
+    [-1, 1].forEach(s => t.part(g.box, m.whiteDark, [-3.1, 1.75, s * 1.27], [1.15, 2.4, 0.04]));
+    t.mesh(g.box, twinSignMaterial('truck', '#FFFFFF', Twin.palette.primary, 'ThéCol', 'Livraison fraîche'), [0.3, 1.95, 1.235], [5, 1.25, 0.01], { cast: false });
+    t.mesh(g.box, twinSignMaterial('truck', '#FFFFFF', Twin.palette.primary, 'ThéCol', 'Livraison fraîche'), [0.3, 1.95, -1.235], [5, 1.25, 0.01], { cast: false, ry: Math.PI });
+    t.part(g.box, m.dark, [0.8, 0.36, 0], [8.6, 0.22, 1.5]);
+    [1.4, 2.6, 5.5].forEach(x => [-1, 1].forEach(s => {
+        t.part(g.cyl, m.rubber, [x, 0.46, s * 1.12], [0.46, 0.32, 0.46], { rx: Math.PI / 2 });
+        t.part(g.cylLow, m.chrome, [x, 0.46, s * 1.29], [0.2, 0.02, 0.2], { rx: Math.PI / 2 });
     }));
-    env.add(truck);
+    t.part(g.box, m.brand, [5.1, 1.55, 0], [2.2, 2.3, 2.4]);
+    t.part(g.box, m.brand, [4.6, 2.86, 0], [1.2, 0.32, 2.2]);
+    t.part(g.box, m.glassDark, [6.21, 2.1, 0], [0.04, 0.85, 2.05], { cast: false });
+    [-1, 1].forEach(s => {
+        t.part(g.box, m.glassDark, [5.45, 2.1, s * 1.205], [0.9, 0.6, 0.02], { cast: false });
+        t.part(g.box, m.lamp, [6.225, 0.95, s * 0.88], [0.03, 0.18, 0.32], { cast: false });
+        t.part(g.box, m.dark, [6.0, 2.25, s * 1.38], [0.08, 0.36, 0.06]);
+        t.part(g.box, m.dark, [6.0, 2.3, s * 1.3], [0.04, 0.04, 0.18]);
+        t.part(g.box, m.steelDark, [5.3, 0.6, s * 1.22], [0.5, 0.06, 0.12]);
+    });
+    t.part(g.box, m.dark, [6.21, 1.05, 0], [0.04, 0.55, 1.3], { cast: false });
+    t.part(g.box, m.dark, [6.28, 0.52, 0], [0.16, 0.24, 2.42]);
+    t.part(g.cyl, m.chrome, [3.6, 0.62, -0.95], [0.27, 0.9, 0.27], { rz: Math.PI / 2 });
 
-    env.traverse(o => { o.matrixAutoUpdate = true; });
+    // Plan de travail inox : plaques (dynamiques), planche, bocaux, balance, évier
+    const L = TWIN_LAB;
+    const w = twinBuilder(batch, env, L.tableX, L.tableZ);
+    const Ht = L.tableH;
+    w.part(g.box, m.steel, [0, Ht - 0.025, 0], [L.tableW, 0.05, L.tableD], { receive: true });
+    w.part(g.box, m.steel, [0, Ht + 0.13, -L.tableD / 2 + 0.015], [L.tableW, 0.26, 0.03]);
+    [-3.44, -1.15, 1.15, 3.44].forEach(lx => [-1, 1].forEach(s => w.part(g.box, m.steel, [lx, (Ht - 0.05) / 2, s * 0.38], [0.05, Ht - 0.05, 0.05])));
+    w.part(g.box, m.steel, [0, 0.22, 0], [L.tableW - 0.1, 0.03, L.tableD - 0.1], { receive: true });
+    [-2.6, -2.05, -1.5].forEach(sx => w.part(g.sack, m.kraft, [sx, 0.235, 0.04], [0.24, 0.42, 0.2]));
+    [0.6, 0.95].forEach(sx => {
+        w.part(g.box, m.white, [sx, 0.42, 0], [0.28, 0.36, 0.22]);
+        w.part(g.cylLow, m.valveRed, [sx + 0.08, 0.62, -0.05], [0.04, 0.05, 0.04]);
+    });
+    w.part(g.box, m.woodLight, [0.2, Ht + 0.015, 0.05], [0.55, 0.03, 0.38]);
+    w.part(g.box, m.chrome, [0.26, Ht + 0.034, 0.05], [0.26, 0.006, 0.035], { ry: 0.3 });
+    w.part(g.box, m.dark, [0.08, Ht + 0.036, 0.11], [0.1, 0.012, 0.03], { ry: 0.3 });
+    ['#C0392B', '#6C3483', '#E8E4C9', '#4E8B3A'].forEach((c, i) => {
+        const jx = 0.92 + i * 0.2;
+        w.part(g.cyl, m.tint, [jx, Ht + 0.09, -0.27], [0.062, 0.16, 0.062], { color: c });
+        w.part(g.cylLow, m.jarGlass, [jx, Ht + 0.12, -0.27], [0.075, 0.24, 0.075]);
+        w.part(g.cyl, m.steel, [jx, Ht + 0.25, -0.27], [0.08, 0.03, 0.08]);
+    });
+    w.part(g.box, m.white, [2.05, Ht + 0.03, 0.05], [0.32, 0.06, 0.32]);
+    w.part(g.box, m.steel, [2.05, Ht + 0.065, 0.0], [0.28, 0.01, 0.24]);
+    w.part(g.box, m.screen, [2.05, Ht + 0.035, 0.212], [0.14, 0.035, 0.004], { cast: false });
+    w.part(g.box, m.steelDark, [2.85, Ht + 0.002, 0.02], [0.72, 0.004, 0.56], { cast: false });
+    w.part(g.box, m.basin, [2.85, Ht + 0.005, 0.02], [0.62, 0.003, 0.46], { cast: false });
+    w.part(g.cylLow, m.chrome, [2.85, Ht + 0.17, -0.33], [0.025, 0.34, 0.025]);
+    w.part(g.cylLow, m.chrome, [2.85, Ht + 0.33, -0.22], [0.02, 0.24, 0.02], { rx: Math.PI / 2 });
+    w.part(g.cylLow, m.chrome, [2.85, Ht + 0.28, -0.1], [0.018, 0.1, 0.018]);
+    w.part(g.box, m.chrome, [2.85, Ht + 0.36, -0.37], [0.03, 0.02, 0.12]);
+    w.part(g.box, m.steelDark, [-0.3, Ht + 0.27, -0.42], [1.3, 0.02, 0.02]);
+    [-0.75, -0.35, 0.05].forEach(lx => {
+        w.part(g.box, m.steel, [lx, Ht + 0.12, -0.41], [0.02, 0.3, 0.01]);
+        w.part(g.sphere, m.steel, [lx, Ht - 0.04, -0.38], [0.06, 0.035, 0.06]);
+    });
+
+    // Poste d'embouteillage + caisses vides
+    const e = twinBuilder(batch, env, L.bottling[0], L.bottling[1]);
+    e.part(g.box, m.steel, [0, 0.875, 0], [2.8, 0.05, 0.8], { receive: true });
+    [-1.34, 1.34].forEach(lx => [-1, 1].forEach(s => e.part(g.box, m.steel, [lx, 0.43, s * 0.34], [0.05, 0.86, 0.05])));
+    e.part(g.box, m.steel, [0, 0.2, 0], [2.7, 0.03, 0.7], { receive: true });
+    e.part(g.box, m.steel, [0, 1.62, -0.12], [1.0, 0.42, 0.36]);
+    e.part(g.cylLow, m.steelDark, [0, 1.9, -0.12], [0.12, 0.14, 0.12]);
+    [-1, 1].forEach(s => e.part(g.box, m.steelDark, [s * 0.45, 1.2, -0.26], [0.06, 0.62, 0.06]));
+    for (let k = 0; k < 4; k++) {
+        const nx = -0.36 + k * 0.24;
+        e.part(g.cylLow, m.chrome, [nx, 1.33, -0.02], [0.02, 0.16, 0.02]);
+        e.part(g.bottleLiquid, m.liquidTint, [nx, 0.9, -0.02], [0.26, 0.42, 0.26], { color: '#C98F5A' });
+        e.part(g.bottle, m.bottleGlass, [nx, 0.9, -0.02], [0.26, 0.42, 0.26]);
+    }
+    e.part(g.box, m.white, [1.15, 1.15, -0.2], [0.3, 0.42, 0.2]);
+    e.part(g.cylLow, m.ledOn, [1.08, 1.25, -0.095], [0.03, 0.01, 0.03], { rx: Math.PI / 2, cast: false });
+    e.part(g.cylLow, m.valveRed, [1.22, 1.25, -0.095], [0.03, 0.01, 0.03], { rx: Math.PI / 2, cast: false });
+    twinCrate(e, -0.95, 0.9, 0.0, '#8E959B');
+    [0, 1, 2, 3].forEach(k => twinCrate(e, 2.25, k * 0.37, -0.95, '#8E959B'));
+
+    // Chariot inox (ingrédients) et enrouleur de tuyau de lavage
+    const c = twinBuilder(batch, env, -6.4, -6.2, 0.35);
+    [0.18, 0.55, 0.92].forEach(y => c.part(g.box, m.steel, [0, y, 0], [1.1, 0.03, 0.6], { receive: true }));
+    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
+        c.part(g.cylLow, m.steel, [sx * 0.53, 0.52, sz * 0.28], [0.02, 0.9, 0.02]);
+        c.part(g.cyl, m.rubber, [sx * 0.53, 0.05, sz * 0.28], [0.05, 0.04, 0.05], { rx: Math.PI / 2 });
+    }));
+    c.part(g.cylLow, m.steel, [-0.62, 0.95, 0], [0.018, 0.56, 0.018], { rx: Math.PI / 2 });
+    [-0.3, 0.05, 0.35].forEach((sx, i) => c.part(g.sack, m.kraft, [sx, 0.935, 0], [0.16, 0.26 - i * 0.03, 0.14]));
+    [-0.25, 0.25].forEach(sx => c.part(g.box, m.white, [sx, 0.32, 0], [0.4, 0.26, 0.4]));
+    const hose = twinBuilder(batch, env, -11.4, backZ + 0.35);
+    hose.part(g.box, m.steelDark, [0, 1.0, -0.05], [0.5, 0.5, 0.05]);
+    hose.part(g.cylLow, m.hazard, [0, 1.0, 0.08], [0.24, 0.16, 0.24], { rx: Math.PI / 2 });
+    hose.part(g.torus, m.dark, [0, 1.0, 0.08], [0.2, 0.2, 2.2]);
+    hose.part(g.cylLow, m.chrome, [0.32, 0.55, 0.05], [0.02, 0.5, 0.02]);
+
+    // Vestiaire : casiers, banc, pointeuse
+    for (let k = 0; k < 6; k++) {
+        const lz = 8.0 + k * 0.58;
+        b.part(g.box, m.locker, [1.88, 0.9, lz], [0.5, 1.8, 0.56]);
+        b.part(g.box, m.lockerDoor, [1.625, 0.9, lz], [0.012, 1.7, 0.5]);
+        [0, 1, 2].forEach(v => b.part(g.box, m.dark, [1.617, 1.6 - v * 0.06, lz], [0.006, 0.025, 0.3], { cast: false }));
+        b.part(g.box, m.chrome, [1.615, 0.95, lz + 0.18], [0.01, 0.12, 0.03], { cast: false });
+    }
+    b.part(g.box, m.woodDark, [0.85, 0.45, 9.45], [0.36, 0.05, 2.6]);
+    [8.4, 10.5].forEach(z => b.part(g.box, m.steelDark, [0.85, 0.22, z], [0.3, 0.44, 0.05]));
+    b.part(g.box, m.steelDark, [1.75, 0.6, 2.85], [0.1, 1.2, 0.1]);
+    b.part(g.box, m.dark, [1.75, 1.4, 2.85], [0.5, 0.62, 0.2]);
+    b.part(g.box, m.screen, [1.75, 1.48, 2.96], [0.36, 0.3, 0.02], { cast: false });
+    b.part(g.box, m.steel, [1.75, 1.18, 2.96], [0.2, 0.08, 0.02], { cast: false });
+
+    // Extincteurs, transpalette
+    [[-6.2, backZ + 0.35, 0], [22.7, 2.4, Math.PI / 2]].forEach(([x, z, ry]) => {
+        const f = twinBuilder(batch, env, x, z, ry);
+        f.part(g.cyl, m.extinguisher, [0, 0.42, 0], [0.11, 0.62, 0.11]);
+        f.part(g.cylLow, m.dark, [0, 0.79, 0], [0.05, 0.12, 0.05]);
+        f.part(g.box, m.dark, [0.06, 0.82, 0], [0.14, 0.03, 0.03]);
+        f.part(g.box, m.extinguisher, [0, 1.3, -0.12], [0.26, 0.26, 0.01], { cast: false });
+    });
+    const pj = twinBuilder(batch, env, 18.7, -2.7, Math.PI / 2);
+    [-1, 1].forEach(s => {
+        pj.part(g.box, m.steelDark, [0.1, 0.07, s * 0.27], [1.15, 0.07, 0.16]);
+        pj.part(g.cylLow, m.rubber, [0.6, 0.05, s * 0.27], [0.05, 0.12, 0.05], { rx: Math.PI / 2 });
+    });
+    pj.part(g.box, m.rackOrange, [-0.6, 0.3, 0], [0.3, 0.52, 0.64]);
+    pj.part(g.cyl, m.rubber, [-0.6, 0.09, 0], [0.09, 0.14, 0.09], { rx: Math.PI / 2 });
+    pj.part(g.cylLow, m.steelDark, [-0.86, 0.88, 0], [0.025, 1.0, 0.025], { rz: 0.35 });
+    pj.part(g.box, m.dark, [-1.03, 1.36, 0], [0.06, 0.06, 0.34]);
+
+    twinBatchFlush(batch, env);
     Twin.scene.add(env);
 };
 
@@ -3983,78 +4390,18 @@ const twinBuildMarkers = () => {
     Object.assign(Twin, { hoverRing: hover, selectRing: select, pin });
 };
 
-const twinRegister = (item, group, radius, topY, extra = {}) => {
-    group.traverse(o => {
-        if (o.isMesh) {
-            o.userData.twinId = item.id;
-            Twin.pickables.push(o);
-        }
-    });
-    const base = group.position.clone();
-    const top = base.clone();
-    top.y += topY;
-    Twin.objects.set(item.id, { id: item.id, zone: item.zone, group, base, top, radius, ...extra });
-};
-
-const twinGridPositions = (count, bounds, { maxCols = 4, spacing = [4, 4.6], margin = [1.4, 1.4] } = {}) => {
-    const [x0, z0, x1, z1] = bounds;
-    const cols = Math.max(1, Math.min(maxCols, count));
-    const rows = Math.max(1, Math.ceil(count / cols));
-    const sx = Math.min(spacing[0], (x1 - x0 - margin[0] * 2) / Math.max(1, cols - 1 || 1));
-    const sz = Math.min(spacing[1], (z1 - z0 - margin[1] * 2) / Math.max(1, rows - 1 || 1));
-    const cx = (x0 + x1) / 2;
-    const cz = (z0 + z1) / 2;
-    return Array.from({ length: count }, (_, i) => {
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        return [cx + (col - (cols - 1) / 2) * sx, cz + (row - (rows - 1) / 2) * sz];
-    });
-};
-
-const twinBuildTank = (t, x, z) => {
+// Volume de sélection invisible (hors scène) + ancrages des marqueurs et labels
+const twinRegister = (item, b, { hit, top, radius, base = [0, 0, 0] }) => {
     const { THREE } = Twin.lib;
-    const m = twinMaterials();
-    const cm = twinColorMats(t.couleur);
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-    const R = 1.05;
-    const H = 3;
-    const base = 0.62;
-    for (let i = 0; i < 4; i++) {
-        const a = Math.PI / 4 + i * Math.PI / 2;
-        twinPlaceCyl(g, m.steelDark, 0.07, base, Math.cos(a) * R * 0.78, base / 2, Math.sin(a) * R * 0.78);
-    }
-    twinPlaceCyl(g, m.steel, R * 1.02, 0.1, 0, base, 0);
-    const shell = twinMesh(twinGeometries().cylOpen, m.tankShell, { cast: false });
-    shell.scale.set(R, H, R);
-    shell.position.y = base + 0.05 + H / 2;
-    shell.renderOrder = 2;
-    g.add(shell);
-    twinPlaceCyl(g, m.steel, R * 1.04, 0.12, 0, base + 0.05 + H + 0.06, 0);
-    twinPlaceCyl(g, m.steelDark, 0.3, 0.2, 0, base + H + 0.3, 0);
-    const outlet = twinPlaceCyl(g, m.steel, 0.08, 0.6, R + 0.2, base + 0.3, 0);
-    outlet.rotation.z = Math.PI / 2;
-    const band = twinMesh(twinGeometries().band, cm.band, { cast: false });
-    band.rotation.x = Math.PI / 2;
-    band.scale.setScalar(R);
-    band.position.y = base + H * 0.86;
-    g.add(band);
-    let liquid = null;
-    if (t.fill > 0) {
-        liquid = twinMesh(twinGeometries().cyl, cm.liquid, { cast: false });
-        liquid.renderOrder = 1;
-        g.add(liquid);
-    }
-    if (t.status === 'active') twinRing(g, m.ringWarningSoft, R * 1.45);
-    Twin.dynamic.add(g);
-    const fillTo = Math.max(0.04, t.fill * H * 0.97);
-    if (liquid) {
-        const from = Twin.prevFill.has(t.id) ? Twin.prevFill.get(t.id) : fillTo;
-        Twin.fills.push({ mesh: liquid, from, to: fillTo, start: performance.now(), base: base + 0.05, radius: R * 0.93 });
-        twinSetLiquid(liquid, base + 0.05, R * 0.93, twinReducedMotion() ? fillTo : from);
-    }
-    Twin.prevFill.set(t.id, t.fill > 0 ? fillTo : 0);
-    twinRegister(t, g, R * 1.35, base + H + 0.6);
+    const proxy = new THREE.Mesh(twinGeometries().box, twinMaterials().proxy);
+    b.matrix(hit.p, hit.s).decompose(proxy.position, proxy.quaternion, proxy.scale);
+    proxy.userData.twinId = item.id;
+    Twin.proxies.add(proxy);
+    Twin.objects.set(item.id, {
+        id: item.id, zone: item.zone, radius,
+        base: b.point(base),
+        top: b.point([base[0], top, base[2]])
+    });
 };
 
 const twinSetLiquid = (mesh, base, radius, h) => {
@@ -4062,120 +4409,270 @@ const twinSetLiquid = (mesh, base, radius, h) => {
     mesh.position.y = base + h / 2;
 };
 
-const twinBuildStack = (s, x, z) => {
-    const { THREE } = Twin.lib;
+const twinAddFill = (id, targets, fill) => {
+    const from = Twin.prevFill.has(id) ? Twin.prevFill.get(id) : fill;
+    const start = performance.now();
+    targets.forEach(t => {
+        Twin.fills.push({ ...t, from, to: fill, start });
+        twinSetLiquid(t.mesh, t.base, t.radius, Math.max(0.01, (twinReducedMotion() ? fill : from) * t.maxH));
+    });
+    Twin.prevFill.set(id, fill);
+};
+
+// --- Équipement de production : cuve 25 L ---
+const twinBuildCuve = (batch, e, x, z) => {
     const m = twinMaterials();
-    const cm = twinColorMats(s.couleur);
-    const geos = twinGeometries();
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-    twinPlaceBox(g, m.wood, 1.5, 0.16, 1.15, 0, 0.08, 0, { receive: true });
-    const n = s.total > 0 ? twinClamp(Math.ceil(s.total / s.crateSize), 1, 7) : 0;
-    for (let i = 0; i < n; i++) twinPlaceBox(g, cm.crate, 1.34, 0.36, 1.0, 0, 0.16 + 0.2 + i * 0.38, 0);
-    const top = 0.16 + n * 0.38;
-    if (n > 0) {
-        const h = 0.42 + (s.contenanceCl || 50) / 100 * 0.5;
-        [-0.42, 0, 0.42].forEach(bx => {
-            const bottle = twinMesh(geos.bottle, cm.glass, { cast: true });
-            bottle.scale.set(h * 0.95, h, h * 0.95);
-            bottle.position.set(bx, top + 0.01, 0);
-            g.add(bottle);
-            twinPlaceCyl(g, m.dark, h * 0.12, h * 0.08, bx, top + h + 0.03, 0, { cast: false });
-        });
+    const g = twinGeometries();
+    const cm = e.couleur ? twinColorMats(e.couleur) : null;
+    const b = twinBuilder(batch, Twin.dynamic, x, z);
+    const R = 0.62;
+    const H = 1.25;
+    const stand = 0.55;
+    const body0 = stand + 0.26 * H;
+    const rim = stand + H;
+    const planned = e.status === 'planned';
+    for (let k = 0; k < 4; k++) {
+        const a = Math.PI / 4 + k * Math.PI / 2;
+        const lx = Math.cos(a) * 0.48;
+        const lz = Math.sin(a) * 0.48;
+        b.part(g.cylLow, m.steel, [lx, (stand + 0.14) / 2, lz], [0.03, stand + 0.14, 0.03]);
+        b.part(g.cylLow, m.rubber, [lx, 0.015, lz], [0.06, 0.03, 0.06]);
+    }
+    b.part(g.torus, m.steel, [0, 0.22, 0], [0.48, 0.48, 0.6], { rx: Math.PI / 2 });
+    b.part(g.tankShell, m.steelShell, [0, stand, 0], [R, H, R]);
+    b.part(g.torus, m.steel, [0, rim + 0.01, 0], [R * 0.955, R * 0.955, 0.8], { rx: Math.PI / 2 });
+    [0.5, 0.78].forEach(f => b.part(g.torus, m.steelDark, [0, stand + H * f, 0], [R * 1.003, R * 1.003, 0.3], { rx: Math.PI / 2, cast: false }));
+    b.part(g.torus, cm ? cm.band : m.steelDark, [0, rim - 0.12, 0], [R * 1.008, R * 1.008, 0.7], { rx: Math.PI / 2, cast: false });
+    [-1, 1].forEach(s => {
+        b.part(g.box, m.steel, [s * (R + 0.07), rim - 0.24, 0], [0.04, 0.04, 0.26]);
+        [-0.11, 0.11].forEach(dz => b.part(g.box, m.steel, [s * (R + 0.035), rim - 0.24, dz], [0.07, 0.03, 0.03]));
+    });
+    b.part(g.cylLow, m.steel, [0, stand - 0.06, 0], [0.035, 0.14, 0.035]);
+    b.part(g.cylLow, m.steel, [0, stand - 0.13, 0.17], [0.03, 0.34, 0.03], { rx: Math.PI / 2 });
+    b.part(g.box, m.chrome, [0, stand - 0.13, 0.35], [0.09, 0.09, 0.07]);
+    b.part(g.box, m.valveRed, [0.05, stand - 0.075, 0.35], [0.2, 0.02, 0.035]);
+    const tubeX = 0.3;
+    const tubeZ = Math.sqrt(R * R - tubeX * tubeX) + 0.09;
+    const t0 = body0 + 0.04;
+    const t1 = rim - 0.2;
+    const tubeLen = t1 - t0;
+    b.part(g.cylLow, m.sightGlass, [tubeX, (t0 + t1) / 2, tubeZ], [0.032, tubeLen, 0.032]);
+    [t0, t1].forEach(ty => b.part(g.cylLow, m.steel, [tubeX, ty, tubeZ - 0.06], [0.018, 0.13, 0.018], { rx: Math.PI / 2 }));
+    for (let k = 1; k < 5; k++) b.part(g.box, m.dark, [tubeX + 0.048, t0 + tubeLen * k / 5, tubeZ], [0.03, 0.006, 0.006], { cast: false });
+    b.mesh(g.box, twinPlateMaterial(`cuve${e.numero}`, `CUVE ${e.numero}`, `${e.capacite} L`, Twin.palette.primary),
+        [-0.16, stand + H * 0.6, Math.sqrt(R * R - 0.16 * 0.16) + 0.012], [0.34, 0.17, 0.008], { cast: false, ry: -0.26 });
+    if (planned) {
+        const a = 1.42;
+        b.part(g.cyl, m.steel, [0, rim + 0.05 + Math.sin(a) * R, -R + Math.cos(a) * R], [R * 1.02, 0.025, R * 1.02], { rx: -a });
+        b.part(g.box, m.steelDark, [0, rim + 0.04, -R - 0.02], [0.3, 0.05, 0.05]);
+        b.part(g.ring, m.ringPlanned, [0, 0.012, 0], [0.98, 0.98, 1], { rx: -Math.PI / 2, cast: false, receive: false });
     } else {
-        const ghost = new THREE.LineSegments(geos.edges, m.ghost);
-        ghost.scale.set(1.34, 0.9, 1.0);
-        ghost.position.y = 0.16 + 0.45;
-        g.add(ghost);
-        twinPlaceBox(g, m.ghostFill, 1.34, 0.9, 1.0, 0, 0.16 + 0.45, 0, { cast: false });
+        b.part(g.cyl, m.steel, [0, rim + 0.035, 0], [R * 1.02, 0.025, R * 1.02]);
+        b.part(g.torus, m.chrome, [0, rim + 0.02, 0], [R * 1.025, R * 1.025, 0.5], { rx: Math.PI / 2, cast: false });
+        b.part(g.cylLow, m.steelDark, [0, rim + 0.08, 0], [0.06, 0.05, 0.06]);
     }
-    if (s.status === 'expired') twinRing(g, m.ringDanger, 1.08);
-    else if (s.status === 'rupture') twinRing(g, m.ringWarning, 1.08);
-    else if (s.status === 'warning') twinRing(g, m.ringWarningSoft, 1.08);
-    Twin.dynamic.add(g);
-    twinRegister(s, g, 1.08, Math.max(top + (n ? 1.0 : 1.2), 1.3));
+    if (planned && cm) {
+        const liquid = b.mesh(g.cyl, cm.liquid, [0, 0, 0], [1, 1, 1], { cast: false });
+        const tube = b.mesh(g.cylLow, cm.liquid, [tubeX, 0, tubeZ], [1, 1, 1], { cast: false });
+        twinAddFill(e.id, [
+            { mesh: liquid, base: body0 - 0.02, radius: R * 0.965, maxH: rim - 0.06 - body0 },
+            { mesh: tube, base: t0, radius: 0.022, maxH: tubeLen }
+        ], e.fill);
+    } else {
+        Twin.prevFill.set(e.id, 0);
+    }
+    twinRegister(e, b, { hit: { p: [0, (rim + 0.1) / 2, 0], s: [R * 2.3, rim + 0.1, R * 2.3] }, top: rim + 0.75, radius: 0.95 });
 };
 
-const twinBuildOrder = (o, x, z) => {
-    const { THREE } = Twin.lib;
+// --- Équipement de production : plaque à induction + casserole ---
+const twinBuildInduction = (batch, e, x, z) => {
     const m = twinMaterials();
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-    twinPlaceBox(g, m.wood, 1.5, 0.16, 1.2, 0, 0.08, 0, { receive: true });
+    const g = twinGeometries();
+    const Ht = TWIN_LAB.tableH;
+    const b = twinBuilder(batch, Twin.dynamic, x, z, 0, Ht);
+    const on = e.status === 'planned';
+    b.part(g.box, m.plastic, [0, 0.03, 0], [0.62, 0.06, 0.7]);
+    b.part(g.box, m.glassTop, [0, 0.065, -0.04], [0.6, 0.012, 0.58]);
+    b.part(g.torus, on ? m.inductionOn : m.inductionOff, [0, 0.073, -0.04], [0.25, 0.25, 0.25], { rx: Math.PI / 2, cast: false });
+    b.part(g.box, m.plasticLight, [0, 0.066, 0.29], [0.58, 0.01, 0.09]);
+    [-0.16, -0.06, 0.04].forEach(bx => b.part(g.cylLow, m.dark, [bx, 0.073, 0.29], [0.022, 0.008, 0.022], { cast: false }));
+    b.part(g.box, on ? m.ledOn : m.ledOff, [0.2, 0.073, 0.29], [0.07, 0.006, 0.02], { cast: false });
+    const r = e.capacite >= 9 ? 0.29 : 0.22;
+    const h = e.capacite >= 9 ? 0.3 : 0.24;
+    const py = 0.072;
+    b.part(g.pot, m.steelShell, [0, py, -0.04], [r, h, r]);
+    [-1, 1].forEach(s => {
+        b.part(g.box, m.dark, [s * (r + 0.1), py + h - 0.06, -0.04], [0.15, 0.028, 0.045]);
+        b.part(g.box, m.steel, [s * (r + 0.03), py + h - 0.06, -0.04], [0.05, 0.035, 0.05]);
+    });
+    if (on) {
+        b.part(g.cyl, m.steel, [0.1, py + h + 0.07, -0.08], [r * 1.03, 0.014, r * 1.03], { rz: 0.32 });
+        b.part(g.sphere, m.dark, [0.08, py + h + 0.105, -0.08], [0.03, 0.022, 0.03]);
+    } else {
+        b.part(g.cyl, m.steel, [0, py + h * 1.03 + 0.008, -0.04], [r * 1.04, 0.014, r * 1.04]);
+        b.part(g.sphere, m.dark, [0, py + h * 1.03 + 0.03, -0.04], [0.03, 0.022, 0.03]);
+    }
+    if (on && e.couleur) {
+        const liquid = b.mesh(g.cyl, twinColorMats(e.couleur).liquid, [0, 0, -0.04], [1, 1, 1], { cast: false });
+        twinAddFill(e.id, [{ mesh: liquid, base: Ht + py + 0.065, radius: r * 0.95, maxH: h * 0.86 }], e.fill);
+    } else {
+        Twin.prevFill.set(e.id, 0);
+    }
+    b.mesh(g.box, twinPlateMaterial(`plaque${e.numero}`, `PLAQUE ${e.numero}`, `Casserole ${e.capacite} L`, '#2A2A2A'),
+        [0, -0.07, 0.505], [0.44, 0.11, 0.006], { cast: false });
+    twinRegister(e, b, { hit: { p: [0, 0.22, -0.02], s: [0.75, 0.48, 0.78] }, top: 0.9, radius: 0.5 });
+};
+
+// --- Entrepôt : palette + casiers + bouteilles ---
+const twinBuildStack = (batch, s, x, z) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, x, z);
+    twinPallet(b, 0, 0);
+    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
+        twinFlat(b, g.plane, m.marking, sx * 0.95, 0.008, sz * 0.66, 0.06, 0.3);
+        twinFlat(b, g.plane, m.marking, sx * 0.82, 0.008, sz * 0.78, 0.3, 0.06);
+    }));
+    const n = s.total > 0 ? twinClamp(Math.ceil(s.total / s.crateSize), 1, 7) : 0;
+    for (let i = 0; i < n; i++) twinCrate(b, 0, 0.16 + i * 0.37, 0, s.couleur);
+    let top = 0.16 + n * 0.37;
+    if (n > 0) {
+        const rest = s.total % s.crateSize || s.crateSize;
+        twinCrateBottles(b, 0, 0.16 + (n - 1) * 0.37 + 0.03, 0, rest, s.crateSize, s.contenanceCl, s.couleur);
+        top = Math.max(top, 0.16 + (n - 1) * 0.37 + 0.03 + twinBottleHeight(s.contenanceCl));
+        b.part(g.box, m.label, [0, 0.355, 0.505], [0.46, 0.17, 0.006], { cast: false });
+        b.part(g.box, m.tint, [0, 0.425, 0.509], [0.46, 0.035, 0.006], { color: s.couleur, cast: false });
+        for (let k = 0; k < 7; k++) b.part(g.box, m.dark, [-0.12 + k * 0.035, 0.32, 0.509], [0.012, 0.06, 0.003], { cast: false });
+    } else {
+        const ghost = new Twin.lib.THREE.LineSegments(g.edges, m.ghost);
+        b.matrix([0, 0.61, 0], [1.34, 0.9, 1.0]).decompose(ghost.position, ghost.quaternion, ghost.scale);
+        Twin.dynamic.add(ghost);
+        b.part(g.box, m.ghostFill, [0, 0.61, 0], [1.34, 0.9, 1.0]);
+        top = 1.06;
+    }
+    const ring = { expired: m.ringDanger, rupture: m.ringWarning, warning: m.ringWarningSoft }[s.status];
+    if (ring) twinFlat(b, g.ring, ring, 0, 0.012, 0, 1.1, 1.1);
+    twinRegister(s, b, { hit: { p: [0, top / 2, 0], s: [1.5, top, 1.15] }, top: Math.max(top + 0.4, 1.3), radius: 1.08 });
+};
+
+// --- Expédition : palette de cartons étiquetés ---
+const twinBuildOrder = (batch, o, x, z) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, x, z);
+    twinPallet(b, 0, 0, { d: 1.2 });
     const layers = twinClamp(Math.ceil(o.totalBt / 48), 1, 5);
-    const mat = o.statut === 'produite' ? m.film : m.kraft;
-    for (let i = 0; i < layers; i++) twinPlaceBox(g, mat, 1.38, 0.4, 1.08, 0, 0.16 + 0.21 + i * 0.42, 0);
-    const top = 0.16 + layers * 0.42;
-    if (o.statut !== 'produite') twinPlaceBox(g, m.kraftTape, 0.2, 0.014, 1.09, 0, top + 0.004, 0, { cast: false });
-    if (o.late || o.urgent) {
-        twinPlaceCyl(g, m.steelDark, 0.035, 0.55, 0.56, top + 0.27, 0.42);
-        const beacon = twinMesh(twinGeometries().sphere, o.late ? m.beaconDanger : m.beaconWarning, { cast: false });
-        beacon.scale.setScalar(0.15);
-        beacon.position.set(0.56, top + 0.62, 0.42);
-        g.add(beacon);
-        twinRing(g, o.late ? m.ringDanger : m.ringWarning, 1.1);
-    } else if (o.statut === 'produite') {
-        twinRing(g, m.ringSuccess, 1.1);
+    const krafts = ['#C9A878', '#C2A070', '#D0B183'];
+    let k = 0;
+    for (let i = 0; i < layers; i++) {
+        [-0.35, 0.35].forEach(cx => [-0.28, 0.28].forEach(cz => {
+            b.part(g.box, m.tint, [cx, 0.16 + 0.2 + i * 0.4, cz], [0.68, 0.38, 0.54], { color: krafts[k++ % 3] });
+        }));
     }
-    Twin.dynamic.add(g);
-    twinRegister(o, g, 1.1, top + 0.9);
+    const top = 0.16 + layers * 0.4;
+    [-0.35, 0.35].forEach(cx => {
+        [-0.28, 0.28].forEach(cz => b.part(g.box, m.kraftTape, [cx, top - 0.017, cz], [0.08, 0.006, 0.55], { cast: false }));
+        b.part(g.box, m.label, [cx, top - 0.2, 0.552], [0.27, 0.18, 0.004], { cast: false });
+        b.part(g.box, m.tint, [cx, top - 0.125, 0.556], [0.27, 0.03, 0.003], { color: o.late ? '#C0392B' : o.urgent ? '#C8960A' : o.statut === 'produite' ? '#5C8A3C' : '#2E72B8', cast: false });
+        for (let s = 0; s < 6; s++) b.part(g.box, m.dark, [cx - 0.085 + s * 0.034, top - 0.235, 0.556], [0.012, 0.06, 0.003], { cast: false });
+    });
+    if (o.statut === 'produite') {
+        b.part(g.box, m.film, [0, 0.16 + layers * 0.2 + 0.01, 0], [1.43, layers * 0.4 + 0.03, 1.13]);
+        [-1, 1].forEach(sx => [-1, 1].forEach(sz => b.part(g.box, m.kraftTape, [sx * 0.7, 0.16 + layers * 0.2, sz * 0.555], [0.06, layers * 0.4, 0.06])));
+    }
+    if (o.late || o.urgent) {
+        b.part(g.cylLow, m.steelDark, [0.56, top + 0.27, 0.42], [0.035, 0.55, 0.035]);
+        b.part(g.sphere, o.late ? m.beaconDanger : m.beaconWarning, [0.56, top + 0.62, 0.42], [0.15, 0.15, 0.15], { cast: false });
+        twinFlat(b, g.ring, o.late ? m.ringDanger : m.ringWarning, 0, 0.012, 0, 1.12, 1.12);
+    } else if (o.statut === 'produite') {
+        twinFlat(b, g.ring, m.ringSuccess, 0, 0.012, 0, 1.12, 1.12);
+    }
+    twinRegister(o, b, { hit: { p: [0, top / 2, 0], s: [1.5, top, 1.2] }, top: top + 0.9, radius: 1.1 });
 };
 
-const twinBuildShelving = (x, z) => {
-    const { THREE } = Twin.lib;
+// --- Consommables : rayonnage + bacs ---
+const twinBuildShelving = (batch, x, z) => {
     const m = twinMaterials();
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-    [-3.1, 3.1].forEach(px => [-0.55, 0.55].forEach(pz => twinPlaceBox(g, m.rack, 0.08, 3.25, 0.08, px, 1.625, pz)));
-    [0.3, 1.38, 2.46].forEach(y => twinPlaceBox(g, m.steel, 6.3, 0.06, 1.18, 0, y, 0, { receive: true }));
-    Twin.dynamic.add(g);
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, x, z);
+    [-3.12, 3.12].forEach(px => {
+        [-0.56, 0.56].forEach(pz => {
+            b.part(g.box, m.rackBlue, [px, 1.65, pz], [0.08, 3.3, 0.08]);
+            b.part(g.box, m.steelDark, [px, 0.01, pz], [0.18, 0.02, 0.18]);
+        });
+        [0.7, 1.9, 3.1].forEach(y => b.part(g.box, m.rackBlue, [px, y, 0], [0.04, 0.04, 1.1]));
+        b.part(g.box, m.rackBlue, [px, 1.3, 0], [0.03, 1.25, 0.03], { rx: 0.72 });
+        b.part(g.box, m.rackBlue, [px, 2.5, 0], [0.03, 1.25, 0.03], { rx: -0.72 });
+    });
+    const levels = [0.3, 1.38, 2.46];
+    levels.forEach(y => {
+        [-0.56, 0.56].forEach(pz => b.part(g.box, m.rackOrange, [0, y - 0.05, pz], [6.2, 0.1, 0.06]));
+        b.part(g.box, m.steel, [0, y, 0], [6.16, 0.03, 1.08], { receive: true });
+    });
     const slots = [];
-    [0.33, 1.41, 2.49].forEach(y => [-2.3, -0.77, 0.77, 2.3].forEach(sx => slots.push([x + sx, y, z])));
+    levels.forEach(y => [-2.3, -0.77, 0.77, 2.3].forEach(sx => slots.push([x + sx, y + 0.015, z])));
     return slots;
 };
 
-const twinBuildBin = (b, x, y, z) => {
-    const { THREE } = Twin.lib;
+const twinBuildBin = (batch, item, x, y, z) => {
     const m = twinMaterials();
-    const g = new THREE.Group();
-    g.position.set(x, y, z);
-    const shell = twinPlaceBox(g, m.binShell, 1.36, 0.62, 0.95, 0, 0.31, 0, { cast: false });
-    shell.renderOrder = 2;
-    if (b.level > 0) {
-        const mat = { critical: m.stateDanger, low: m.stateWarning, ok: m.stateOk }[b.state] || m.stateUnknown;
-        const h = Math.max(0.04, 0.56 * b.level);
-        twinPlaceBox(g, mat, 1.26, h, 0.86, 0, h / 2 + 0.02, 0);
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, x, z, 0, y);
+    b.part(g.box, m.binPlastic, [0, 0.015, 0], [1.32, 0.03, 0.9]);
+    b.part(g.box, m.binPlastic, [0, 0.31, -0.45], [1.36, 0.62, 0.03]);
+    [-1, 1].forEach(s => b.part(g.box, m.binPlastic, [s * 0.665, 0.31, 0], [0.03, 0.62, 0.92]));
+    b.part(g.box, m.binPlastic, [0, 0.16, 0.45], [1.36, 0.32, 0.03]);
+    const stateColor = TWIN_STATE_COLORS[item.state] || TWIN_STATE_COLORS.unknown;
+    b.part(g.box, m.label, [0, 0.2, 0.468], [0.48, 0.15, 0.006], { cast: false });
+    b.part(g.box, m.tint, [0, 0.26, 0.472], [0.48, 0.03, 0.006], { color: stateColor, cast: false });
+    if (item.level > 0) {
+        const h = Math.max(0.06, 0.52 * item.level);
+        const family = getUnitFamily(item.unite);
+        if (family === 'mass') {
+            [-0.3, 0.3].forEach(sx => b.part(g.sack, m.stateTint, [sx, 0.03, 0], [0.31, h, 0.38], { color: stateColor }));
+        } else if (family === 'volume') {
+            [-0.3, 0.3].forEach(sx => {
+                b.part(g.box, m.stateTint, [sx, 0.03 + h / 2, 0], [0.5, h, 0.72], { color: stateColor });
+                b.part(g.cylLow, m.dark, [sx + 0.14, 0.03 + h + 0.03, -0.22], [0.05, 0.06, 0.05]);
+            });
+        } else {
+            b.part(g.box, m.stateTint, [0, 0.03 + h / 2, 0], [1.24, h, 0.82], { color: stateColor });
+            [-0.31, 0.31].forEach(sx => b.part(g.box, m.dark, [sx, 0.03 + h + 0.002, 0], [0.01, 0.004, 0.8], { cast: false }));
+        }
     }
-    if (b.state === 'critical') twinRing(g, m.ringDanger, 0.82, 0.01);
-    Twin.dynamic.add(g);
-    twinRegister(b, g, 0.82, 0.95);
+    if (item.state === 'critical') twinFlat(b, g.ring, m.ringDanger, 0, 0.01, 0, 0.82, 0.82);
+    twinRegister(item, b, { hit: { p: [0, 0.31, 0], s: [1.36, 0.62, 0.95] }, top: 0.95, radius: 0.82 });
 };
 
-const twinBuildFigure = (s, x, z, phase) => {
+// --- Équipe : personnage en tenue de production ---
+const twinBuildFigure = (batch, s, x, z, ry, phase) => {
     const { THREE } = Twin.lib;
     const m = twinMaterials();
-    const cm = twinColorMats(s.couleur);
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-    const body = new THREE.Group();
-    const torso = twinMesh(twinGeometries().capsule, s.present ? cm.figure : m.absent);
-    torso.position.y = 0.6;
-    const head = twinMesh(twinGeometries().sphere, s.present ? m.skin : m.absent);
-    head.scale.setScalar(0.22);
-    head.position.y = 1.4;
-    body.add(torso, head);
-    g.add(body);
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, x, z, ry);
     if (s.present) {
-        twinRing(g, m.ringSuccess, 0.55);
+        const holder = new THREE.Group();
+        holder.position.set(x, 0, z);
+        holder.rotation.y = ry;
+        const body = new THREE.Group();
+        holder.add(body);
+        const local = twinBuilder(batch, body, 0, 0);
+        const mats = { pants: m.pants, dark: m.dark, shirt: twinColorMats(s.couleur).figure, skin: m.skin, apron: m.apron, cap: m.apron };
+        twinFigureParts((geo, mat, p, sc, o) => local.mesh(geo, mat, p, sc, o), mats);
+        Twin.dynamic.add(holder);
         Twin.bobbers.push({ mesh: body, phase });
+        twinFlat(b, g.ring, m.ringSuccess, 0, 0.012, 0, 0.55, 0.55);
+    } else {
+        const ghost = { pants: m.absent, dark: m.absent, shirt: m.absent, skin: m.absent, apron: m.absent, cap: m.absent };
+        twinFigureParts((geo, mat, p, sc, o) => b.part(geo, mat, p, sc, o), ghost);
     }
-    Twin.dynamic.add(g);
-    twinRegister(s, g, 0.6, 1.95);
+    twinRegister(s, b, { hit: { p: [0, 0.9, 0], s: [0.65, 1.85, 0.5] }, top: 2.05, radius: 0.55 });
 };
 
 const twinSignature = (item) => {
     switch (item.kind) {
-        case 'tank': return `${item.litres}`;
+        case 'cuve':
+        case 'casserole': return `${item.arome}|${item.litres}`;
         case 'stack': return `${item.total}|${item.sellable}|${item.status}`;
         case 'order': return `${item.statut}|${item.totalBt}|${item.status}`;
         case 'bin': return `${item.quantite}|${item.state}`;
@@ -4185,7 +4682,9 @@ const twinSignature = (item) => {
 };
 
 const twinClearDynamic = () => {
+    Twin.dynamic.traverse(o => { if (o.isInstancedMesh) o.dispose(); });
     Twin.dynamic.clear();
+    Twin.proxies.clear();
     Twin.objects.clear();
     Twin.pickables = [];
     Twin.fills = [];
@@ -4194,12 +4693,15 @@ const twinClearDynamic = () => {
 
 const twinBuildDynamic = (model) => {
     twinClearDynamic();
+    const batch = twinBatch();
     const zone = (id) => TWIN_ZONES.find(z => z.id === id).bounds;
 
-    const tankPos = twinGridPositions(model.tanks.length, zone('production'), {
-        maxCols: model.tanks.length > 8 ? 6 : 4, spacing: [4, 4.4], margin: [1.8, 1.8]
+    let cuveIndex = 0;
+    let plateIndex = 0;
+    model.equipement.forEach(e => {
+        if (e.kind === 'cuve' && cuveIndex < 6) twinBuildCuve(batch, e, ...TWIN_LAB.cuve(cuveIndex++));
+        else if (e.kind === 'casserole' && plateIndex < 3) twinBuildInduction(batch, e, ...TWIN_LAB.plate(plateIndex++));
     });
-    model.tanks.forEach((t, i) => twinBuildTank(t, ...tankPos[i]));
 
     const [sx0, sz0, sx1, sz1] = zone('stock');
     const cols = Math.max(1, model.grid.cols.length);
@@ -4209,39 +4711,47 @@ const twinBuildDynamic = (model) => {
     const gridX0 = sx0 + 3.4 + stepX / 2;
     const gridZ0 = sz0 + 0.9 + stepZ / 2;
     Twin.stockLayout = { gridX0, gridZ0, stepX, stepZ, rows, cols };
-    model.stacks.forEach(s => twinBuildStack(s, gridX0 + s.col * stepX, gridZ0 + s.row * stepZ));
+    model.stacks.forEach(s => twinBuildStack(batch, s, gridX0 + s.col * stepX, gridZ0 + s.row * stepZ));
 
-    const shown = model.orders.slice(0, 15);
-    shown.forEach((o, i) => twinBuildOrder(o, 18.2 - (i % 5) * 3.1, 4.4 + Math.floor(i / 5) * 3.2));
+    model.orders.slice(0, 15).forEach((o, i) => twinBuildOrder(batch, o, 18.2 - (i % 5) * 3.1, 4.4 + Math.floor(i / 5) * 3.2));
 
     const unitCenters = [[-15.6, 4.4], [-7.4, 4.4], [-15.6, 8], [-7.4, 8], [-15.6, 11.6], [-7.4, 11.6]];
     const units = Math.min(unitCenters.length, Math.ceil(model.bins.length / 12));
     const slots = [];
-    for (let u = 0; u < units; u++) slots.push(...twinBuildShelving(...unitCenters[u]));
-    model.bins.slice(0, slots.length).forEach((b, i) => twinBuildBin(b, ...slots[i]));
+    for (let u = 0; u < units; u++) slots.push(...twinBuildShelving(batch, ...unitCenters[u]));
+    model.bins.slice(0, slots.length).forEach((bin, i) => twinBuildBin(batch, bin, ...slots[i]));
 
-    let present = 0;
+    let station = 0;
+    let overflow = 0;
     let absent = 0;
     model.staff.forEach((s, i) => {
-        if (s.present && present < 8) {
-            twinBuildFigure(s, present % 2 ? 0.85 : -0.85, 3.7 + Math.floor(present / 2) * 1.25, i);
-            present++;
-        } else if (!s.present && absent < 9) {
-            twinBuildFigure(s, (absent % 3 - 1) * 1.25, 9.3 + Math.floor(absent / 3) * 1.2, i);
+        if (s.present && station < TWIN_STATIONS.length) {
+            const st = TWIN_STATIONS[station++];
+            twinBuildFigure(batch, s, st.x, st.z, st.ry, i);
+        } else if (s.present && overflow < 6) {
+            twinBuildFigure(batch, s, overflow % 2 ? 0.7 : -0.7, 3.8 + Math.floor(overflow / 2) * 1.2, 0, i);
+            overflow++;
+        } else if (!s.present && absent < 8) {
+            twinBuildFigure(batch, s, -1.35 + (absent % 2), 8.4 + Math.floor(absent / 2) * 1.05, Math.PI / 2, i);
             absent++;
         }
     });
 
+    twinBatchFlush(batch, Twin.dynamic);
+    Twin.proxies.updateMatrixWorld(true);
+    Twin.pickables = Twin.proxies.children;
+
     const nextSignatures = new Map(model.items.map(i => [i.id, twinSignature(i)]));
     if (Twin.signatures.size) {
         nextSignatures.forEach((sig, id) => {
-            const prev = Twin.signatures.get(id);
-            if (prev !== sig) twinFlash(id);
+            if (Twin.signatures.get(id) !== sig) twinFlash(id);
         });
     }
     Twin.signatures = nextSignatures;
-    Twin.pulseMats = [twinMaterials().ringDanger, twinMaterials().ringWarning, twinMaterials().beaconDanger, twinMaterials().beaconWarning];
+    const mats = twinMaterials();
+    Twin.pulseMats = [mats.ringDanger, mats.ringWarning, mats.beaconDanger, mats.beaconWarning];
     Twin.pulsing = model.items.some(i => ['expired', 'rupture', 'late', 'urgent'].includes(i.status) || i.state === 'critical');
+    Twin.glowing = model.equipement.some(e => e.kind === 'casserole' && e.status === 'planned');
 };
 
 const twinFlash = (id) => {
@@ -4280,7 +4790,7 @@ const twinBuildLabels = (model) => {
     Twin.labels = [];
     const k = model.kpis;
     const zoneSub = {
-        production: k.aProduireL > 0 ? `${twinFmtLitres(k.aProduireL)} · ${k.cuves} cuve${k.cuves > 1 ? 's' : ''}` : 'Rien à produire',
+        production: k.aProduireL > 0 ? `${twinFmtLitres(k.aProduireL)} · ${k.postesOccupes}/${k.postesTotal} postes${k.enAttente ? ` · +${k.enAttente}` : ''}` : 'Rien à produire',
         stock: `${twinFmtInt(k.stockVendable)} bt vendables`,
         expedition: `${k.commandes} commande${k.commandes > 1 ? 's' : ''}${model.orders.length > 15 ? ` (+${model.orders.length - 15})` : ''}`,
         magasin: `${k.consoTotal} articles${k.consoCritiques ? ` · ${k.consoCritiques} sous seuil` : ''}`,
@@ -4305,7 +4815,7 @@ const twinBuildLabels = (model) => {
         const obj = Twin.objects.get(item.id);
         if (!obj) return;
         let badge = null;
-        if (item.kind === 'tank' && item.litres > 0) badge = [`${twinFmtLitres(item.litres)}`, 'info'];
+        if ((item.kind === 'cuve' || item.kind === 'casserole') && item.status === 'planned') badge = [`${twinFmtLitres(item.litres)}`, 'info'];
         else if (item.status === 'expired') badge = ['Expiré', 'danger'];
         else if (item.status === 'rupture') badge = [`−${twinFmtInt(item.manque)}`, 'warning'];
         else if (item.status === 'late') badge = ['Retard', 'danger'];
@@ -4512,7 +5022,7 @@ const twinAnimate = (now) => {
     if (Twin.fills.length) {
         Twin.fills = Twin.fills.filter(f => {
             const k = Math.min(1, (now - f.start) / 1100);
-            twinSetLiquid(f.mesh, f.base, f.radius, f.from + (f.to - f.from) * twinEase(k));
+            twinSetLiquid(f.mesh, f.base, f.radius, Math.max(0.01, (f.from + (f.to - f.from) * twinEase(k)) * f.maxH));
             return k < 1;
         });
         active = true;
@@ -4548,6 +5058,10 @@ const twinAnimate = (now) => {
             if (mat.emissiveIntensity !== undefined && mat.emissive) mat.emissiveIntensity = 0.3 + 1.1 * k;
             else mat.opacity = 0.35 + 0.6 * k;
         });
+        active = true;
+    }
+    if (Twin.glowing) {
+        twinMaterials().inductionOn.emissiveIntensity = 0.75 + 0.35 * Math.sin(now / 700);
         active = true;
     }
     if (Twin.bobbers.length) {
@@ -4729,7 +5243,7 @@ const twinRenderKpis = (model) => {
     if (!el) return;
     const k = model.kpis;
     const cards = [
-        { zone: 'production', label: 'À produire', value: twinFmtLitres(k.aProduireL), sub: k.aProduireBt ? `${twinFmtInt(k.aProduireBt)} bt · ${k.cuves} cuve${k.cuves > 1 ? 's' : ''}` : 'Stock suffisant', state: k.aProduireL > 0 ? 'warning' : 'ok' },
+        { zone: 'production', label: 'À produire', value: twinFmtLitres(k.aProduireL), sub: k.aProduireBt ? `${twinFmtInt(k.aProduireBt)} bt · ${k.postesOccupes}/${k.postesTotal} postes${k.enAttente ? ` · ${k.enAttente} en attente` : ''}` : 'Stock suffisant', state: k.aProduireL > 0 ? 'warning' : 'ok' },
         { zone: 'stock', label: 'Stock vendable', value: `${twinFmtInt(k.stockVendable)} bt`, sub: k.lotsExpires ? `${k.lotsExpires} lot${k.lotsExpires > 1 ? 's' : ''} expiré${k.lotsExpires > 1 ? 's' : ''}` : k.lotsWarning ? `${k.lotsWarning} DLC proche${k.lotsWarning > 1 ? 's' : ''}` : 'DLC en ordre', state: k.lotsExpires ? 'danger' : k.lotsWarning ? 'warning' : 'ok' },
         { zone: 'expedition', label: 'Commandes', value: twinFmtInt(k.commandes), sub: k.enRetard ? `${k.enRetard} en retard` : k.urgentes ? `${k.urgentes} urgente${k.urgentes > 1 ? 's' : ''}` : `${k.pretes} prête${k.pretes > 1 ? 's' : ''} à livrer`, state: k.enRetard ? 'danger' : k.urgentes ? 'warning' : 'ok' },
         { zone: 'magasin', label: 'Consommables', value: k.consoCritiques ? `${k.consoCritiques} sous seuil` : 'OK', sub: k.consoBas ? `${k.consoBas} bientôt épuisé${k.consoBas > 1 ? 's' : ''}` : `${k.consoTotal} articles suivis`, state: k.consoCritiques ? 'danger' : k.consoBas ? 'warning' : 'ok' },
@@ -4791,7 +5305,7 @@ const twinStatusChip = (item) => {
     const map = {
         expired: ['Lots expirés', 'danger'], rupture: ['Stock insuffisant', 'warning'], warning: ['DLC proche', 'warning'], ok: ['En ordre', 'success'],
         late: ['En retard', 'danger'], urgent: ['Urgente', 'warning'], ready: ['Prête à livrer', 'success'], waiting: ['En attente', 'info'],
-        active: ['Production requise', 'warning'], idle: ['Au repos', 'default'],
+        planned: ['Planifiée', 'info'], idle: ['Libre', 'default'],
         critical: ['Sous le seuil', 'danger'], low: ['Bientôt épuisé', 'warning'], unknown: ['Sans seuil', 'default'], empty: ['Épuisé', 'danger'],
         present: ['Présent', 'success'], absent: ['Absent', 'default']
     };
@@ -4800,23 +5314,31 @@ const twinStatusChip = (item) => {
 };
 
 const twinInspectorBody = (item) => {
-    if (item.kind === 'tank') {
+    if (item.kind === 'cuve' || item.kind === 'casserole') {
+        const prod = Twin.model?.production;
+        const pa = prod?.aromes.find(p => p.arome === item.arome);
+        const planned = item.status === 'planned';
         return `
             <div class="twin-insp-hero">
                 <div class="twin-gauge" aria-hidden="true"><div class="twin-gauge-fill" style="height:${Math.round(item.fill * 100)}%; background:${safeColor(item.couleur)}"></div></div>
                 <div>
-                    <div class="twin-insp-big">${escapeHtml(twinFmtLitres(item.litres))}</div>
-                    <div class="twin-insp-sub">${item.litres > 0 ? `à produire · ${item.cuves} cuve${item.cuves > 1 ? 's' : ''} de ${CONSTANTS.CUVE_MAX_L} L` : 'Le stock couvre les commandes actives'}</div>
+                    <div class="twin-insp-big">${planned ? `${escapeHtml(twinFmtLitres(item.litres))} <small>/ ${item.capacite} L</small>` : 'Libre'}</div>
+                    <div class="twin-insp-sub">${planned ? `${escapeHtml(item.arome)} · ${Math.round(item.fill * 100)} % de la capacité` : (item.kind === 'cuve' ? 'Cuve vide, couvercle fermé' : 'Plaque à induction éteinte')}</div>
                 </div>
             </div>
-            ${item.besoins.length ? `<h4 class="twin-insp-h">Bouteilles manquantes</h4>
-                <ul class="twin-rows">${item.besoins.map(b => `<li><span>${escapeHtml(b.format)}</span><strong>${twinFmtInt(b.bouteilles)} bt · ${escapeHtml(twinFmtLitres(b.litres))}</strong></li>`).join('')}</ul>` : ''}
-            ${item.ingredients.length ? `<h4 class="twin-insp-h">Ingrédients estimés</h4>
+            ${planned && item.ingredients.length ? `<h4 class="twin-insp-h">Ingrédients pour ce contenant</h4>
                 <ul class="twin-rows twin-rows--compact">${item.ingredients.map(i => `<li><span>${escapeHtml(i.nom)}</span><strong>${escapeHtml(String(i.quantite))} ${escapeHtml(displayUnit(i.unite))}</strong></li>`).join('')}</ul>` : ''}
-            ${item.litres > 0 && !item.hasRecette ? '<p class="twin-note">Aucune recette définie pour cet arôme (Paramètres › Recettes).</p>' : ''}
+            ${planned && !item.hasRecette ? '<p class="twin-note">Aucune recette définie pour cet arôme (Paramètres › Recettes).</p>' : ''}
+            ${pa ? `<h4 class="twin-insp-h">${escapeHtml(pa.arome)} · ${escapeHtml(twinFmtLitres(pa.litres))} au total</h4>
+                <ul class="twin-rows">${pa.besoins.map(b => `<li><span>${escapeHtml(b.format)}</span><strong>${twinFmtInt(b.bouteilles)} bt</strong></li>`).join('')}</ul>
+                <h4 class="twin-insp-h">Répartition</h4>
+                <ul class="twin-rows twin-rows--compact">${pa.recipients.map(r => `<li><span>${escapeHtml(r.poste || 'En attente')}</span><strong>${escapeHtml(twinFmtLitres(r.litres))} / ${r.capacite} L</strong></li>`).join('')}</ul>` : ''}
+            ${prod?.enAttente.length ? `<h4 class="twin-insp-h">Prochaine fournée (${prod.enAttente.length})</h4>
+                <ul class="twin-rows twin-rows--compact">${prod.enAttente.map(r => `<li><span><span class="twin-item-swatch" style="background:${safeColor(r.couleur)}"></span>${escapeHtml(r.arome)} · ${r.type === 'cuve' ? 'cuve' : 'casserole'} ${r.capacite} L</span><strong>${escapeHtml(twinFmtLitres(r.litres))}</strong></li>`).join('')}</ul>` : ''}
+            ${!planned && !prod?.aromes.length ? '<p class="twin-empty">Aucune production requise : le stock couvre les commandes actives.</p>' : ''}
             <div class="twin-insp-actions">
                 <a href="#production" class="btn btn-primary btn-sm">Planifier la production</a>
-                <button type="button" class="btn btn-secondary btn-sm" data-click="twin-goto-stock" data-arome="${escapeHtml(item.arome)}">Voir le stock</button>
+                ${item.arome ? `<button type="button" class="btn btn-secondary btn-sm" data-click="twin-goto-stock" data-arome="${escapeHtml(item.arome)}">Voir le stock</button>` : ''}
             </div>`;
     }
     if (item.kind === 'stack') {

@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.0**
+**v12.1**
 
 ## Adresse
 
@@ -117,6 +117,11 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.1
+
+- **🏭 Jumeau 3D fidèle à l'atelier** — La zone Production montre l'équipement réel : **4 cuves inox de 25 L** et **2 plaques à induction** avec une **casserole de 9 L** (plaque 1) et une **de 4 L** (plaque 2). La production à faire est répartie sur ces postes comme dans le planificateur (cuves de 25 L, casserole pour le reste), par ordre d'urgence ; ce qui ne rentre pas apparaît en « prochaine fournée ». Cuve planifiée = couvercle ouvert, liquide à la couleur de l'arôme et tube de niveau ; plaque planifiée = zone de chauffe allumée.
+- **Modèles plus détaillés** partout : plan de travail inox (évier, balance, bocaux, planche), poste d'embouteillage, palettes Europe, casiers avec bouteilles visibles, cartons étiquetés et filmés, rayonnage avec sacs/bidons/boîtes, employés en tablier et charlotte à leur poste, vestiaire avec casiers, quais et camion détaillés, reflets réalistes de l'inox.
 
 ### Nouveautés v12.0
 
