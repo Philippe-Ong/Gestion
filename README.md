@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.1**
+**v12.2**
 
 ## Adresse
 
@@ -117,6 +117,12 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.2
+
+- **📏 Jumeau 3D à l'échelle réelle (1 unité = 1 m)** — Corrige les incohérences de proportions : une cuve de 25 L mesure maintenant Ø 34 cm (rebord à 90 cm, à hauteur du plan de travail) au lieu de 1,24 m, les casseroles de 9 L et 4 L ont leur vraie taille, les employés mesurent 1,75 m. Palettes Europe 1,20 × 0,80 m chargées de 8 casiers ou cartons par couche, bouteilles de 20 à 31 cm selon le format, bacs de 60 × 40 cm sur des rayonnages de 2 m, atelier d'environ 24 × 16 m.
+- **Pièces corrigées** : les pieds des cuves touchent le fond conique (trépied), le film étirable épouse les cartons réellement présents, les gyrophares et fiches palette sont posés sur un carton ou casier existant, plus d'enseigne ni d'enrouleur encastrés dans un pilier, plus d'extincteur devant une fenêtre, essieu arrière du camion à sa place, étiquettes des plaques fixées au bandeau du plan de travail.
+- **Lisibilité** : en vue rapprochée, les étiquettes des objets lointains sont masquées ; la caméra de zoom sur un objet passe au-dessus des employés postés devant.
 
 ### Nouveautés v12.1
 
