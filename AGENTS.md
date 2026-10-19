@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v11.11
+**Current Version:** v11.12
 
 ## 1. Build, Lint, and Test Commands
 
@@ -209,6 +209,12 @@ Delivery note generation and export:
 - **Export dispatch (v11.9):** `exportPreparedBL(livraisonId, format)` is called with `'excel'` or `'pdf'` from the Préparer BL modal buttons (`data-click="export-bl-excel"` / `data-click="export-bl-pdf"`). Both save preparation data via `saveBLPreparation()` before exporting.
 - **Transactional delivery (v11.2) :** `deliverCommandeTransaction(commandeId, allocations)` exécute une transaction atomique Firestore multi-documents (commande + lots). Exige : connexion réseau (`navigator.onLine`), Firebase Auth, V11 ready, file d'attente vide pour les documents ciblés. En cas d'échec, aucun document n'est modifié.
 - **Guards :** livraison impossible sans connexion ; anti-double-clic sur le bouton Confirmer ; validation de l'intégrité des données distantes (statut, stock, DLV/DLC) avant écriture.
+
+### Traçabilité des bouteilles (v11.12)
+- **Mouvements de lots** dans `history` via `buildLotHistoryEntry` : `PROD-`, `VENTE-`, `SORTIE-` (motif), `AJUST-` (quantité signée), `RESTAURE-` (livraison annulée avec commande/client/BL). Type : `getHistoryType`, effet stock : `getHistoryDelta`.
+- **Tracer** (`show-lot-trace`, `data-id` = id du lot) → `getLotTraceData` ; **Rappel de lot** (`show-lot-rappel`, `data-num` = numLot) → `getLotRappelData`, export Excel, blocage (`lot.bloque`, exclu par `isLotSellable` et par la transaction de livraison).
+- **Numéros** : `formatLotNumero` / `normLotNumero` pour l'affichage et la comparaison ; `nextLotNumero` et `getNextBLNumero` ne réattribuent jamais un numéro déjà utilisé (commandes, BL, historique).
+- Détails et schémas : `SPEC.md` (Lots, Commandes, Livraisons, Historique, « Traçabilité des bouteilles »).
 
 ### Production Planner (`#production`)
 Advanced production planning with cuve management:

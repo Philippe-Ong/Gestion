@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.11
+**Version:** v11.12
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -175,11 +175,16 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   "quantite": "number",
   "dateProduction": "date",
   "dlv": "date (date limite de vente)",
-  "dlc": "date (date limite de consommation)"
+  "dlc": "date (date limite de consommation)",
+  "bloque": "boolean (optionnel, v11.12 — lot bloqué : invendable et non livrable)",
+  "motifBlocage": "string (optionnel, v11.12 — obligatoire à la saisie du blocage)",
+  "dateBlocage": "datetime ISO (optionnel, v11.12)"
 }
 ```
 
-**Règles d'attribution du `numLot` (v11.8) :** À l'ajout manuel d'un lot, le système attribue un `numLot` commun à tous les lots partageant le même `arome` et la même `dateProduction`, indépendamment du `format`. Chaque format reste un enregistrement de stock distinct (un `id` unique par lot). Si un lot existe déjà avec le même `arome`, `format` et `dateProduction`, sa `quantite` est incrémentée plutôt qu'un nouveau lot créé. Lorsqu'un nouveau format est ajouté sous un `numLot` existant, la DLV et la DLC du lot de référence sont toujours appliquées au nouveau lot ; si les dates saisies divergent, un avertissement en français est affiché.
+**Règles d'attribution du `numLot` (v11.8) :** À l'ajout manuel d'un lot, le système attribue un `numLot` commun à tous les lots partageant le même `arome` et la même `dateProduction`, indépendamment du `format`. Chaque format reste un enregistrement de stock distinct (un `id` unique par lot). Si un lot existe déjà avec le même `arome`, `format` et `dateProduction`, sa `quantite` est incrémentée plutôt qu'un nouveau lot créé. Lorsqu'un nouveau format est ajouté sous un `numLot` existant, la DLV et la DLC du lot de référence sont toujours appliquées au nouveau lot ; si les dates saisies divergent, un avertissement en français est affiché (corrigé en v11.12 : ce cas provoquait auparavant une erreur « Erreur lors de la création du lot »).
+
+**Numérotation sans réutilisation (v11.12) :** `nextLotNumero` prend le plus grand `numLot` numérique trouvé dans `lots`, `history`, `commandes[].lotsUtilises` et `livraisons[].lotsTraces` (`maxLotNumero`), puis ajoute 1. Un lot épuisé dont l'entrée `PROD-` a été supprimée ne voit donc jamais son numéro réattribué. Le `numLot` est celui imprimé sur les bouteilles : il ne change jamais lors d'une modification du lot. Affichage via `formatLotNumero` (6 chiffres, ou 6 derniers caractères d'un ancien id opaque) ; comparaison via `normLotNumero` (« 42 » = « 000042 »).
 
 ### Commandes
 ```json
@@ -191,9 +196,26 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   "statut": "en_attente|produite|livrée|annulee",
   "items": [
     { "aromeId": "uuid", "formatId": "uuid", "quantite": "number }
-  ]
+  ],
+  "lotsUtilises": [
+    {
+      "lotId": "string (id du lot)",
+      "numLot": "string",
+      "arome": "string",
+      "format": "string",
+      "dateProduction": "date",
+      "dlv": "date",
+      "dlc": "date",
+      "quantite": "number (agrégée par lot)"
+    }
+  ],
+  "dateLivraisonEffective": "datetime ISO (optionnel, v11.12 — horodatage de la transaction de livraison)",
+  "clientLivraison": "object (optionnel, v11.12 — instantané { societe, nom, adresse, npa, coord } du client au moment de la livraison)",
+  "numeroBL": "string (optionnel, v11.12 — n° du BL généré pour cette livraison)"
 }
 ```
+
+`lotsUtilises`, `dateLivraisonEffective` et `clientLivraison` sont écrits par `deliverCommandeTransaction` (transaction Firestore). `dateLivraison` reste la date **prévue**. `numeroBL` est mémorisé par `generateBL` / `getOrCreateBL` : un BL supprimé puis régénéré pour la même livraison reprend son numéro. La restauration d'une commande livrée vide `lotsUtilises` et retire `dateLivraisonEffective`, `clientLivraison` et `numeroBL` (ces informations sont conservées dans les entrées `RESTAURE-`).
 
 ### Livraisons / Bulletins de livraison
 ```json
@@ -211,10 +233,12 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   "notes": "string (optionnel, interne)",
   "dateDernierExport": "datetime (optionnel, legacy — v11.7: remplacé par la clé locale non synchronisée thecol_bl_export_dates)",
   "lotsTraces": [
-    { "lotId": "uuid", "arome": "string", "format": "string", "dlc": "date", "quantite": "number" }
+    { "lotId": "uuid", "numLot": "string", "arome": "string", "format": "string", "dlv": "date (v11.12)", "dlc": "date", "quantite": "number", "forceStockInsuffisant": "boolean (legacy, plus écrit)" }
   ]
 }
 ```
+
+`lotsTraces` est une copie de `commande.lotsUtilises` (`buildLotsTracesForCommande`), resynchronisée par `syncBLTraceFromCommande` à chaque préparation/export du BL. Les n° de lot ne sont pas imprimés sur le BL client (traçabilité interne). **Numéros de BL (v11.12) :** `getNextBLNumero` prend le maximum des `numeroBL` des BL existants, des commandes (`commande.numeroBL`) et de l'historique (entrées `RESTAURE-`) : un numéro de BL supprimé n'est jamais attribué à une autre livraison.
 
 **Export PDF des BL (`exportBLPDF`, v11.11 — pixel-perfect avec fonds A4 rasterisés) :**
 Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`). Depuis v11.11, le rendu est **pixel-perfect** : plutôt que d'assembler des médias individuels, l'export superpose des données variables (Calibri, positionnées en mm) sur deux fonds A4 rasterisés extraits du template Excel lui-même.
@@ -267,20 +291,33 @@ Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans biblioth�
 ### Historique de production
 ```json
 {
-  "id": "string (PROD-{timestamp}-{random} | VENTE-{timestamp}-{random} | RESTAURE-{timestamp}-{random})",
+  "id": "string ({PROD|VENTE|SORTIE|AJUST|RESTAURE}-{timestamp}-{random})",
   "lotId": "string (uuid or numeric)",
+  "numLot": "string",
   "arome": "string",
   "format": "string",
-  "quantity": "number",
+  "quantity": "number (positif ; signé pour AJUST-)",
   "productionDate": "date",
-  "dateAdded": "datetime (ISO string)"
+  "dlv": "date (optionnel, v11.12)",
+  "dlc": "date (optionnel, v11.12)",
+  "dateAdded": "datetime (ISO string)",
+  "motif": "string (optionnel, v11.12 — vente | echantillon | casse | destruction | correction)",
+  "clientId": "string (optionnel, v11.12 — VENTE-/SORTIE-/RESTAURE-)",
+  "clientNom": "string (optionnel, v11.12 — instantané du nom du client)",
+  "note": "string (optionnel, v11.12)",
+  "commandeId": "string (RESTAURE- uniquement, v11.12)",
+  "commandeNumero": "string (RESTAURE- uniquement, v11.12)",
+  "numeroBL": "string (RESTAURE- uniquement, v11.12 — n° du BL supprimé, jamais réattribué)",
+  "dateLivraison": "datetime ou date (RESTAURE- uniquement, v11.12 — date de la livraison annulée)"
 }
 ```
 
-Les entrées d'historique utilisent trois préfixes d'ID :
-- **`PROD-`** : créées lors de la production d'un lot (ajout de stock).
-- **`VENTE-`** : créées lors de la vente/livraison d'une commande (déduction de stock).
-- **`RESTAURE-`** : créées lors de la restauration d'une commande livrée (re-crédit des quantités aux lots). Ces entrées sont filtrées par `renderHistorique` et ne sont pas affichées dans la vue historique de production.
+Les entrées d'historique sont créées par `buildLotHistoryEntry(prefixe, lot, quantite, extra)`, qui copie `numLot`, `productionDate`, `dlv` et `dlc` du lot : ces données survivent à la suppression du lot épuisé. Le type est lu par `getHistoryType(entry)` et l'effet sur le stock par `getHistoryDelta(entry)`. Préfixes d'ID :
+- **`PROD-`** : production d'un lot (ajout de stock). Les anciennes entrées sans préfixe connu sont traitées comme des productions.
+- **`VENTE-`** : vente directe depuis le stock (`motif: vente`, client facultatif). Les livraisons de commandes ne créent **pas** d'entrée d'historique : elles sont tracées par `commande.lotsUtilises`.
+- **`SORTIE-`** (v11.12) : autre sortie motivée — dégustation/échantillon, casse/perte, destruction/péremption — depuis la modale « Sortie de stock » ou lors de la suppression d'un lot.
+- **`AJUST-`** (v11.12) : correction de quantité, `quantity` signée (modification de la quantité d'un lot, ou suppression d'un lot créé par erreur, `motif: correction`).
+- **`RESTAURE-`** : restauration d'une commande livrée (re-crédit des quantités aux lots). Depuis v11.12, l'entrée porte la commande, le client, le n° de BL et la date de la livraison annulée. Ces entrées restent masquées dans la timeline Historique (les livraisons n'y figurent pas non plus) mais apparaissent dans la traçabilité du lot et la fiche Rappel.
 
 ### Tâches du dashboard
 ```json
@@ -408,6 +445,33 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 1. Nouveau lot: arôme, format, quantité, dates
 2. Mise à jour statut automatique (expiré si DLC passée)
 3. Historique de production
+4. Recherche par n° de lot (« 42 » ou « 000042 »), arôme ou format ; les lots épuisés sont retrouvés via les commandes, les BL et l'historique
+5. Filtre « Bloqué » (affiché dès qu'un lot est bloqué)
+
+### Traçabilité des bouteilles (v11.12)
+
+**Parcours lot → client.** Production (`PROD-`) → stock (`lots`) → livraison (`commande.lotsUtilises`, avec `dateLivraisonEffective` et instantané `clientLivraison`) → BL (`livraison.lotsTraces`). Les sorties hors commande sont journalisées : vente directe (`VENTE-`), autres sorties motivées (`SORTIE-`), corrections (`AJUST-`), livraisons annulées (`RESTAURE-`).
+
+**Parcours client/BL → lots.** Détail d'une commande livrée (« Lots utilisés ») et détail d'un BL (« Traçabilité interne ») : chaque n° de lot ouvre sa traçabilité. La recherche des Livraisons et la recherche globale trouvent un BL par n° de lot.
+
+**Modale Tracer** (`data-click="show-lot-trace"`, `data-id` = id du lot — contrat inchangé) : `getLotTraceData(lotId)` assemble arôme, format, dates (DLV/DLC retrouvées même pour un lot épuisé), statut de blocage, livraisons clients (date effective, ou date prévue signalée « (prévue) »), ventes/sorties/ajustements avec client et note, livraisons annulées. Bilan : produit + ajustements − livré − ventes − sorties − stock = « Écart non expliqué » (affiché seulement s'il est non nul ; les retours n'entrent pas dans le bilan car la livraison annulée a déjà été retirée et le stock re-crédité).
+
+**Fiche Rappel de lot** (`data-click="show-lot-rappel"`, `data-num` = numLot), ouverte depuis la modale Tracer : regroupe tous les enregistrements portant le même `numLot` (tous formats, y compris épuisés) via `getLotRappelData(numLot)` :
+- synthèse (produit, livré, ventes et sorties, stock, nombre de destinataires connus) ;
+- tableau par format avec accès au détail ;
+- clients livrés avec adresse et coordonnées (client actuel, sinon instantané de livraison), commande, BL, format, quantité ;
+- ventes directes, sorties et ajustements (motif, client, note) ;
+- livraisons annulées ;
+- avertissement si le numéro est partagé par plusieurs arômes ou dates ;
+- **Exporter Excel** (`exportLotRappelExcel`) : classeur `rappel_lot_<n°>_<date>.xlsx` (feuilles Synthèse, Par format, Clients livrés, Sorties, Annulations).
+
+**Blocage d'un lot.** « Bloquer le stock restant » (motif obligatoire) pose `bloque`, `motifBlocage` et `dateBlocage` sur tous les enregistrements en stock du numéro. Un lot bloqué est exclu par `isLotSellable` (stock vendable, planificateur, modale de livraison, vente directe) et refusé par `deliverCommandeTransaction` (vérification sur la donnée distante). Seules les sorties hors vente (casse, destruction…) restent possibles. « Débloquer le stock » retire ces champs après confirmation.
+
+**Sortie de stock** (bouton « Sortie » sur une carte de lot, actions `sell-lot` / `vendre-lot`) : motif (vente directe, dégustation/échantillon, casse/perte, destruction/péremption), quantité, client facultatif, note. La vente n'est proposée que si le lot est vendable.
+
+**Suppression d'un lot** : la modale demande ce que deviennent les bouteilles restantes — destruction/péremption ou casse/perte (`SORTIE-`), ou lot créé par erreur (`AJUST-` négatif) — avant de supprimer l'enregistrement.
+
+**Modification d'un lot** : un changement de quantité crée un `AJUST-` signé (note facultative) ; un changement d'arôme, de format ou de dates est répercuté sur les entrées d'historique du lot. Le `numLot` ne change pas et les livraisons déjà effectuées gardent leurs informations d'origine.
 
 ## 6. Déploiement GitHub Pages
 

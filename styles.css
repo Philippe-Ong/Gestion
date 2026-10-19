@@ -3428,6 +3428,10 @@ input[type="checkbox"] {
 }
 .hist-entry-tag.tag-prod  { background: var(--bg-success); color: var(--success-dark); }
 .hist-entry-tag.tag-vente { background: var(--bg-danger);  color: var(--danger-dark); }
+.hist-entry-tag.tag-sortie { background: var(--bg-warning); color: var(--warning-dark); }
+.hist-entry-tag.tag-ajust  { background: var(--bg-info);    color: var(--info-dark); }
+.hist-entry.is-sortie { border-left-color: var(--warning); }
+.hist-entry.is-ajust  { border-left-color: var(--info); }
 .hist-entry-lot {
     background: none;
     border: none;
@@ -3627,6 +3631,31 @@ input[type="checkbox"] {
 .lot-card.lot-status-ok::before      { background: var(--success-light); }
 .lot-card.lot-status-warning::before { background: var(--warning); }
 .lot-card.lot-status-expired::before { background: var(--danger); }
+.lot-card.lot-bloque::before          { background: var(--danger-dark); }
+.lot-card-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Traçabilité / rappel de lot */
+.trace-alert {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    background: var(--bg-warning);
+    color: var(--warning-dark);
+    font-size: 13px;
+    line-height: 1.4;
+}
+.trace-alert-danger {
+    background: var(--bg-danger);
+    color: var(--danger-dark);
+}
+.trace-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
 
 .lot-card-header {
     display: flex;
