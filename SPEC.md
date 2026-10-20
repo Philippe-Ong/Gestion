@@ -366,6 +366,7 @@ Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaq
 - Tableau des lots avec filtres (arôme, format, statut)
 - Ajouter nouveau lot
 - Statut par lot (DLV d'abord, repli DLC pour les lots sans DLV) : OK, DLV proche (< 7 j), Invendable (DLV dépassée, DLC valide), Expiré (DLC dépassée)
+- Durée de vie (`lotShelfLifeHtml`, aussi dans l'inspecteur du jumeau) : phrase « Vendable encore N j » / « DLV dépassée de N j » / « DLC dépassée de N j » et frise Prod. → DLV → DLC (vert : vente, jaune : DLV proche, gris puis rouge après la DLV) avec un repère « aujourd'hui »
 - Bouton « Sortie » : le motif « vente » n'est proposé que si le lot est vendable (ni bloqué, ni DLV/DLC dépassée)
 
 ### 3.3 Pointage (Heures)

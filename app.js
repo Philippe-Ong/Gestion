@@ -2724,6 +2724,63 @@ const getLotStatusLabel = (status, lot) => ({
     ok: 'OK'
 }[status] || status);
 
+// Durée de vie d'un lot pour l'affichage : phrase « Vendable encore N j » et frise
+// Prod. → DLV → DLC (en % de la durée totale). La limite de vente est la DLV, ou la
+// DLC pour les lots legacy sans DLV. `bar` vaut null si les dates ne permettent pas
+// de tracer la frise (production absente, dates incohérentes).
+const getLotShelfLife = (lot, referenceDate = new Date()) => {
+    const DAY = 86400000;
+    const status = getLotStatus(lot, referenceDate);
+    const now = dateOnly(referenceDate).getTime();
+    const dlc = dateOnly(lot?.dlc).getTime();
+    const saleLimit = lot?.dlv ? dateOnly(lot.dlv).getTime() : dlc;
+    const daysTo = (t) => Math.round((t - now) / DAY);
+
+    let text = '';
+    if (status === 'expired') text = Number.isNaN(dlc) ? 'DLC absente' : `DLC dépassée de ${-daysTo(dlc)} j`;
+    else if (status === 'invendable') text = Number.isNaN(saleLimit) ? 'DLV invalide' : `DLV dépassée de ${-daysTo(saleLimit)} j`;
+    else {
+        const d = daysTo(saleLimit);
+        text = d === 0 ? 'Dernier jour de vente' : `Vendable encore ${d} j`;
+    }
+
+    const prod = dateOnly(lot?.dateProduction).getTime();
+    let bar = null;
+    if (![prod, dlc, saleLimit].some(Number.isNaN) && prod < dlc && prod <= saleLimit && saleLimit <= dlc) {
+        const pct = (t) => Math.round(Math.min(100, Math.max(0, (t - prod) / (dlc - prod) * 100)) * 10) / 10;
+        const warnDays = lot.dlv ? CONSTANTS.DLV_WARN_DAYS : CONSTANTS.STOCK_WARN_DAYS;
+        const warnStart = pct(Math.max(prod, saleLimit - warnDays * DAY));
+        const saleEnd = pct(saleLimit);
+        // Largeurs des segments (vente, DLV proche, après la limite de vente) et repère du jour
+        bar = {
+            sale: warnStart,
+            warn: Math.round((saleEnd - warnStart) * 10) / 10,
+            after: Math.round((100 - saleEnd) * 10) / 10,
+            today: pct(now),
+            pastSale: now > saleLimit
+        };
+    }
+    return { status, text, bar };
+};
+
+const lotShelfLifeHtml = (lot, referenceDate = new Date()) => {
+    const { status, text, bar } = getLotShelfLife(lot, referenceDate);
+    const dates = [
+        lot?.dateProduction ? `production ${formatDate(lot.dateProduction)}` : '',
+        lot?.dlv ? `DLV ${formatDate(lot.dlv)}` : '',
+        lot?.dlc ? `DLC ${formatDate(lot.dlc)}` : ''
+    ].filter(Boolean).join(', ');
+    return `<div class="shelf-life shelf-life--${escapeHtml(status)}">
+        <div class="shelf-life-text">${escapeHtml(text)}</div>
+        ${bar ? `<div class="shelf-life-bar" role="img" aria-label="${escapeHtml(`${text} — ${dates}`)}">
+            <span class="shelf-life-seg shelf-life-seg--sale" style="width:${safeNumAttr(bar.sale)}%"></span>
+            <span class="shelf-life-seg shelf-life-seg--warn" style="width:${safeNumAttr(bar.warn)}%"></span>
+            <span class="shelf-life-seg shelf-life-seg--after${bar.pastSale ? ' is-past' : ''}" style="width:${safeNumAttr(bar.after)}%"></span>
+            <span class="shelf-life-today" style="left:${safeNumAttr(bar.today)}%" title="Aujourd'hui"></span>
+        </div>` : ''}
+    </div>`;
+};
+
 // Toast Notifications
 const showToast = (message, type = 'success') => {
     const container = document.getElementById('toastContainer');
@@ -5577,6 +5634,7 @@ const twinInspectorBody = (item) => {
                     </div>
                     ${l.bloque ? '<span class="badge badge-danger">Bloqué</span>' : ''}
                     <span class="badge badge-${l.status === 'expired' || l.status === 'invendable' ? 'danger' : l.status === 'warning' ? 'warning' : 'success'}">${escapeHtml(getLotStatusLabel(l.status, l))}</span>
+                    ${lotShelfLifeHtml(l)}
                     <div class="twin-lot-actions">
                         <button type="button" class="btn btn-sm btn-primary" data-click="sell-lot" data-id="${escapeHtml(l.id)}" title="Vente directe, dégustation, casse ou destruction">Sortie</button>
                         <button type="button" class="btn btn-sm btn-secondary" data-click="edit-lot" data-id="${escapeHtml(l.id)}">Modifier</button>
@@ -6272,6 +6330,7 @@ const renderStock = () => {
                     <span class="lot-card-aroma-name">${escapeHtml(lot.arome || '?')}</span>
                     <span class="lot-card-aroma-format">• ${escapeHtml(lot.format || '?')}</span>
                 </div>
+                ${lotShelfLifeHtml(lot, today)}
                 <div class="lot-card-meta">
                     <span><strong class="lot-card-qty">${escapeHtml(String(lot.quantite))}</strong> bt</span>
                     <span>Prod. <strong>${formatDate(lot.dateProduction)}</strong></span>

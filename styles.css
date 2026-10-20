@@ -3703,6 +3703,48 @@ input[type="checkbox"] {
     color: var(--text);
     font-weight: 700;
 }
+
+/* Durée de vie d'un lot : phrase + frise Prod. → DLV → DLC */
+.shelf-life {
+    margin: 2px 0 10px;
+}
+.twin-lot .shelf-life {
+    grid-column: 1 / -1;
+    margin: 0;
+}
+.shelf-life-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--success-dark);
+    margin-bottom: 6px;
+}
+.shelf-life--warning .shelf-life-text { color: var(--warning-dark); }
+.shelf-life--invendable .shelf-life-text,
+.shelf-life--expired .shelf-life-text { color: var(--danger); }
+.shelf-life-bar {
+    position: relative;
+    display: flex;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border-light);
+}
+.shelf-life-seg { height: 100%; }
+.shelf-life-seg:first-child { border-radius: 3px 0 0 3px; }
+.shelf-life-seg:last-of-type { border-radius: 0 3px 3px 0; }
+.shelf-life-seg--sale  { background: var(--success-light); }
+.shelf-life-seg--warn  { background: var(--warning-light); }
+.shelf-life-seg--after { background: var(--bg-neutral); }
+.shelf-life-seg--after.is-past { background: var(--bg-danger); }
+.shelf-life-today {
+    position: absolute;
+    top: -4px;
+    width: 3px;
+    height: 14px;
+    margin-left: -1.5px;
+    border-radius: 2px;
+    background: var(--text);
+    box-shadow: 0 0 0 2px var(--white);
+}
 .lot-card-actions {
     display: flex;
     gap: 8px;
