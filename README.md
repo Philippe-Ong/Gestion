@@ -61,7 +61,7 @@ Application de gestion pour votre entreprise de thé froid.
   - Ingrédients de recette: **+1.5%** (perte de production)
   - Eau: **ignorée** (pas de déduction)
   - Bouteilles vides: **1 pour 1** selon le format
-  - Capsules/Bouchons: **+7.5%** (arrondi supérieur)
+  - Capsules/Bouchons: **+5%** (arrondi supérieur)
 - Si stock inventaire insuffisant: warning affiché, la production continue
 - Matching intelligent des bouteilles vides (alias 25cl ↔ 0.25l ↔ 250ml)
 

@@ -71,7 +71,7 @@ Top-of-file utilities to prefer over ad-hoc patterns:
 - `getItems(cmd)` — null-safe `cmd.items || []` accessor
 - `getActive(table)` — equivalent to `DB.get(table).filter(r => r.actif)`
 - `parseHHMM(str)` — parse `"HH:MM"` to minutes-since-midnight, returns `null` if invalid
-- `CONSTANTS` — central object holding production buffers (`PRODUCTION_LOSS`, `CAPSULE_LOSS`), `CUVE_MAX_L`, `STOCK_WARN_DAYS` (seuil DLC des lots legacy sans DLV), `DLV_WARN_DAYS` (seuil « DLV proche », 7 j), and the workshop equipment shown by the 3D twin (`ATELIER_CUVES` = 4, `ATELIER_CASSEROLES_L` = [9, 4])
+- `CONSTANTS` — central object holding production buffers (`PRODUCTION_LOSS`, `BOUCHON_MARGIN`), `CUVE_MAX_L`, `STOCK_WARN_DAYS` (seuil DLC des lots legacy sans DLV), `DLV_WARN_DAYS` (seuil « DLV proche », 7 j), and the workshop equipment shown by the 3D twin (`ATELIER_CUVES` = 4, `ATELIER_CASSEROLES_L` = [9, 4])
 
 ### Data Schemas
 
