@@ -77,7 +77,7 @@ Defined in `SPEC.md`. Key entities: employees, aromes, formats, recettes (recipe
 - IDs are generated with `generateId()` (uses `crypto.randomUUID()` when available, with a timestamp+random fallback)
 - Dates formatted with Swiss French locale (`fr-CH`)
 - Production planner aggregates orders by date range, calculates litres per arome, then applies recipes to compute required ingredients
-- Stock statuses come from `getLotStatus(lot)`, aligned on `isLotSellable`: DLV first (fallback DLC for legacy lots without DLV) — OK, DLV proche (< `DLV_WARN_DAYS`), Invendable (DLV passed, DLC valid), Expiré (DLC passed). The « Vendre » button only shows when `isLotSellable` is true.
+- Stock statuses come from `getLotStatus(lot)`, aligned on `isLotSellable`: DLV first (fallback DLC for legacy lots without DLV) — OK, DLV proche (< `DLV_WARN_DAYS`), Invendable (DLV passed, DLC valid), Expiré (DLC passed). A blocked lot (`lot.bloque`) gets an extra « Bloqué » badge. The « Sortie » button is always shown; its modal only offers the « vente » reason when `isLotSellable` is true.
 - Stock available for an order is evaluated at its delivery date: `createStockPool` serves orders by ascending `dateLivraison` and consumes lots by ascending DLV, counting only lots still sellable on that date (dashboard « Bouteilles à produire », auto production planner, « ✓ Stock »)
 - The Inventaire tab tracks consumables (consommables) and equipment (équipement) with stock alert thresholds
 
