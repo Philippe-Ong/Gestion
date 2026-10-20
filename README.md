@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.11**
+**v12.2**
 
 ## Adresse
 
@@ -117,6 +117,31 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.2
+
+- **📏 Jumeau 3D à l'échelle réelle (1 unité = 1 m)** — Corrige les incohérences de proportions : une cuve de 25 L mesure maintenant Ø 34 cm (rebord à 90 cm, à hauteur du plan de travail) au lieu de 1,24 m, les casseroles de 9 L et 4 L ont leur vraie taille, les employés mesurent 1,75 m. Palettes Europe 1,20 × 0,80 m chargées de 8 casiers ou cartons par couche, bouteilles de 20 à 31 cm selon le format, bacs de 60 × 40 cm sur des rayonnages de 2 m, atelier d'environ 24 × 16 m.
+- **Pièces corrigées** : les pieds des cuves touchent le fond conique (trépied), le film étirable épouse les cartons réellement présents, les gyrophares et fiches palette sont posés sur un carton ou casier existant, plus d'enseigne ni d'enrouleur encastrés dans un pilier, plus d'extincteur devant une fenêtre, essieu arrière du camion à sa place, étiquettes des plaques fixées au bandeau du plan de travail.
+- **Lisibilité** : en vue rapprochée, les étiquettes des objets lointains sont masquées ; la caméra de zoom sur un objet passe au-dessus des employés postés devant.
+
+### Nouveautés v12.1
+
+- **🏭 Jumeau 3D fidèle à l'atelier** — La zone Production montre l'équipement réel : **4 cuves inox de 25 L** et **2 plaques à induction** avec une **casserole de 9 L** (plaque 1) et une **de 4 L** (plaque 2). La production à faire est répartie sur ces postes comme dans le planificateur (cuves de 25 L, casserole pour le reste), par ordre d'urgence ; ce qui ne rentre pas apparaît en « prochaine fournée ». Cuve planifiée = couvercle ouvert, liquide à la couleur de l'arôme et tube de niveau ; plaque planifiée = zone de chauffe allumée.
+- **Modèles plus détaillés** partout : plan de travail inox (évier, balance, bocaux, planche), poste d'embouteillage, palettes Europe, casiers avec bouteilles visibles, cartons étiquetés et filmés, rayonnage avec sacs/bidons/boîtes, employés en tablier et charlotte à leur poste, vestiaire avec casiers, quais et camion détaillés, reflets réalistes de l'inox.
+
+### Nouveautés v12.0
+
+- **🏭 Jumeau numérique 3D (`#jumeau`, nouvelle page d'accueil)** — L'atelier est reconstruit en 3D à partir des données synchronisées, et se met à jour en temps réel (flash sur les objets modifiés depuis un autre appareil) :
+  - **Production** : une cuve par arôme, remplie des litres restant à produire (commandes actives − stock vendable).
+  - **Entrepôt** : une palette par arôme × format, hauteur selon le stock ; anneau rouge pulsé si lots expirés, orange si stock insuffisant, palette fantôme en cas de rupture.
+  - **Expédition** : une palette par commande active (carton = en attente, film vert = produite), gyrophare sur les commandes urgentes (≤ 3 j) ou en retard.
+  - **Consommables** : bacs sur étagères, niveau et couleur selon le seuil d'alerte.
+  - **Équipe** : personnages présents (pointage ouvert) ou absents.
+- **Interactions** : survol = info-bulle, clic = inspecteur avec actions directes (vendre/modifier un lot, marquer produite, livrer, ±1/±10 sur un consommable, pointer arrivée/départ), double-clic = zoom sur l'objet, puces de zones et indicateurs cliquables, panneau « Alertes / Objets » navigable au clavier, rotation automatique et plein écran (affichage mural).
+- **⚡ Palette de commandes (Ctrl/⌘ + K)** — navigation, actions (nouvelle commande, nouveau lot, pointage…), recherche dans l'atelier 3D et dans les données.
+- **⌨️ Raccourcis clavier** — `?` aide, `/` recherche, `G` puis une lettre pour changer de page, `0–5` / `←` `→` / `R` / `F` / `Échap` dans le jumeau.
+- **Transitions de page** discrètes (désactivées si « réduire les animations » est actif).
+- **Three.js 0.185.1** embarqué dans `vendor/three/` (chargé à la demande, fonctionne hors ligne dans l'APK) ; repli automatique sur la liste des objets si WebGL est indisponible.
 
 ### Nouveautés v11.8
 
