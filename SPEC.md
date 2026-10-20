@@ -303,7 +303,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - Paramètres (employés, aromes, recettes, clients)
 
 ### 3.1 Dashboard
-- Résumé du stock (total bouteilles, expiré, < 1 mois)
+- Résumé du stock (bouteilles vendables ; alerte : expirés, invendables — DLV dépassée —, DLV proches)
 - Commandes en attente
 - Heures aujourd'hui
 - Raccourcis rapides
@@ -311,7 +311,8 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 ### 3.2 Gestion du Stock
 - Tableau des lots avec filtres (arôme, format, statut)
 - Ajouter nouveau lot
-- Statistiques: total, expirés, < 1 mois
+- Statut par lot (DLV d'abord, repli DLC pour les lots sans DLV) : OK, DLV proche (< 7 j), Invendable (DLV dépassée, DLC valide), Expiré (DLC dépassée)
+- Bouton « Vendre » affiché seulement si le lot est vendable
 
 ### 3.3 Pointage (Heures)
 - Vue calendrier/semaine
@@ -406,7 +407,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 
 ### Stock
 1. Nouveau lot: arôme, format, quantité, dates
-2. Mise à jour statut automatique (expiré si DLC passée)
+2. Mise à jour statut automatique (invendable si DLV passée, expiré si DLC passée)
 3. Historique de production
 
 ## 6. Déploiement GitHub Pages

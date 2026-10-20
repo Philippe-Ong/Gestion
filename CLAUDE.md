@@ -66,7 +66,7 @@ Top-of-file utilities to prefer over ad-hoc patterns:
 - `getItems(cmd)` — null-safe `cmd.items || []` accessor
 - `getActive(table)` — equivalent to `DB.get(table).filter(r => r.actif)`
 - `parseHHMM(str)` — parse `"HH:MM"` to minutes-since-midnight, returns `null` if invalid
-- `CONSTANTS` — central object holding production buffers (`PRODUCTION_LOSS`, `CAPSULE_LOSS`), `CUVE_MAX_L`, `STOCK_WARN_DAYS`
+- `CONSTANTS` — central object holding production buffers (`PRODUCTION_LOSS`, `CAPSULE_LOSS`), `CUVE_MAX_L`, `STOCK_WARN_DAYS` (seuil DLC des lots legacy sans DLV), `DLV_WARN_DAYS` (seuil « DLV proche », 7 j)
 
 ### Data Schemas
 
@@ -77,7 +77,8 @@ Defined in `SPEC.md`. Key entities: employees, aromes, formats, recettes (recipe
 - IDs are generated with `generateId()` (uses `crypto.randomUUID()` when available, with a timestamp+random fallback)
 - Dates formatted with Swiss French locale (`fr-CH`)
 - Production planner aggregates orders by date range, calculates litres per arome, then applies recipes to compute required ingredients
-- Stock statuses are auto-computed from DLC dates: OK, < 1 mois, Expiré
+- Stock statuses come from `getLotStatus(lot)`, aligned on `isLotSellable`: DLV first (fallback DLC for legacy lots without DLV) — OK, DLV proche (< `DLV_WARN_DAYS`), Invendable (DLV passed, DLC valid), Expiré (DLC passed). The « Vendre » button only shows when `isLotSellable` is true.
+- Stock available for an order is evaluated at its delivery date: `createStockPool` serves orders by ascending `dateLivraison` and consumes lots by ascending DLV, counting only lots still sellable on that date (dashboard « Bouteilles à produire », auto production planner, « ✓ Stock »)
 - The Inventaire tab tracks consumables (consommables) and equipment (équipement) with stock alert thresholds
 
 ## Mobile Build (Capacitor)

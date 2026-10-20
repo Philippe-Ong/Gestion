@@ -3627,6 +3627,7 @@ input[type="checkbox"] {
 .lot-card.lot-status-ok::before      { background: var(--success-light); }
 .lot-card.lot-status-warning::before { background: var(--warning); }
 .lot-card.lot-status-expired::before { background: var(--danger); }
+.lot-card.lot-status-invendable::before { background: var(--danger); }
 
 .lot-card-header {
     display: flex;

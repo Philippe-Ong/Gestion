@@ -20,7 +20,7 @@ Application de gestion pour votre entreprise de thé froid.
 ### Stock
 - Gestion des lots de production (arôme, format, quantité)
 - Suivi des dates (production, DLV, DLC)
-- Statut automatique: OK, < 1 mois, Expiré
+- Statut automatique: OK, DLV proche, Invendable (DLV dépassée), Expiré (DLC dépassée)
 - Vente de bouteilles (déstockage)
 - Historique de production
 - Résumé du stock vendable par arôme/format

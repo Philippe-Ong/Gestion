@@ -6,7 +6,8 @@ const CONSTANTS = {
     CAPSULE_LOSS: 1.075,       // +7.5% loss buffer for capsules
     BOUCHON_MARGIN: 1.05,      // +5% margin on caps shown in the production planner
     CUVE_MAX_L: 25,            // max litres per production cuve
-    STOCK_WARN_DAYS: 30        // DLC warning threshold in days
+    STOCK_WARN_DAYS: 30,       // DLC warning threshold in days (lots legacy sans DLV)
+    DLV_WARN_DAYS: 7           // DLV warning threshold in days (« DLV proche »)
 };
 
 // Utility Functions
@@ -1006,14 +1007,51 @@ CLICK_HANDLERS['export-clients-excel'] = () => exportClientsExcel();
 CLICK_HANDLERS['trigger-import-clients'] = () => document.getElementById('importClientsFile').click();
 CLICK_HANDLERS['reset-clients'] = () => resetClients();
 
-const calculateAvailableStock = (lots, referenceDate = new Date()) => {
-    const stock = {};
-    lots.filter(lot => isLotSellable(lot, referenceDate)).forEach(lot => {
-        const key = `${lot.arome}-${lot.format}`;
-        if (!stock[key]) stock[key] = 0;
-        stock[key] += lot.quantite || 0;
+// Trie les commandes par date de livraison croissante (dates invalides en dernier,
+// ordre d'origine en cas d'égalité). Renvoie des paires { commande, index }.
+const sortCommandesByDateLivraison = (commandes) => (commandes || [])
+    .map((commande, index) => ({ commande, index }))
+    .sort((a, b) => {
+        const aDate = dateOnly(a.commande.dateLivraison).getTime();
+        const bDate = dateOnly(b.commande.dateLivraison).getTime();
+        const aSort = Number.isNaN(aDate) ? Number.POSITIVE_INFINITY : aDate;
+        const bSort = Number.isNaN(bDate) ? Number.POSITIVE_INFINITY : bDate;
+        return aSort - bSort || a.index - b.index;
     });
-    return stock;
+
+// Réserve de stock vendable consommée lot par lot, par DLV croissante (repli DLC).
+// Chaque commande ne reçoit que des lots encore vendables à SA date de livraison
+// (une date passée ou invalide vaut aujourd'hui) : traiter les commandes par date
+// de livraison croissante évite de compter un lot qui expirera avant la livraison.
+const createStockPool = (lots, referenceDate = new Date()) => {
+    const today = dateOnly(referenceDate);
+    const saleLimit = (lot) => {
+        const t = dateOnly(lot.dlv || lot.dlc).getTime();
+        return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+    };
+    const entries = (lots || [])
+        .filter(lot => isLotSellable(lot, today) && (lot.quantite || 0) > 0)
+        .map(lot => ({ lot, key: `${lot.arome}-${lot.format}`, reste: lot.quantite || 0 }))
+        .sort((a, b) => saleLimit(a.lot) - saleLimit(b.lot));
+    const eligible = (key, dateLivraison) => {
+        const d = dateOnly(dateLivraison);
+        const ref = Number.isNaN(d.getTime()) || d < today ? today : d;
+        return entries.filter(e => e.key === key && e.reste > 0 && isLotSellable(e.lot, ref));
+    };
+    return {
+        available: (key, dateLivraison) => eligible(key, dateLivraison).reduce((sum, e) => sum + e.reste, 0),
+        // Consomme jusqu'à `qty` bouteilles ; renvoie la quantité effectivement couverte.
+        take: (key, qty, dateLivraison) => {
+            let reste = qty;
+            for (const e of eligible(key, dateLivraison)) {
+                if (reste <= 0) break;
+                const used = Math.min(e.reste, reste);
+                e.reste -= used;
+                reste -= used;
+            }
+            return qty - reste;
+        }
+    };
 };
 
 const getLotNumero = (lot) => String(lot?.numLot || lot?.id || '');
@@ -2578,17 +2616,31 @@ const isLotSellable = (lot, referenceDate = new Date()) => {
     return !Number.isNaN(dlcDate.getTime()) && dlcDate >= refDate;
 };
 
-const getStatus = (dlc) => {
-    const now = dateOnly(new Date());
-    const dlcDate = dateOnly(dlc);
-    const oneMonthFromNow = dateOnly(new Date());
-    oneMonthFromNow.setDate(oneMonthFromNow.getDate() + CONSTANTS.STOCK_WARN_DAYS);
+// Statut d'un lot, aligné sur isLotSellable : la DLV fait foi pour la vente,
+// la DLC pour la consommation. Lots legacy sans DLV : repli sur la DLC.
+//   'expired'    DLC absente, invalide ou dépassée
+//   'invendable' DLV dépassée (ou invalide) mais DLC encore valide
+//   'warning'    DLV dans moins de DLV_WARN_DAYS jours (legacy : DLC < STOCK_WARN_DAYS)
+//   'ok'         sinon
+const getLotStatus = (lot, referenceDate = new Date()) => {
+    const now = dateOnly(referenceDate);
+    const dlcDate = dateOnly(lot?.dlc);
+    if (!lot?.dlc || Number.isNaN(dlcDate.getTime()) || now > dlcDate) return 'expired';
 
-    if (!dlc || Number.isNaN(dlcDate.getTime())) return 'expired';
-    if (now > dlcDate) return 'expired';
-    if (dlcDate <= oneMonthFromNow) return 'warning';
-    return 'ok';
+    const limit = lot.dlv ? dateOnly(lot.dlv) : dlcDate;
+    if (Number.isNaN(limit.getTime()) || now > limit) return 'invendable';
+
+    const warnLimit = new Date(now.getTime());
+    warnLimit.setDate(warnLimit.getDate() + (lot.dlv ? CONSTANTS.DLV_WARN_DAYS : CONSTANTS.STOCK_WARN_DAYS));
+    return limit <= warnLimit ? 'warning' : 'ok';
 };
+
+const getLotStatusLabel = (status, lot) => ({
+    expired: 'Expiré',
+    invendable: 'Invendable',
+    warning: lot?.dlv ? 'DLV proche' : 'DLC proche',
+    ok: 'OK'
+}[status] || status);
 
 // Toast Notifications
 const showToast = (message, type = 'success') => {
@@ -3180,8 +3232,10 @@ const renderDashboard = () => {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const expiries = lots.filter(lot => getStatus(lot.dlc) === 'expired').length;
-    const moinsUnMois = lots.filter(lot => getStatus(lot.dlc) === 'warning').length;
+    const lotStatuses = lots.map(lot => getLotStatus(lot, today));
+    const expiries = lotStatuses.filter(st => st === 'expired').length;
+    const invendables = lotStatuses.filter(st => st === 'invendable').length;
+    const dlvProches = lotStatuses.filter(st => st === 'warning').length;
     const sellableBottles = lots.filter(lot => isLotSellable(lot, today)).reduce((sum, lot) => sum + (lot.quantite || 0), 0);
 
     // Stock produit ces 7 derniers jours
@@ -3193,10 +3247,10 @@ const renderDashboard = () => {
     const commandesUrgentes = commandesEnAttente.filter(c => c.dateLivraison && new Date(c.dateLivraison) <= inThreeDays).length;
 
     const commandesPeriode = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
-    const stockDisponible = calculateAvailableStock(lots, today);
+    const stockPool = createStockPool(lots, today);
 
     const besoins = {};
-    commandesPeriode.forEach(cmd => {
+    sortCommandesByDateLivraison(commandesPeriode).forEach(({ commande: cmd }) => {
         getItems(cmd).forEach(item => {
             const arome = aromes.find(a => a.id === item.aromeId);
             const format = formats.find(f => f.id === item.formatId);
@@ -3207,22 +3261,28 @@ const renderDashboard = () => {
                     formatId: item.formatId,
                     aromeNom: arome?.nom || '',
                     formatNom: format?.nom || '',
-                    quantite: 0
+                    quantite: 0,
+                    disponible: 0
                 };
             }
             besoins[key].quantite += item.quantite;
+            besoins[key].disponible += stockPool.take(key, Number(item.quantite) || 0, cmd.dateLivraison);
         });
     });
 
-    const bouteillesAProduire = Object.entries(besoins).map(([key, b]) => {
-        const disponible = stockDisponible[key] || 0;
-        const aProduire = Math.max(0, b.quantite - disponible);
-        return { ...b, disponible, aProduire };
+    const bouteillesAProduire = Object.values(besoins).map(b => {
+        const aProduire = Math.max(0, b.quantite - b.disponible);
+        return { ...b, aProduire };
     }).filter(b => b.aProduire > 0).sort((a, b) => b.aProduire - a.aProduire);
 
     const totalBouteillesAProduire = bouteillesAProduire.reduce((sum, b) => sum + b.aProduire, 0);
 
-    const showAlert = expiries > 0 || moinsUnMois > 0;
+    const alertParts = [
+        expiries > 0 ? `${expiries} expiré${expiries > 1 ? 's' : ''}` : '',
+        invendables > 0 ? `${invendables} invendable${invendables > 1 ? 's' : ''} (DLV dépassée)` : '',
+        dlvProches > 0 ? `${dlvProches} DLV proche${dlvProches > 1 ? 's' : ''}` : ''
+    ].filter(Boolean);
+    const showAlert = alertParts.length > 0;
 
     safeRender(`
         <div class="page-header-big">
@@ -3267,7 +3327,7 @@ const renderDashboard = () => {
                 <span class="dash-alert-icon">⚠️</span>
                 <div class="dash-alert-text">
                     <strong>Stock à vérifier</strong>
-                    ${expiries > 0 ? `${expiries} expiré${expiries > 1 ? 's' : ''}` : ''}${expiries > 0 && moinsUnMois > 0 ? ' • ' : ''}${moinsUnMois > 0 ? `${moinsUnMois} DLC < 1 mois` : ''}
+                    ${alertParts.join(' • ')}
                 </div>
                 <span class="dash-todo-arrow">›</span>
             </a>
@@ -3355,7 +3415,7 @@ const renderStock = () => {
         if (savedArome  && lot.arome  !== savedArome)  return false;
         if (savedFormat && lot.format !== savedFormat) return false;
         if (savedStatut) {
-            const st = getStatus(lot.dlc);
+            const st = getLotStatus(lot, today);
             if (st !== savedStatut) return false;
         }
         if (savedQuery) {
@@ -3445,9 +3505,9 @@ const renderStock = () => {
         ? '<div class="commande-empty">Aucun lot ne correspond aux filtres</div>'
         : filteredLots.map(lot => {
             const arome = aromes.find(a => a.nom === lot.arome);
-            const status = getStatus(lot.dlc);
-            const badgeClass = status === 'expired' ? 'badge-expire' : status === 'warning' ? 'badge-bientot' : 'badge-ok';
-            const statusLabel = status === 'expired' ? 'Expiré' : status === 'warning' ? '< 1 mois' : 'OK';
+            const status = getLotStatus(lot, today);
+            const badgeClass = status === 'expired' || status === 'invendable' ? 'badge-expire' : status === 'warning' ? 'badge-bientot' : 'badge-ok';
+            const statusLabel = getLotStatusLabel(status, lot);
             return `<div class="lot-card lot-status-${status}">
                 <div class="lot-card-header">
                     <span class="lot-card-numero">#${escapeHtml(String(lot.numLot || lot.id).padStart(6, '0'))}</span>
@@ -3461,10 +3521,11 @@ const renderStock = () => {
                 <div class="lot-card-meta">
                     <span><strong class="lot-card-qty">${escapeHtml(String(lot.quantite))}</strong> bt</span>
                     <span>Prod. <strong>${formatDate(lot.dateProduction)}</strong></span>
+                    ${lot.dlv ? `<span>DLV <strong>${formatDate(lot.dlv)}</strong></span>` : ''}
                     <span>DLC <strong>${formatDate(lot.dlc)}</strong></span>
                 </div>
                 <div class="lot-card-actions">
-                    ${status !== 'expired' ? `<button class="btn btn-sm btn-success" data-click="sell-lot" data-id="${escapeHtml(lot.id)}">Vendre</button>` : ''}
+                    ${isLotSellable(lot, today) ? `<button class="btn btn-sm btn-success" data-click="sell-lot" data-id="${escapeHtml(lot.id)}">Vendre</button>` : ''}
                     <button class="btn btn-sm btn-ghost" data-click="show-lot-trace" data-id="${escapeHtml(lot.id)}">Tracer</button>
                     <button class="btn btn-sm btn-ghost" data-click="edit-lot" data-id="${escapeHtml(lot.id)}">Modifier</button>
                     <button class="btn btn-sm btn-ghost" style="color: var(--danger);" data-click="delete-lot" data-id="${escapeHtml(lot.id)}">Supprimer</button>
@@ -3501,10 +3562,11 @@ const renderStock = () => {
         ` : ''}
 
         <div class="stock-pills-row">
-            <span class="stock-pills-label">DLC :</span>
+            <span class="stock-pills-label">Statut :</span>
             <button type="button" class="status-pill ${!savedStatut ? 'active' : ''}" onclick="toggleStockStatutFilter('')">Tous</button>
             ${statPill('ok', 'OK')}
-            ${statPill('warning', '< 1 mois')}
+            ${statPill('warning', 'DLV proche')}
+            ${statPill('invendable', 'Invendable')}
             ${statPill('expired', 'Expiré')}
         </div>
 
@@ -6109,18 +6171,10 @@ const checkStockAndUpdateCommandes = () => {
     const formats = DB.get('formats') || [];
     const aromes = DB.get('aromes') || [];
     const now = new Date();
-    const stockDisponible = calculateAvailableStock(lots, now);
+    const stockPool = createStockPool(lots, now);
     let updatedCount = 0;
 
-    const commandesTriees = commandes
-        .map((commande, index) => ({ commande, index }))
-        .sort((a, b) => {
-            const aDate = dateOnly(a.commande.dateLivraison).getTime();
-            const bDate = dateOnly(b.commande.dateLivraison).getTime();
-            const aSort = Number.isNaN(aDate) ? Number.POSITIVE_INFINITY : aDate;
-            const bSort = Number.isNaN(bDate) ? Number.POSITIVE_INFINITY : bDate;
-            return aSort - bSort || a.index - b.index;
-        });
+    const commandesTriees = sortCommandesByDateLivraison(commandes);
     const updatedCommandes = [...commandes];
 
     commandesTriees.forEach(({ commande: cmd, index }) => {
@@ -6144,13 +6198,12 @@ const checkStockAndUpdateCommandes = () => {
         });
 
         Object.entries(needed).forEach(([key, qty]) => {
-            const disponible = stockDisponible[key] || 0;
-            if (disponible < qty) canProduce = false;
+            if (stockPool.available(key, cmd.dateLivraison) < qty) canProduce = false;
         });
 
         if (canProduce) {
             Object.entries(needed).forEach(([key, qty]) => {
-                stockDisponible[key] -= qty;
+                stockPool.take(key, qty, cmd.dateLivraison);
             });
             updatedCount++;
             updatedCommandes[index] = { ...cmd, statut: 'produite' };
@@ -7589,7 +7642,7 @@ const computeProductionPlan = () => {
     const lots = DB.get('lots') || [];
 
     const now = new Date();
-    const stockDisponible = calculateAvailableStock(lots, now);
+    const stockPool = createStockPool(lots, now);
 
     const besoins = {};
     let commandesAInclure = [];
@@ -7626,24 +7679,27 @@ const computeProductionPlan = () => {
         // Personnalisé : seul le Set gouverne (nouvelles commandes décochées par défaut).
         commandesAInclure = commandesDisponibles.filter(c => productionSelectedCommandes.has(c.id));
 
-        commandesAInclure.forEach(cmd => {
+        // Par date de livraison croissante : chaque commande ne consomme que les
+        // lots encore vendables à sa date de livraison (DLV croissante).
+        sortCommandesByDateLivraison(commandesAInclure).forEach(({ commande: cmd }) => {
             (cmd.items || []).forEach(item => {
                 const arome = aromes.find(a => a.id === item.aromeId);
                 const format = formats.find(f => f.id === item.formatId);
                 const key = `${arome?.nom || ''}-${format?.nom || ''}`;
                 if (!besoins[key]) {
-                    besoins[key] = { aromeId: item.aromeId, formatId: item.formatId, aromeNom: arome?.nom || '', formatNom: format?.nom || '', quantite: 0 };
+                    besoins[key] = { aromeId: item.aromeId, formatId: item.formatId, aromeNom: arome?.nom || '', formatNom: format?.nom || '', quantite: 0, disponible: 0 };
                 }
                 besoins[key].quantite += item.quantite;
+                besoins[key].disponible += stockPool.take(key, Number(item.quantite) || 0, cmd.dateLivraison);
             });
         });
     }
 
     // Production nécessaire. En mode manuel on produit exactement la quantité
-    // saisie ; en mode auto on déduit le stock déjà disponible.
+    // saisie ; en mode auto on déduit le stock vendable à la date de livraison.
     const productionNecesaire = {};
     Object.entries(besoins).forEach(([key, b]) => {
-        const disponible = stockDisponible[key] || 0;
+        const disponible = productionMode === 'manuel' ? stockPool.available(key) : b.disponible;
         const aProduire = productionMode === 'manuel' ? b.quantite : Math.max(0, b.quantite - disponible);
         productionNecesaire[key] = { ...b, disponible, aProduire };
     });
