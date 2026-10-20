@@ -3,8 +3,7 @@
 // Application-wide constants
 const CONSTANTS = {
     PRODUCTION_LOSS: 1.015,    // +1.5% loss buffer applied to ingredient consumption
-    CAPSULE_LOSS: 1.075,       // +7.5% loss buffer for capsules
-    BOUCHON_MARGIN: 1.05,      // +5% margin on caps shown in the production planner
+    BOUCHON_MARGIN: 1.05,      // +5% margin on caps (planner and production deduction)
     CUVE_MAX_L: 25,            // max litres per production cuve
     STOCK_WARN_DAYS: 30        // DLC warning threshold in days
 };
@@ -8611,8 +8610,8 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
         else btGrandBouchon += quantite;
     });
 
-    const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.CAPSULE_LOSS);
-    const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.CAPSULE_LOSS);
+    const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.BOUCHON_MARGIN);
+    const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.BOUCHON_MARGIN);
 
     if (bouchonsPetitsNecessaires > 0) {
         const bouchonPetitItem = findInventaireItemByName(inventaire, 'Bouchons 25cl');
