@@ -3522,13 +3522,13 @@ const renderDashboard = () => {
 // =============================================================================
 
 const TWIN_ZONES = [
-    { id: 'production', label: 'Production', key: '1', bounds: [-11.4, -7.4, -1.8, -1.0], token: '--primary' },
-    { id: 'stock', label: 'Entrepôt', key: '2', bounds: [1.8, -7.4, 11.4, -1.0], token: '--info' },
-    { id: 'expedition', label: 'Expédition', key: '3', bounds: [1.8, 1.4, 11.4, 7.4], token: '--warning' },
-    { id: 'magasin', label: 'Consommables', key: '4', bounds: [-11.4, 1.4, -1.8, 7.4], token: '--warning-dark' },
-    { id: 'equipe', label: 'Équipe', key: '5', bounds: [-1.4, 1.6, 1.4, 7.4], token: '--success' }
+    { id: 'production', label: 'Production', key: '1', bounds: [-11.6, -7.6, -2.0, -1.3], token: '--primary' },
+    { id: 'stock', label: 'Entrepôt', key: '2', bounds: [2.0, -7.6, 11.6, -1.3], token: '--info' },
+    { id: 'expedition', label: 'Expédition', key: '3', bounds: [2.0, 1.7, 11.6, 7.6], token: '--warning' },
+    { id: 'magasin', label: 'Consommables', key: '4', bounds: [-11.6, 1.7, -2.0, 7.6], token: '--warning-dark' },
+    { id: 'equipe', label: 'Équipe', key: '5', bounds: [-1.5, 1.7, 1.5, 7.6], token: '--success' }
 ];
-const TWIN_VIEW_OVERVIEW = { target: [1.2, 0, 0.2], pos: [3.8, 15.5, 17.5] };
+const TWIN_VIEW_OVERVIEW = { target: [0.2, -0.6, 0.2], pos: [2.6, 23.5, 19.5] };
 const TWIN_STAFF_COLORS = ['#5D7B3E', '#2E72B8', '#B9770E', '#8E44AD', '#C0392B', '#16A085', '#D35400', '#34495E'];
 
 const twinClamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -3746,6 +3746,7 @@ const buildTwinModel = () => {
                 return {
                     arome: arome?.nom || '—',
                     format: format?.nom || '—',
+                    contenanceCl: format ? (Number(format.contenanceCl) || resolveFormatContenance(format.nom, formats) || 50) : 50,
                     quantite: Number(item.quantite) || 0,
                     couleur: safeColor(arome?.couleur)
                 };
@@ -3860,10 +3861,14 @@ const Twin = {
     lib: null,
     loading: null,
     supported: null,
+    gpu: '',
     renderer: null,
     scene: null,
     camera: null,
     controls: null,
+    composer: null,
+    aoPass: null,
+    envTarget: null,
     raycaster: null,
     ndc: null,
     dynamic: null,
@@ -3879,7 +3884,8 @@ const Twin = {
     prevFill: new Map(),
     fills: [],
     flashes: [],
-    bobbers: [],
+    steam: [],
+    cutaways: [],
     pulseMats: [],
     selectedId: null,
     hoveredId: null,
@@ -3895,8 +3901,14 @@ const Twin = {
     size: null,
     viewOffset: { x: 0, y: 0 },
     viewOffsetTarget: { x: 0, y: 0 },
+    quality: null,
+    autoQuality: null,
+    perf: { last: 0, avg: 0, frames: 0 },
     geo: {},
     mats: {},
+    variants: new Map(),
+    textures: [],
+    texSets: {},
     palette: null,
     tmp: null
 };
@@ -3904,12 +3916,16 @@ const Twin = {
 const _twinMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 const twinReducedMotion = () => !!_twinMotionQuery?.matches;
 
+// Three.js r185 exige WebGL 2 ; on relève au passage le GPU pour choisir la qualité
 const twinIsSupported = () => {
     if (Twin.supported !== null) return Twin.supported;
     try {
-        const canvas = document.createElement('canvas');
-        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+        const gl = document.createElement('canvas').getContext('webgl2');
         Twin.supported = !!gl;
+        if (gl) {
+            const ext = gl.getExtension('WEBGL_debug_renderer_info');
+            Twin.gpu = String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+        }
         gl?.getExtension('WEBGL_lose_context')?.loseContext();
     } catch (_) {
         Twin.supported = false;
@@ -3923,9 +3939,19 @@ const twinLoadLibrary = () => {
         Twin.loading = Promise.all([
             import('./vendor/three/three.module.min.js'),
             import('./vendor/three/OrbitControls.js'),
-            import('./vendor/three/RoomEnvironment.js')
-        ]).then(([THREE, controls, room]) => {
-            Twin.lib = { THREE, OrbitControls: controls.OrbitControls, RoomEnvironment: room.RoomEnvironment };
+            import('./vendor/three/EffectComposer.js'),
+            import('./vendor/three/RenderPass.js'),
+            import('./vendor/three/GTAOPass.js'),
+            import('./vendor/three/OutputPass.js')
+        ]).then(([THREE, controls, composer, render, gtao, output]) => {
+            Twin.lib = {
+                THREE,
+                OrbitControls: controls.OrbitControls,
+                EffectComposer: composer.EffectComposer,
+                RenderPass: render.RenderPass,
+                GTAOPass: gtao.GTAOPass,
+                OutputPass: output.OutputPass
+            };
             return Twin.lib;
         }).catch(err => {
             Twin.loading = null;
@@ -3940,57 +3966,136 @@ const twinCssColor = (name, fallback) => {
     return /^#[0-9a-f]{3,8}$/i.test(v) ? v : fallback;
 };
 
+// --- Qualité du rendu : choisie selon l'appareil (Auto) ou imposée depuis le jumeau ---
+const TWIN_QUALITY_LEVELS = {
+    low: { label: 'Économie', hint: 'Téléphones modestes : sans occlusion ambiante', dpr: 1.25, shadow: 1024, ao: 0, tex: 256, segments: 12, steam: 8 },
+    medium: { label: 'Standard', hint: 'Occlusion ambiante en demi-résolution', dpr: 1.6, shadow: 2048, ao: 0.5, tex: 512, segments: 20, steam: 14 },
+    high: { label: 'Haute', hint: 'Ordinateurs : tous les effets', dpr: 2, shadow: 4096, ao: 1, tex: 1024, segments: 28, steam: 20 }
+};
+const TWIN_QUALITY_ORDER = ['low', 'medium', 'high'];
+
+const twinQualitySetting = () => {
+    const v = DB.getFilter('twin_quality');
+    return TWIN_QUALITY_LEVELS[v] ? v : 'auto';
+};
+
+const twinDetectQuality = () => {
+    const mq = (q) => !!window.matchMedia?.(q).matches;
+    const handheld = (mq('(pointer: coarse)') && !mq('(pointer: fine)')) || mq('(max-width: 768px)');
+    const gpu = Twin.gpu || '';
+    if (/swiftshader|llvmpipe|software|basic render/i.test(gpu)) return 'low';
+    if (handheld) {
+        const capable = /apple/i.test(gpu) || ((navigator.deviceMemory || 4) >= 6 && /adreno|mali-g[7-9]|xclipse|immortalis/i.test(gpu));
+        return capable ? 'medium' : 'low';
+    }
+    if (/intel|uhd|iris|mali|adreno|powervr/i.test(gpu) && !/\barc\b/i.test(gpu)) return 'medium';
+    return 'high';
+};
+
+const twinResolveQuality = () => {
+    const setting = twinQualitySetting();
+    if (setting !== 'auto') return setting;
+    if (!Twin.autoQuality) Twin.autoQuality = twinDetectQuality();
+    return Twin.autoQuality;
+};
+
+// --- Géométries et matériaux partagés (mis en cache, libérés à chaque reconstruction du monde) ---
 const twinGeo = (key, factory) => Twin.geo[key] || (Twin.geo[key] = factory());
 const twinMat = (key, factory) => Twin.mats[key] || (Twin.mats[key] = factory());
 const twinStd = (key, color, opts = {}) => twinMat(`std:${key}:${color}`, () =>
     new Twin.lib.THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.05, ...opts }));
 const twinBasic = (key, color, opts = {}) => twinMat(`basic:${key}:${color}`, () =>
     new Twin.lib.THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, ...opts }));
-const twinLathe = (points, segments) => new Twin.lib.THREE.LatheGeometry(
-    points.map(([x, y]) => new Twin.lib.THREE.Vector2(x, y)), segments);
+const twinLathe = (points, segments, phiStart = 0) => new Twin.lib.THREE.LatheGeometry(
+    points.map(([x, y]) => new Twin.lib.THREE.Vector2(x, y)), segments, phiStart);
 
-// Échelle réelle : 1 unité = 1 mètre. Implantation de l'atelier (coordonnées monde).
-const TWIN_LAB = {
-    tableX: -9.0, tableZ: -7.65, tableW: 4.0, tableD: 0.7, tableH: 0.9,
-    plate: (i) => [-10.55 + i * 0.6, -7.68],
-    cuve: (i) => [-10.6 + i * 0.7, -5.9],
-    bottling: [-5.0, -7.7]
-};
-// Dimensions réelles : cuve 25 L (Ø 34 cm, rebord à 90 cm), casseroles 9 L / 4 L
-const TWIN_CUVE = { R: 0.17, H: 0.42, stand: 0.48 };
-const TWIN_POTS = { 9: { r: 0.14, h: 0.22 }, 4: { r: 0.11, h: 0.15 } };
-// Bouteilles (hauteur, diamètre) selon la contenance ; casier = 30 × 40 cm, 8 par couche de palette
-const twinBottleSpec = (cl) => (cl <= 30 ? { h: 0.2, d: 0.056 } : cl <= 60 ? { h: 0.25, d: 0.068 } : { h: 0.31, d: 0.085 });
+// Shaders : UV en coordonnées monde (une texture garde son échelle sur une boîte étirée)
+// et arêtes adoucies des boîtes unitaires (normales arrondies sur quelques millimètres).
+const TWIN_GLSL_VERT_DECL = `
+uniform float twinWorldUv;
+varying vec3 vTwinP;
+varying vec3 vTwinH;
+varying vec3 vTwinX;
+varying vec3 vTwinY;
+varying vec3 vTwinZ;`;
+const TWIN_GLSL_VERT = `
+mat4 twinM = modelMatrix;
+#ifdef USE_INSTANCING
+	twinM = modelMatrix * instanceMatrix;
+#endif
+vec3 twinS = vec3( length( twinM[ 0 ].xyz ), length( twinM[ 1 ].xyz ), length( twinM[ 2 ].xyz ) );
+vTwinH = 0.5 * twinS;
+vTwinP = position * twinS;
+vTwinX = normalize( ( viewMatrix * vec4( twinM[ 0 ].xyz, 0.0 ) ).xyz );
+vTwinY = normalize( ( viewMatrix * vec4( twinM[ 1 ].xyz, 0.0 ) ).xyz );
+vTwinZ = normalize( ( viewMatrix * vec4( twinM[ 2 ].xyz, 0.0 ) ).xyz );
+if ( twinWorldUv > 0.0 ) {
+	vec3 twinW = ( twinM * vec4( position, 1.0 ) ).xyz;
+	vec3 twinN = abs( normalize( mat3( twinM ) * normal ) );
+	vec2 twinUv = ( twinN.y > 0.5 ? twinW.xz : ( twinN.x > 0.5 ? twinW.zy : twinW.xy ) ) * twinWorldUv;
+	#ifdef USE_MAP
+		vMapUv = twinUv;
+	#endif
+	#ifdef USE_NORMALMAP
+		vNormalMapUv = twinUv;
+	#endif
+	#ifdef USE_ROUGHNESSMAP
+		vRoughnessMapUv = twinUv;
+	#endif
+}`;
+const TWIN_GLSL_FRAG_DECL = `
+uniform float twinBevel;
+varying vec3 vTwinP;
+varying vec3 vTwinH;
+varying vec3 vTwinX;
+varying vec3 vTwinY;
+varying vec3 vTwinZ;`;
+const TWIN_GLSL_FRAG = `
+if ( twinBevel > 0.0 ) {
+	float twinR = min( twinBevel, 0.7 * min( vTwinH.x, min( vTwinH.y, vTwinH.z ) ) );
+	vec3 twinQ = max( abs( vTwinP ) - ( vTwinH - twinR ), 0.0 ) * sign( vTwinP );
+	float twinL = dot( twinQ, twinQ );
+	if ( twinL > 1e-12 ) {
+		twinQ *= inversesqrt( twinL );
+		vec3 twinB = normalize( twinQ.x * vTwinX + twinQ.y * vTwinY + twinQ.z * vTwinZ );
+		normal = normalize( normal + twinB - nonPerturbedNormal );
+	}
+}`;
 
-// Postes de travail occupés par les employés présents (ordre de remplissage)
-const TWIN_STATIONS = [
-    { x: -10.25, z: -6.95, ry: Math.PI },
-    { x: -9.55, z: -5.2, ry: Math.PI },
-    { x: -5.0, z: -7.0, ry: Math.PI },
-    { x: 5.4, z: -0.6, ry: Math.PI },
-    { x: 6.5, z: 1.0, ry: 0 },
-    { x: -7.8, z: 3.5, ry: Math.PI }
-];
-
-const twinGeometries = () => {
-    const { THREE } = Twin.lib;
-    return {
-        box: twinGeo('box', () => new THREE.BoxGeometry(1, 1, 1)),
-        cyl: twinGeo('cyl', () => new THREE.CylinderGeometry(1, 1, 1, 32)),
-        cylLow: twinGeo('cylLow', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
-        sphere: twinGeo('sphere', () => new THREE.SphereGeometry(1, 24, 16)),
-        dome: twinGeo('dome', () => new THREE.SphereGeometry(1, 20, 8, 0, Math.PI * 2, 0, Math.PI / 2)),
-        cone: twinGeo('cone', () => new THREE.ConeGeometry(1, 1, 24)),
-        ring: twinGeo('ring', () => new THREE.RingGeometry(0.86, 1, 56)),
-        plane: twinGeo('plane', () => new THREE.PlaneGeometry(1, 1)),
-        capsule: twinGeo('capsule', () => new THREE.CapsuleGeometry(0.5, 1, 6, 14)),
-        torus: twinGeo('torus', () => new THREE.TorusGeometry(1, 0.06, 8, 48)),
-        edges: twinGeo('edges', () => new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1))),
-        bottle: twinGeo('bottle', () => twinLathe([[0, 0], [0.92, 0], [1, 0.05], [1, 0.6], [0.86, 0.7], [0.42, 0.82], [0.33, 0.88], [0.33, 1], [0, 1]], 8)),
-        tankShell: twinGeo('tankShell', () => twinLathe([[0.1, 0], [0.13, 0.02], [1, 0.26], [1, 1], [0.985, 1.03], [0.95, 1.045]], 40)),
-        pot: twinGeo('pot', () => twinLathe([[0, 0], [0.96, 0], [1, 0.04], [1, 0.97], [1.05, 1], [1.05, 1.03], [0.97, 1.03], [0.97, 0.06], [0, 0.06]], 32)),
-        sack: twinGeo('sack', () => twinLathe([[0, 0], [0.9, 0.02], [1, 0.2], [0.96, 0.72], [0.72, 0.94], [0.3, 1], [0, 1]], 14))
+const twinPatchMaterial = (mat, { worldUv = 0, bevel = 0 } = {}) => {
+    if (!worldUv && !bevel) return mat;
+    mat.onBeforeCompile = (shader) => {
+        shader.uniforms.twinWorldUv = { value: worldUv };
+        shader.uniforms.twinBevel = { value: bevel };
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', `#include <common>${TWIN_GLSL_VERT_DECL}`)
+            .replace('#include <uv_vertex>', `#include <uv_vertex>${TWIN_GLSL_VERT}`);
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', `#include <common>${TWIN_GLSL_FRAG_DECL}`)
+            .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>${TWIN_GLSL_FRAG}`);
     };
+    mat.customProgramCacheKey = () => 'twin-patch';
+    return mat;
+};
+
+// Matériau texturé en coordonnées monde (sols, murs, plans de travail)
+const twinSurf = (key, opts, worldUv, bevel = 0.008) => twinMat(`surf:${key}`, () => {
+    const mat = new Twin.lib.THREE.MeshStandardMaterial({ roughness: 0.75, metalness: 0, ...opts });
+    mat.userData.worldUv = worldUv;
+    mat.userData.bevel = bevel;
+    return twinPatchMaterial(mat, { worldUv });
+});
+
+// Variante à arêtes adoucies, appliquée automatiquement aux boîtes (Économie : sans)
+const twinBevelMat = (mat) => {
+    if (Twin.quality?.level === 'low' || mat.side === Twin.lib.THREE.DoubleSide || mat.userData.bevel === 0) return mat;
+    let variant = Twin.variants.get(mat);
+    if (!variant) {
+        variant = mat.clone();
+        twinPatchMaterial(variant, { worldUv: mat.userData.worldUv || 0, bevel: mat.userData.bevel ?? 0.004 });
+        Twin.variants.set(mat, variant);
+    }
+    return variant;
 };
 
 const twinMesh = (geometry, material, { cast = true, receive = false } = {}) => {
@@ -4000,110 +4105,453 @@ const twinMesh = (geometry, material, { cast = true, receive = false } = {}) => 
     return mesh;
 };
 
-const twinMaterials = () => {
-    const p = Twin.palette;
-    const { THREE } = Twin.lib;
-    return {
-        floor: twinStd('floor', p.floor, { roughness: 0.9 }),
-        ground: twinStd('ground', p.ground, { roughness: 1 }),
-        wall: twinStd('wall', '#FBFAF6', { roughness: 0.92 }),
-        wallTrim: twinStd('wallTrim', '#E4E0D6', { roughness: 0.85 }),
-        windowFrame: twinStd('windowFrame', '#3C4247', { roughness: 0.5, metalness: 0.4 }),
-        windowGlass: twinStd('windowGlass', '#BFD8E6', { roughness: 0.08, metalness: 0.1, emissive: '#9CC3DA', emissiveIntensity: 0.35 }),
-        steel: twinStd('steel', '#C3CBD1', { metalness: 0.72, roughness: 0.3 }),
-        steelShell: twinMat('steelShell', () => new THREE.MeshStandardMaterial({ color: '#CDD4D9', metalness: 0.78, roughness: 0.26, side: THREE.DoubleSide })),
-        steelDark: twinStd('steelDark', '#6E7880', { metalness: 0.55, roughness: 0.42 }),
-        chrome: twinStd('chrome', '#E9EEF1', { metalness: 0.95, roughness: 0.12 }),
-        rubber: twinStd('rubber', '#202427', { roughness: 0.92 }),
-        plastic: twinStd('plastic', '#25292D', { roughness: 0.45 }),
-        plasticLight: twinStd('plasticLight', '#3A3F45', { roughness: 0.4 }),
-        glassTop: twinStd('glassTop', '#0F1113', { roughness: 0.06, metalness: 0.35 }),
-        inductionOff: twinStd('inductionOff', '#4A4F55', { roughness: 0.3 }),
-        inductionOn: twinStd('inductionOn', '#FF7A1A', { emissive: '#FF5A00', emissiveIntensity: 0.9, roughness: 0.3 }),
-        ledOn: twinStd('ledOn', '#5CE07A', { emissive: '#5CE07A', emissiveIntensity: 1.2 }),
-        ledOff: twinStd('ledOff', '#555B60', { roughness: 0.5 }),
-        valveRed: twinStd('valveRed', '#C7342B', { roughness: 0.5 }),
-        sightGlass: twinStd('sightGlass', '#E8F3F6', { roughness: 0.05, transparent: true, opacity: 0.35 }),
-        jarGlass: twinStd('jarGlass', '#EAF4F2', { roughness: 0.05, transparent: true, opacity: 0.3 }),
-        bottleTint: twinStd('bottleTint', '#FFFFFF', { roughness: 0.12, metalness: 0.15 }),
-        cap: twinStd('cap', '#C9A64B', { metalness: 0.7, roughness: 0.35 }),
-        tint: twinStd('tint', '#FFFFFF', { roughness: 0.72 }),
-        stateTint: twinStd('stateTint', '#FFFFFF', { roughness: 0.82 }),
-        basin: twinStd('basin', '#7D878E', { metalness: 0.6, roughness: 0.35 }),
-        wood: twinStd('wood', '#BE9461', { roughness: 0.9 }),
-        woodDark: twinStd('woodDark', '#93693D', { roughness: 0.9 }),
-        woodLight: twinStd('woodLight', '#DDBF92', { roughness: 0.8 }),
-        kraft: twinStd('kraft', '#C9A878', { roughness: 0.92 }),
-        kraftTape: twinStd('kraftTape', '#A9844F', { roughness: 0.6 }),
-        film: twinStd('film', p.primaryLight, { roughness: 0.2, transparent: true, opacity: 0.4 }),
-        label: twinStd('label', '#F6F5F0', { roughness: 0.7 }),
-        binPlastic: twinStd('binPlastic', '#4E7DA6', { roughness: 0.55 }),
-        rackBlue: twinStd('rackBlue', '#2F5C8A', { roughness: 0.45, metalness: 0.3 }),
-        rackOrange: twinStd('rackOrange', '#D9822B', { roughness: 0.5, metalness: 0.2 }),
-        locker: twinStd('locker', '#98A6AF', { roughness: 0.5, metalness: 0.35 }),
-        lockerDoor: twinStd('lockerDoor', '#B4C0C7', { roughness: 0.45, metalness: 0.35 }),
-        skin: twinStd('skin', '#F0DCC4', { roughness: 0.8 }),
-        apron: twinStd('apron', '#F7F7F4', { roughness: 0.85 }),
-        pants: twinStd('pants', '#3A4148', { roughness: 0.85 }),
-        absent: twinMat('absent', () => new THREE.MeshStandardMaterial({ color: '#B9B6AE', roughness: 0.9, transparent: true, opacity: 0.45 })),
-        marking: twinBasic('marking', '#E2C25A', { opacity: 0.9 }),
-        hazard: twinStd('hazard', '#E9B825', { roughness: 0.6 }),
-        dark: twinStd('dark', '#2F3438', { roughness: 0.7 }),
-        glassDark: twinStd('glassDark', '#34444F', { roughness: 0.12, metalness: 0.35 }),
-        white: twinStd('white', '#F7F7F2', { roughness: 0.65 }),
-        whiteDark: twinStd('whiteDark', '#E3E4DE', { roughness: 0.65 }),
-        brand: twinStd('brand', p.primary, { roughness: 0.55 }),
-        lamp: twinStd('lamp', '#FFF3D6', { emissive: '#FFE9B8', emissiveIntensity: 1 }),
-        screen: twinStd('screen', p.primaryLight, { emissive: p.primaryLight, emissiveIntensity: 0.9 }),
-        extinguisher: twinStd('extinguisher', '#C7342B', { roughness: 0.4, metalness: 0.2 }),
-        ringDanger: twinBasic('ringDanger', p.danger, { opacity: 0.85 }),
-        ringWarning: twinBasic('ringWarning', p.warning, { opacity: 0.85 }),
-        ringWarningSoft: twinBasic('ringWarningSoft', p.warning, { opacity: 0.4 }),
-        ringSuccess: twinBasic('ringSuccess', p.success, { opacity: 0.7 }),
-        ringPlanned: twinBasic('ringPlanned', p.info, { opacity: 0.55 }),
-        beaconDanger: twinStd('beaconDanger', p.danger, { emissive: p.danger, emissiveIntensity: 0.8 }),
-        beaconWarning: twinStd('beaconWarning', p.warning, { emissive: p.warning, emissiveIntensity: 0.8 }),
-        ghost: twinMat('ghost', () => new THREE.LineBasicMaterial({ color: p.danger, transparent: true, opacity: 0.75 })),
-        ghostFill: twinBasic('ghostFill', p.danger, { opacity: 0.06 }),
-        proxy: twinMat('proxy', () => new THREE.MeshBasicMaterial())
+// --- Textures procédurales : dessinées une fois au premier affichage (aucun fichier image) ---
+const twinRandom = (seed) => {
+    let s = seed >>> 0;
+    return () => {
+        s = (s + 0x6D2B79F5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
 };
 
-const twinColorMats = (color) => ({
-    liquid: twinStd('liquid', color, { roughness: 0.2, emissive: color, emissiveIntensity: 0.12, transparent: true, opacity: 0.92 }),
-    band: twinStd('band', color, { roughness: 0.45, emissive: color, emissiveIntensity: 0.25 }),
-    figure: twinStd('figure', color, { roughness: 0.7 })
-});
+// Bruit de valeur fractal périodique (texture répétable sans couture) en [0, 1].
+// stretch > 1 allonge le motif horizontalement (inox brossé), < 1 verticalement (fil du bois).
+const twinNoise = (size, { cells = 8, octaves = 4, seed = 1, stretch = 1 } = {}) => {
+    const out = new Float32Array(size * size);
+    let amp = 1;
+    let total = 0;
+    for (let o = 0; o < octaves; o++) {
+        const base = cells * (1 << o);
+        const ny = Math.max(1, Math.min(size, Math.round(stretch >= 1 ? base : base * stretch)));
+        const nx = Math.max(1, Math.min(size, Math.round(stretch >= 1 ? base / stretch : base)));
+        const rnd = twinRandom(seed * 7919 + o * 104729);
+        const grid = Float32Array.from({ length: nx * ny }, rnd);
+        for (let y = 0; y < size; y++) {
+            const gy = y / size * ny;
+            const y0 = Math.floor(gy);
+            const ty = gy - y0;
+            const sy = ty * ty * (3 - 2 * ty);
+            const r0 = y0 * nx;
+            const r1 = ((y0 + 1) % ny) * nx;
+            for (let x = 0; x < size; x++) {
+                const gx = x / size * nx;
+                const x0 = Math.floor(gx);
+                const tx = gx - x0;
+                const sx = tx * tx * (3 - 2 * tx);
+                const x1 = (x0 + 1) % nx;
+                const a = grid[r0 + x0] + (grid[r0 + x1] - grid[r0 + x0]) * sx;
+                const b = grid[r1 + x0] + (grid[r1 + x1] - grid[r1 + x0]) * sx;
+                out[y * size + x] += (a + (b - a) * sy) * amp;
+            }
+        }
+        total += amp;
+        amp *= 0.5;
+    }
+    for (let i = 0; i < out.length; i++) out[i] /= total;
+    return out;
+};
 
-const TWIN_STATE_COLORS = { critical: '#D9776C', empty: '#D9776C', low: '#E3B85A', ok: '#8DB86A', unknown: '#B9BDB5' };
-
-const twinShade = (hex, factor) => {
+const twinRgb = (hex) => {
     let h = safeColor(hex).slice(1);
     if (h.length < 6) h = h.slice(0, 3).split('').map(c => c + c).join('');
     const n = parseInt(h.slice(0, 6), 16);
-    const ch = (shift) => {
-        const v = (n >> shift) & 255;
-        const out = factor <= 1 ? v * factor : v + (255 - v) * (factor - 1);
-        return Math.round(Math.min(255, out)).toString(16).padStart(2, '0');
-    };
-    return `#${ch(16)}${ch(8)}${ch(0)}`;
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 };
 
-// --- Textures dessinées (plaques, enseigne, carrelage) ---
+const twinCanvas = (w, h = w) => Object.assign(document.createElement('canvas'), { width: w, height: h });
+
+// Remplit un canvas pixel par pixel : fn(x, y, i, px) écrit [r, g, b, a] dans px
+const twinPaint = (size, fn) => {
+    const canvas = twinCanvas(size);
+    const g = canvas.getContext('2d');
+    const img = g.createImageData(size, size);
+    const d = img.data;
+    const px = [0, 0, 0, 255];
+    for (let y = 0, i = 0; y < size; y++) {
+        for (let x = 0; x < size; x++, i++) {
+            px[3] = 255;
+            fn(x, y, i, px);
+            d[i * 4] = px[0];
+            d[i * 4 + 1] = px[1];
+            d[i * 4 + 2] = px[2];
+            d[i * 4 + 3] = px[3];
+        }
+    }
+    g.putImageData(img, 0, 0);
+    return canvas;
+};
+
+const twinTex = (source, { srgb = true, repeat = null } = {}) => {
+    const { THREE } = Twin.lib;
+    const tex = new THREE.CanvasTexture(source);
+    if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    if (repeat) tex.repeat.set(repeat[0], repeat[1]);
+    tex.anisotropy = Math.min(8, Twin.renderer.capabilities.getMaxAnisotropy());
+    Twin.textures.push(tex);
+    return tex;
+};
+
+const twinTexSet = (key, build) => Twin.texSets[key] || (Twin.texSets[key] = build());
+
+const twinNormalTex = (h, size, strength) => twinTex(twinPaint(size, (x, y, i, px) => {
+    const l = h[y * size + (x + size - 1) % size];
+    const r = h[y * size + (x + 1) % size];
+    const u = h[((y + size - 1) % size) * size + x];
+    const d = h[((y + 1) % size) * size + x];
+    const nx = (l - r) * strength;
+    const ny = (d - u) * strength;
+    const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+    px[0] = (nx * inv * 0.5 + 0.5) * 255;
+    px[1] = (ny * inv * 0.5 + 0.5) * 255;
+    px[2] = (inv * 0.5 + 0.5) * 255;
+}), { srgb: false });
+
+const twinGrayTex = (values, size, lo, hi) => twinTex(twinPaint(size, (x, y, i, px) => {
+    px[0] = px[1] = px[2] = (lo + (hi - lo) * values[i]) * 255;
+}), { srgb: false });
+
+// Linoléum (labo, stock, couloir) : marbrure fine et joint soudé tous les 2 m
+const twinLinoSet = (key, base, seed) => twinTexSet(`lino:${key}`, () => {
+    const S = Twin.quality.tex;
+    const n = twinNoise(S, { cells: 8, octaves: 5, seed });
+    const streak = twinNoise(S, { cells: 32, octaves: 2, seed: seed + 3, stretch: 8 });
+    const [r, g, b] = twinRgb(base);
+    const seam = Math.max(1, Math.round(S / 700));
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            let k = 0.94 + n[i] * 0.09 + (streak[i] - 0.5) * 0.05;
+            if (x < seam) k *= 0.82;
+            px[0] = r * k;
+            px[1] = g * k;
+            px[2] = b * k;
+        })),
+        normalMap: twinNormalTex(n, S, 1.4)
+    };
+});
+
+// Mosaïque 2,5 cm de la réserve et de la laverie (la texture couvre 0,5 × 0,5 m)
+const twinMosaicSet = () => twinTexSet('mosaic', () => {
+    const S = Twin.quality.tex;
+    const tiles = 20;
+    const cell = S / tiles;
+    const grout = Math.max(1, cell * 0.1);
+    const rnd = twinRandom(41);
+    const tint = Float32Array.from({ length: tiles * tiles }, () => 0.9 + rnd() * 0.14);
+    const dirt = twinNoise(S, { cells: 4, octaves: 4, seed: 12 });
+    const height = new Float32Array(S * S);
+    const rough = new Float32Array(S * S);
+    const map = twinTex(twinPaint(S, (x, y, i, px) => {
+        const tx = Math.floor(x / cell);
+        const ty = Math.floor(y / cell);
+        const joint = x - tx * cell < grout || y - ty * cell < grout;
+        height[i] = joint ? 0 : 1;
+        rough[i] = joint ? 1 : 0;
+        const k = joint ? 0.78 + dirt[i] * 0.22 : tint[ty * tiles + tx] * (0.96 + dirt[i] * 0.06);
+        px[0] = (joint ? 128 : 197) * k;
+        px[1] = (joint ? 118 : 187) * k;
+        px[2] = (joint ? 104 : 171) * k;
+    }));
+    return { map, normalMap: twinNormalTex(height, S, 2.2), roughnessMap: twinGrayTex(rough, S, 0.32, 0.9) };
+});
+
+// Faïence 10 × 20 cm posée droite, joints foncés (la texture couvre 0,6 × 0,6 m)
+const twinFaienceSet = () => twinTexSet('faience', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    const cw = S / 6;
+    const ch = S / 3;
+    const grout = Math.max(1, S / 0.6 * 0.003);
+    const rnd = twinRandom(7);
+    const tint = Float32Array.from({ length: 18 }, () => 0.97 + rnd() * 0.04);
+    const height = new Float32Array(S * S);
+    const rough = new Float32Array(S * S);
+    const map = twinTex(twinPaint(S, (x, y, i, px) => {
+        const tx = Math.floor(x / cw);
+        const ty = Math.floor(y / ch);
+        const joint = x - tx * cw < grout || y - ty * ch < grout;
+        height[i] = joint ? 0 : 1;
+        rough[i] = joint ? 1 : 0;
+        const k = joint ? 1 : tint[ty * 6 + tx];
+        px[0] = (joint ? 112 : 243) * k;
+        px[1] = (joint ? 106 : 241) * k;
+        px[2] = (joint ? 98 : 234) * k;
+    }));
+    return { map, normalMap: twinNormalTex(height, S, 1.6), roughnessMap: twinGrayTex(rough, S, 0.16, 0.85) };
+});
+
+// Cloisons de labo : panneaux blancs à joints aluminium tous les 1,2 m
+const twinPanelSet = () => twinTexSet('panel', () => {
+    const S = 256;
+    const n = twinNoise(S, { cells: 4, octaves: 3, seed: 5 });
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const k = x < 2 ? 0.74 : 0.985 + n[i] * 0.02;
+            px[0] = 237 * k;
+            px[1] = 234 * k;
+            px[2] = 228 * k;
+        }))
+    };
+});
+
+// Crépi de la chambre froide
+const twinPlasterSet = () => twinTexSet('plaster', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    return { normalMap: twinNormalTex(twinNoise(S, { cells: 24, octaves: 4, seed: 9 }), S, 3.5) };
+});
+
+// Inox brossé : rugosité et micro-relief striés
+const twinBrushedSet = () => twinTexSet('brushed', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    const n = twinNoise(S, { cells: 96, octaves: 3, seed: 17, stretch: 32 });
+    return { roughnessMap: twinGrayTex(n, S, 0.2, 0.44), normalMap: twinNormalTex(n, S, 0.8) };
+});
+
+// Placage chêne doré (portes et habillage bois) : fil vertical
+const twinWoodSet = () => twinTexSet('wood', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    const grain = twinNoise(S, { cells: 2, octaves: 4, seed: 23, stretch: 1 / 40 });
+    const figure = twinNoise(S, { cells: 3, octaves: 3, seed: 29 });
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const t = twinClamp(grain[i] * 0.75 + figure[i] * 0.45 - 0.1, 0, 1);
+            const line = grain[i] > 0.63 ? 0.9 : 1;
+            px[0] = (186 - 30 * t) * line;
+            px[1] = (136 - 32 * t) * line;
+            px[2] = (78 - 22 * t) * line;
+        })),
+        normalMap: twinNormalTex(grain, S, 0.6)
+    };
+});
+
+// Plan de travail de labo en résine vert sauge
+const twinCounterSet = () => twinTexSet('counter', () => {
+    const S = 256;
+    const n = twinNoise(S, { cells: 32, octaves: 3, seed: 37 });
+    const [r, g, b] = twinRgb('#8B9A90');
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const k = 0.96 + n[i] * 0.07;
+            px[0] = r * k;
+            px[1] = g * k;
+            px[2] = b * k;
+        }))
+    };
+});
+
+// Pelouse d'automne avec feuilles mortes (la texture couvre 4 × 4 m)
+const twinGrassSet = () => twinTexSet('grass', () => {
+    const S = Twin.quality.tex;
+    const n = twinNoise(S, { cells: 16, octaves: 5, seed: 51 });
+    const m = twinNoise(S, { cells: 5, octaves: 3, seed: 52 });
+    const leaves = twinNoise(S, { cells: 160, octaves: 1, seed: 53 });
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const k = 0.82 + n[i] * 0.3;
+            let r = (112 + 38 * m[i]) * k;
+            let g = (122 + 16 * m[i]) * k;
+            let b = (70 + 6 * m[i]) * k;
+            // Feuilles mortes éparses (petites taches ocre et rouille)
+            if (leaves[i] > 0.82) {
+                const t = Math.min(1, (leaves[i] - 0.82) * 9) * 0.75;
+                const red = (x * 7 + y * 13) % 5 === 0;
+                r += ((red ? 172 : 196) - r) * t;
+                g += ((red ? 92 : 148) - g) * t;
+                b += ((red ? 46 : 64) - b) * t;
+            }
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+        })),
+        normalMap: twinNormalTex(n, S, 2.4)
+    };
+});
+
+// Pavés autour du bâtiment (0,30 × 0,15 m à joints décalés ; la texture couvre 1,2 m)
+const twinPaverSet = () => twinTexSet('pavers', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    const cols = 4;
+    const rows = 8;
+    const cw = S / cols;
+    const ch = S / rows;
+    const joint = Math.max(1, S / 1.2 * 0.006);
+    const rnd = twinRandom(61);
+    const tint = Float32Array.from({ length: cols * rows }, () => 0.86 + rnd() * 0.18);
+    const n = twinNoise(S, { cells: 24, octaves: 3, seed: 62 });
+    const height = new Float32Array(S * S);
+    const map = twinTex(twinPaint(S, (x, y, i, px) => {
+        const ty = Math.floor(y / ch);
+        const xx = (x + (ty % 2) * cw / 2) % S;
+        const tx = Math.floor(xx / cw);
+        const j = xx - tx * cw < joint || y - ty * ch < joint;
+        height[i] = j ? 0 : 0.8 + n[i] * 0.2;
+        const k = j ? 0.62 : tint[ty * cols + tx] * (0.92 + n[i] * 0.12);
+        px[0] = 184 * k;
+        px[1] = 176 * k;
+        px[2] = 164 * k;
+    }));
+    return { map, normalMap: twinNormalTex(height, S, 1.8) };
+});
+
+// Béton clair de la façade
+const twinFacadeSet = () => twinTexSet('facade', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    const n = twinNoise(S, { cells: 12, octaves: 5, seed: 71 });
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const k = 0.93 + n[i] * 0.1;
+            px[0] = 218 * k;
+            px[1] = 213 * k;
+            px[2] = 204 * k;
+        })),
+        normalMap: twinNormalTex(n, S, 1.2)
+    };
+});
+
+// Feuillage : relief de feuilles sur les houppiers
+const twinLeafSet = () => twinTexSet('leaves', () => {
+    const S = Math.min(512, Twin.quality.tex);
+    const n = twinNoise(S, { cells: 20, octaves: 3, seed: 81 });
+    return { normalMap: twinNormalTex(n, S, 5) };
+});
+
+// Parois ajourées des caisses vertes (canal d'opacité : noir = trou)
+const twinLatticeSet = () => twinTexSet('lattice', () => {
+    const canvas = twinCanvas(256, 128);
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, 256, 128);
+    g.fillStyle = '#000000';
+    for (let col = 0; col < 11; col++) {
+        for (let row = 0; row < 3; row++) g.fillRect(16 + col * 21.4, 18 + row * 32, 13, 22);
+    }
+    return { alphaMap: twinTex(canvas, { srgb: false }) };
+});
+
+// Contenu des boîtes de la réserve, vu du dessus (fruits séchés, herbes, pétales, thé…)
+const TWIN_CONTENT_PALETTES = {
+    fruit: { bg: '#6B4A2E', items: ['#C9A06A', '#B8864F', '#D8B47E', '#9C6B3C'] },
+    herbs: { bg: '#3F4F2A', items: ['#6E8B3D', '#8FA357', '#55702F', '#A3B86A'] },
+    petals: { bg: '#4A1418', items: ['#8E1F2B', '#B0303A', '#6E1622', '#C2484E'] },
+    flowers: { bg: '#6E5A2A', items: ['#E2C55A', '#F0DA82', '#C9A63A', '#FFF1B0'] },
+    tea: { bg: '#2B1E14', items: ['#4A3322', '#5E4129', '#3A2818', '#6B4C30'] },
+    caps: { bg: '#141414', items: ['#2E2E2E', '#232323', '#3A3A3A'] },
+    generic: { bg: '#8C7A62', items: ['#A8957A', '#BCA98C', '#7D6B55'] }
+};
+
+const twinContentSet = (kind) => twinTexSet(`content:${kind}`, () => {
+    const S = 256;
+    const canvas = twinCanvas(S);
+    const g = canvas.getContext('2d');
+    const pal = TWIN_CONTENT_PALETTES[kind] || TWIN_CONTENT_PALETTES.generic;
+    const rnd = twinRandom(kind.length * 97 + kind.charCodeAt(0));
+    g.fillStyle = pal.bg;
+    g.fillRect(0, 0, S, S);
+    const count = kind === 'fruit' ? 260 : kind === 'caps' ? 90 : 900;
+    for (let k = 0; k < count; k++) {
+        const x = rnd() * S;
+        const y = rnd() * S;
+        g.fillStyle = pal.items[Math.floor(rnd() * pal.items.length)];
+        g.beginPath();
+        if (kind === 'fruit') {
+            const r = 9 + rnd() * 10;
+            g.ellipse(x, y, r, r * (0.55 + rnd() * 0.45), rnd() * Math.PI, 0, Math.PI * 2);
+            g.fill();
+            g.strokeStyle = 'rgba(86, 54, 26, 0.65)';
+            g.lineWidth = 1.6;
+            g.stroke();
+            g.fillStyle = 'rgba(96, 62, 30, 0.45)';
+            g.beginPath();
+            g.arc(x, y, r * 0.2, 0, Math.PI * 2);
+        } else if (kind === 'caps') {
+            g.arc(x, y, 9 + rnd() * 2, 0, Math.PI * 2);
+            g.fill();
+            g.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+            g.lineWidth = 2;
+            g.stroke();
+            continue;
+        } else {
+            g.ellipse(x, y, 2 + rnd() * 5, 1.2 + rnd() * 3, rnd() * Math.PI, 0, Math.PI * 2);
+        }
+        g.fill();
+    }
+    return { map: twinTex(canvas) };
+});
+
+// Halo d'état posé au sol (anneau doux, remplace les anneaux pleins)
+const twinHaloSet = () => twinTexSet('halo', () => {
+    const S = 256;
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const r = Math.hypot(x + 0.5 - S / 2, y + 0.5 - S / 2) / (S / 2);
+            const fill = 0.22 * (1 - twinClamp(r / 0.95, 0, 1));
+            const ring = 0.85 * Math.exp(-(((r - 0.8) / 0.1) ** 2));
+            px[0] = px[1] = px[2] = 255;
+            px[3] = r >= 1 ? 0 : twinClamp(fill + ring, 0, 1) * 255;
+        }))
+    };
+});
+
+// Marquage hachuré d'un emplacement vide (rupture)
+const twinHatchSet = () => twinTexSet('hatch', () => {
+    const canvas = twinCanvas(256);
+    const g = canvas.getContext('2d');
+    g.clearRect(0, 0, 256, 256);
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 18;
+    for (let k = -256; k < 512; k += 52) {
+        g.beginPath();
+        g.moveTo(k, 256);
+        g.lineTo(k + 256, 0);
+        g.stroke();
+    }
+    g.lineWidth = 14;
+    g.strokeRect(7, 7, 242, 242);
+    return { map: twinTex(canvas) };
+});
+
+// Volute de vapeur (sprite doux)
+const twinSteamSet = () => twinTexSet('steam', () => {
+    const S = 64;
+    const n = twinNoise(S, { cells: 4, octaves: 3, seed: 91 });
+    return {
+        map: twinTex(twinPaint(S, (x, y, i, px) => {
+            const r = Math.hypot(x + 0.5 - S / 2, y + 0.5 - S / 2) / (S / 2);
+            px[0] = px[1] = px[2] = 255;
+            px[3] = twinClamp((1 - r) * 1.4, 0, 1) ** 1.6 * (0.55 + n[i] * 0.45) * 255;
+        }))
+    };
+});
+
+// Ciel (équirectangulaire : dégradé zénith → horizon → sol lointain)
+const TWIN_SKY = { zenith: '#7FA9D8', mid: '#B9D0E6', horizon: '#E4EAEE', ground: '#CFD1CB' };
+const twinSkyTexture = () => {
+    const { THREE } = Twin.lib;
+    const canvas = twinCanvas(4, 256);
+    const g = canvas.getContext('2d');
+    const grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, TWIN_SKY.zenith);
+    grad.addColorStop(0.36, TWIN_SKY.mid);
+    grad.addColorStop(0.495, TWIN_SKY.horizon);
+    grad.addColorStop(0.52, TWIN_SKY.ground);
+    grad.addColorStop(1, '#BFC2BB');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 4, 256);
+    const tex = twinTex(canvas);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    return tex;
+};
+
+// --- Textures dessinées (plaques, enseignes, étiquettes) ---
 const twinCanvasMaterial = (key, w, h, draw, opts = {}) => twinMat(`tex:${key}`, () => {
     const { THREE } = Twin.lib;
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
+    const canvas = twinCanvas(w, h);
     draw(canvas.getContext('2d'), w, h);
-    const map = new THREE.CanvasTexture(canvas);
-    map.colorSpace = THREE.SRGBColorSpace;
-    map.anisotropy = 4;
-    if (opts.repeat) {
-        map.wrapS = map.wrapT = THREE.RepeatWrapping;
-        map.repeat.set(opts.repeat[0], opts.repeat[1]);
-    }
-    return new THREE.MeshStandardMaterial({ map, roughness: opts.roughness ?? 0.6 });
+    const map = twinTex(canvas, { repeat: opts.repeat });
+    map.wrapS = map.wrapT = opts.repeat ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+    return new THREE.MeshStandardMaterial({ map, roughness: opts.roughness ?? 0.6, metalness: 0, ...opts.extra });
 });
 
 const twinPlateMaterial = (key, title, sub, accent) => twinCanvasMaterial(`plate:${key}`, 256, 128, (g, w, h) => {
@@ -4137,13 +4585,270 @@ const twinSignMaterial = (key, bg, fg, title, sub) => twinCanvasMaterial(`sign:$
     }
 });
 
-const twinTileMaterial = (rx, ry) => twinCanvasMaterial(`tiles:${rx}x${ry}`, 128, 128, (g) => {
-    g.fillStyle = '#F1F2EE';
-    g.fillRect(0, 0, 128, 128);
-    g.strokeStyle = '#D3D7D0';
-    g.lineWidth = 4;
-    g.strokeRect(2, 2, 124, 124);
-}, { repeat: [rx, ry], roughness: 0.5 });
+// Étiquette de bouteille ThéCol (bandeau à la couleur de l'arôme), face avant au centre de la texture
+const twinBottleLabelMaterial = (arome, color) => twinCanvasMaterial(`bottle:${normalizeName(arome)}:${color}`, 512, 128, (g, w, h) => {
+    g.fillStyle = '#F3EEE2';
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = color;
+    g.fillRect(0, 0, w, 20);
+    g.fillRect(0, h - 20, w, 20);
+    g.fillStyle = '#2B2B2B';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.font = '700 42px Outfit, sans-serif';
+    g.fillText('ThéCol', w / 2, 56);
+    g.font = '500 22px Outfit, sans-serif';
+    g.fillText(String(arome).slice(0, 22), w / 2, 88);
+}, { roughness: 0.55 });
+
+// Fiche de casier (arôme · format) et bon de livraison posé sur les caisses
+const twinTagMaterial = (key, title, sub, color) => twinCanvasMaterial(`tag:${key}`, 256, 160, (g, w, h) => {
+    g.fillStyle = '#FBFAF6';
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = color;
+    g.fillRect(0, 0, 22, h);
+    g.fillStyle = '#262626';
+    g.textBaseline = 'middle';
+    g.font = '700 34px Outfit, sans-serif';
+    g.fillText(String(title).slice(0, 13), 36, 52);
+    g.fillStyle = '#5E5E5E';
+    g.font = '500 28px Outfit, sans-serif';
+    g.fillText(String(sub).slice(0, 15), 36, 108);
+}, { roughness: 0.7 });
+
+const twinSheetMaterial = (key, numero, client, stripe) => twinCanvasMaterial(`sheet:${key}`, 256, 362, (g, w, h) => {
+    g.fillStyle = '#FDFDFB';
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = stripe;
+    g.fillRect(0, 0, w, 14);
+    g.fillStyle = '#5D7B3E';
+    g.font = '700 26px Outfit, sans-serif';
+    g.textBaseline = 'top';
+    g.fillText('ThéCol', 18, 26);
+    g.fillStyle = '#262626';
+    g.font = '700 21px Outfit, sans-serif';
+    g.fillText('BON DE LIVRAISON', 18, 66);
+    g.font = '700 30px Outfit, sans-serif';
+    g.fillText(`#${numero}`, 18, 98);
+    g.font = '500 20px Outfit, sans-serif';
+    g.fillStyle = '#4A4A4A';
+    g.fillText(String(client).slice(0, 20), 18, 140);
+    g.fillStyle = '#C9C6BE';
+    for (let k = 0; k < 7; k++) g.fillRect(18, 186 + k * 22, w - 36 - (k % 3) * 30, 6);
+    g.strokeStyle = '#B5B1A8';
+    g.lineWidth = 2;
+    g.strokeRect(18, 344 - 26, 90, 18);
+}, { roughness: 0.85 });
+
+// Échelle réelle : 1 unité = 1 mètre. Plan de l'étage (intérieur des façades) : labo, laverie et stock
+// côté fenêtres, couloir central, réserve avec chambre froide, vestiaire-bureau et expédition.
+const TWIN_PLAN = {
+    x0: -12, x1: 12, z0: -8, z1: 8,
+    wall: 0.25, part: 0.12,
+    height: 2.9, cut: 1.1, head: 2.45,
+    north: -1.06, south: 1.46, west: -1.76, east: 1.76, cold: -8.0,
+    plinth: 3.6
+};
+// Postes du labo : cuves 25 L puis plaques à induction sur le plan de travail sous les fenêtres
+const TWIN_LAB = {
+    benchZ: -7.65, benchH: 0.92,
+    cuve: (i) => [-11.35 + i * 0.6, -7.62],
+    plate: (i) => [-11.35 + Math.min(6, CONSTANTS.ATELIER_CUVES) * 0.6 + 0.2 + i * 0.62, -7.66],
+    island: [-7.0, -4.3]
+};
+// Cuve 25 L (cuiseur électrique inox à robinet, Ø 38 cm), casseroles 9 L / 4 L
+const TWIN_CUVE = { R: 0.19 };
+const TWIN_POTS = { 9: { r: 0.14, h: 0.22 }, 4: { r: 0.11, h: 0.15 } };
+// Bouteilles (hauteur, diamètre) selon la contenance ; casier = 30 × 40 cm
+const twinBottleSpec = (cl) => (cl <= 30 ? { h: 0.2, d: 0.056 } : cl <= 60 ? { h: 0.25, d: 0.068 } : { h: 0.31, d: 0.085 });
+// Profil de la bouteille (rayon 1 = corps, hauteur 1) : épaule longue et col large, comme les bouteilles de l'atelier
+const TWIN_BOTTLE_PROFILE = [[0, 0], [0.84, 0], [0.96, 0.012], [1, 0.045], [1, 0.52], [0.985, 0.585], [0.94, 0.645], [0.86, 0.705], [0.76, 0.76], [0.67, 0.81], [0.61, 0.855], [0.585, 0.895], [0.585, 0.93], [0.63, 0.935], [0.63, 0.975], [0.6, 0.985], [0, 0.985]];
+const TWIN_LIQUID_PROFILE = [[0, 0.02], [0.9, 0.02], [0.935, 0.05], [0.935, 0.52], [0.92, 0.585], [0.875, 0.645], [0.8, 0.705], [0.7, 0.76], [0.6, 0.81], [0.53, 0.85], [0, 0.85]];
+
+// Postes de travail occupés par les employés présents (ordre de remplissage)
+const TWIN_STATIONS = [
+    { x: -10.45, z: -6.85, ry: Math.PI },
+    { x: -8.45, z: -6.85, ry: Math.PI },
+    { x: -7.6, z: -3.1, ry: Math.PI },
+    { x: 3.0, z: -4.2, ry: Math.PI / 2 },
+    { x: 6.55, z: 1.95, ry: 0 },
+    { x: -5.4, z: 2.65, ry: Math.PI }
+];
+
+const twinGeometries = () => {
+    const { THREE } = Twin.lib;
+    const seg = Twin.quality.segments;
+    return {
+        box: twinGeo('box', () => new THREE.BoxGeometry(1, 1, 1)),
+        cyl: twinGeo('cyl', () => new THREE.CylinderGeometry(1, 1, 1, seg + 4)),
+        cylLow: twinGeo('cylLow', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
+        band: twinGeo('band', () => new THREE.CylinderGeometry(1, 1, 1, seg, 1, true, Math.PI, Math.PI * 2)),
+        trunk: twinGeo('trunk', () => new THREE.CylinderGeometry(0.55, 1, 1, 9)),
+        sphere: twinGeo('sphere', () => new THREE.SphereGeometry(1, seg, Math.round(seg * 0.6))),
+        dome: twinGeo('dome', () => new THREE.SphereGeometry(1, seg, Math.round(seg * 0.35), 0, Math.PI * 2, 0, Math.PI / 2)),
+        cone: twinGeo('cone', () => new THREE.ConeGeometry(1, 1, 24)),
+        ring: twinGeo('ring', () => new THREE.RingGeometry(0.86, 1, 56)),
+        plane: twinGeo('plane', () => new THREE.PlaneGeometry(1, 1)),
+        capsule: twinGeo('capsule', () => new THREE.CapsuleGeometry(0.5, 1, 6, Math.max(10, seg - 4))),
+        torus: twinGeo('torus', () => new THREE.TorusGeometry(1, 0.06, 8, 48)),
+        crown: twinGeo('crown', () => new THREE.IcosahedronGeometry(1, Twin.quality.level === 'high' ? 2 : 1)),
+        bowl: twinGeo('bowl', () => twinLathe([[0, 0], [0.42, 0.015], [0.72, 0.1], [0.9, 0.28], [0.98, 0.5], [1.02, 0.56]], seg)),
+        funnel: twinGeo('funnel', () => twinLathe([[0.07, 0], [0.07, 0.3], [0.16, 0.42], [1, 0.95], [1.03, 1]], seg)),
+        bottle: twinGeo('bottle', () => twinLathe(TWIN_BOTTLE_PROFILE, Math.max(10, seg - 4))),
+        liquid: twinGeo('liquid', () => twinLathe(TWIN_LIQUID_PROFILE, Math.max(10, seg - 4))),
+        // Cuve 25 L : paroi extérieure, rebord roulé, paroi intérieure et fond (visibles couvercle ouvert)
+        cuve: twinGeo('cuve', () => twinLathe([[0, 0.03], [0.17, 0.03], [0.181, 0.04], [0.188, 0.06], [0.19, 0.09], [0.19, 0.4], [0.196, 0.404], [0.2, 0.413], [0.197, 0.421], [0.188, 0.423], [0.183, 0.41], [0.183, 0.1], [0, 0.1]], seg + 8)),
+        cuveLid: twinGeo('cuveLid', () => twinLathe([[0, 0.064], [0.05, 0.06], [0.11, 0.048], [0.165, 0.026], [0.199, 0.01], [0.201, 0], [0.19, 0.004], [0, 0.004]], seg + 8)),
+        pot: twinGeo('pot', () => twinLathe([[0, 0], [0.96, 0], [1, 0.04], [1, 0.97], [1.05, 1], [1.05, 1.03], [0.97, 1.03], [0.97, 0.06], [0, 0.06]], seg + 4)),
+        // Blouse de labo (buste, épaules, basques) ; aplatie en profondeur à l'usage
+        coat: twinGeo('coat', () => twinLathe([[0, 0.7], [0.205, 0.7], [0.2, 0.84], [0.188, 0.97], [0.174, 1.06], [0.182, 1.18], [0.194, 1.3], [0.192, 1.38], [0.17, 1.445], [0.12, 1.49], [0.072, 1.515], [0, 1.515]], Math.max(12, seg)))
+    };
+};
+
+const twinMaterials = () => {
+    const p = Twin.palette;
+    const { THREE } = Twin.lib;
+    const lino = twinLinoSet('light', '#C2BAAD', 3);
+    const linoGrey = twinLinoSet('grey', '#9C968F', 4);
+    const mosaic = twinMosaicSet();
+    const faience = twinFaienceSet();
+    const brushed = twinBrushedSet();
+    const halo = twinHaloSet();
+    const env = { envMap: Twin.envTarget?.texture || null };
+    const glassy = { transparent: true, depthWrite: false, roughness: 0.04, metalness: 0, ...env };
+    return {
+        // Sols et extérieur (textures plaquées en coordonnées monde)
+        floorLab: twinSurf('floorLab', { ...lino, roughness: 0.55 }, 0.5),
+        floorGrey: twinSurf('floorGrey', { ...linoGrey, roughness: 0.6 }, 0.5),
+        floorMosaic: twinSurf('floorMosaic', { ...mosaic, roughness: 1 }, 2),
+        grass: twinSurf('grass', { ...twinGrassSet(), roughness: 0.95 }, 0.25),
+        pavers: twinSurf('pavers', { ...twinPaverSet(), roughness: 0.85 }, 1 / 1.2),
+        facade: twinSurf('facade', { ...twinFacadeSet(), roughness: 0.9 }, 0.5, 0.012),
+        slab: twinStd('slab', '#ECE9E3', { roughness: 0.7 }),
+        // Murs et menuiseries
+        panel: twinSurf('panel', { ...twinPanelSet(), roughness: 0.78 }, 1 / 1.2),
+        faience: twinSurf('faience', { ...faience, roughness: 1 }, 1 / 0.6),
+        plaster: twinSurf('plaster', { color: '#EFE9DF', ...twinPlasterSet(), roughness: 0.95 }, 1),
+        coldPanel: twinStd('coldPanel', '#F0F0EC', { roughness: 0.4 }),
+        cap: twinStd('cap', '#35312D', { roughness: 0.92 }),
+        skirting: twinStd('skirting', '#6A665F', { roughness: 0.55 }),
+        sill: twinStd('sill', '#E7E4DD', { roughness: 0.45 }),
+        frame: twinStd('frame', '#E9E8E3', { roughness: 0.5, metalness: 0.1 }),
+        bronze: twinStd('bronze', '#4E3B2B', { roughness: 0.36, metalness: 0.65, ...env }),
+        windowGlass: twinStd('windowGlass', '#D3E2EA', { ...glassy, opacity: 0.16, envMapIntensity: 1.6 }),
+        darkGlass: twinStd('darkGlass', '#2F3A42', { roughness: 0.08, metalness: 0.3, envMapIntensity: 1.2, ...env }),
+        wood: twinSurf('wood', { ...twinWoodSet(), roughness: 0.5 }, 0.8, 0.005),
+        doorGrey: twinStd('doorGrey', '#7A7E82', { roughness: 0.45, metalness: 0.15 }),
+        // Mobilier de labo (meubles blancs, lisses vert-de-gris, clips rouges, plans en résine sauge)
+        labWhite: twinStd('labWhite', '#E8E5DE', { roughness: 0.42 }),
+        labRail: twinStd('labRail', '#7B8B83', { roughness: 0.38, metalness: 0.25 }),
+        labRed: twinStd('labRed', '#C0362E', { roughness: 0.45 }),
+        labPlinth: twinStd('labPlinth', '#56625C', { roughness: 0.7 }),
+        counter: twinSurf('counter', { ...twinCounterSet(), roughness: 0.3 }, 1, 0.006),
+        sinkInner: twinStd('sinkInner', '#66756C', { roughness: 0.35 }),
+        faucet: twinStd('faucet', '#E6E3DD', { roughness: 0.25 }),
+        faucetGreen: twinStd('faucetGreen', '#3E8A58', { roughness: 0.35 }),
+        kitchenWhite: twinStd('kitchenWhite', '#F1F0EC', { roughness: 0.35 }),
+        // Métaux
+        steel: twinStd('steel', '#D3D8DB', { metalness: 0.9, roughness: 1, envMapIntensity: 1.1, ...env, ...brushed }),
+        steelShell: twinMat('steelShell', () => new THREE.MeshStandardMaterial({ color: '#D6DBDE', metalness: 0.92, roughness: 1, envMapIntensity: 1.1, ...env, ...brushed, side: THREE.DoubleSide })),
+        steelDark: twinStd('steelDark', '#6E7880', { metalness: 0.6, roughness: 0.42, envMapIntensity: 1.1, ...env }),
+        chrome: twinStd('chrome', '#EDF1F3', { metalness: 1, roughness: 0.08, envMapIntensity: 1.3, ...env }),
+        alu: twinStd('alu', '#C2C7CB', { metalness: 0.8, roughness: 0.3, envMapIntensity: 1.15, ...env }),
+        mesh: twinStd('mesh', '#A2A9AE', { metalness: 0.85, roughness: 0.5, envMapIntensity: 1.1, ...env }),
+        // Plastiques, caoutchouc
+        rubber: twinStd('rubber', '#202427', { roughness: 0.92 }),
+        plastic: twinStd('plastic', '#25292D', { roughness: 0.45 }),
+        plasticLight: twinStd('plasticLight', '#3A3F45', { roughness: 0.4 }),
+        whitePlastic: twinStd('whitePlastic', '#ECEBE6', { roughness: 0.4 }),
+        crateBlack: twinStd('crateBlack', '#1E2022', { roughness: 0.62 }),
+        crateGreen: twinMat('crateGreen', () => new THREE.MeshStandardMaterial({ color: '#2F9A4B', roughness: 0.55, alphaMap: twinLatticeSet().alphaMap, alphaTest: 0.5, side: THREE.DoubleSide })),
+        crateGreenSolid: twinStd('crateGreenSolid', '#2F9A4B', { roughness: 0.55 }),
+        dolly: twinStd('dolly', '#2357A8', { roughness: 0.5 }),
+        boxPlastic: twinStd('boxPlastic', '#F4F8F8', { ...glassy, opacity: 0.24, roughness: 0.12, envMapIntensity: 1.3 }),
+        boxLid: twinStd('boxLid', '#8DA2B5', { roughness: 0.4 }),
+        boxClip: twinStd('boxClip', '#5E7891', { roughness: 0.4 }),
+        film: twinStd('film', '#F2F6F7', { ...glassy, opacity: 0.2, roughness: 0.2, envMapIntensity: 1.2 }),
+        // Verre et thé
+        bottleGlass: twinStd('bottleGlass', '#EEF5F3', { ...glassy, opacity: 0.22, envMapIntensity: 2 }),
+        liquid: twinStd('liquid', '#FFFFFF', { roughness: 0.1, ...env }),
+        capBlack: twinStd('capBlack', '#171717', { roughness: 0.35, metalness: 0.5, ...env }),
+        jarGlass: twinStd('jarGlass', '#EAF4F2', { ...glassy, opacity: 0.25 }),
+        // Papier, carton
+        kraft: twinStd('kraft', '#C4A27A', { roughness: 0.9 }),
+        kraftTape: twinStd('kraftTape', '#A9844F', { roughness: 0.6 }),
+        sackPaper: twinMat('sackPaper', () => Object.assign(new THREE.MeshStandardMaterial({ color: '#C9A77C', roughness: 0.95 }), { userData: { bevel: 0.05 } })),
+        board: twinStd('board', '#7B5A3D', { roughness: 0.8 }),
+        waterPlastic: twinStd('waterPlastic', '#D3E4F0', { roughness: 0.3 }),
+        label: twinStd('label', '#F6F5F0', { roughness: 0.7 }),
+        tint: twinStd('tint', '#FFFFFF', { roughness: 0.72 }),
+        // Personnes (mannequins en tenue d'hygiène)
+        skin: twinStd('skin', '#D9C2AA', { roughness: 0.72 }),
+        coat: twinStd('coat', '#F4F3EF', { roughness: 0.85 }),
+        trousers: twinStd('trousers', '#E4E4DF', { roughness: 0.85 }),
+        shoes: twinStd('shoes', '#262626', { roughness: 0.6 }),
+        gloves: twinStd('gloves', '#5277D3', { roughness: 0.5 }),
+        hairnet: twinStd('hairnet', '#F8F8F6', { roughness: 0.95 }),
+        fabric: twinStd('fabric', '#FFFFFF', { roughness: 0.8 }),
+        // Végétation
+        bark: twinStd('bark', '#5A4636', { roughness: 0.95 }),
+        leaves: twinStd('leaves', '#FFFFFF', { roughness: 0.85, ...twinLeafSet() }),
+        // Divers
+        dark: twinStd('dark', '#2F3438', { roughness: 0.7 }),
+        glassTop: twinStd('glassTop', '#0F1113', { roughness: 0.06, metalness: 0.35 }),
+        inductionOff: twinStd('inductionOff', '#4A4F55', { roughness: 0.3 }),
+        inductionOn: twinStd('inductionOn', '#FF7A1A', { emissive: '#FF5A00', emissiveIntensity: 0.9, roughness: 0.3 }),
+        ledOn: twinStd('ledOn', '#5CE07A', { emissive: '#5CE07A', emissiveIntensity: 1.2 }),
+        ledOrange: twinStd('ledOrange', '#FFB347', { emissive: '#FF9A1F', emissiveIntensity: 1.1 }),
+        ledOff: twinStd('ledOff', '#555B60', { roughness: 0.5 }),
+        valveRed: twinStd('valveRed', '#C7342B', { roughness: 0.5 }),
+        cee: twinStd('cee', '#D23B2E', { roughness: 0.45 }),
+        ceeBlue: twinStd('ceeBlue', '#2D5FB0', { roughness: 0.45 }),
+        white: twinStd('white', '#F7F7F2', { roughness: 0.6 }),
+        whiteDark: twinStd('whiteDark', '#E3E4DE', { roughness: 0.65 }),
+        brand: twinStd('brand', p.primary, { roughness: 0.55 }),
+        screen: twinStd('screen', p.primaryLight, { emissive: p.primaryLight, emissiveIntensity: 0.9 }),
+        extinguisher: twinStd('extinguisher', '#C7342B', { roughness: 0.4, metalness: 0.2 }),
+        hoseBeige: twinStd('hoseBeige', '#E2D6BF', { roughness: 0.7 }),
+        mat: twinStd('mat', '#1C1D1F', { roughness: 0.95 }),
+        hazard: twinStd('hazard', '#E9B825', { roughness: 0.6 }),
+        // Indicateurs intégrés au décor : halos au sol, gyrophares, emplacement vide hachuré
+        ringDanger: twinBasic('haloDanger', p.danger, { map: halo.map, opacity: 0.9 }),
+        ringWarning: twinBasic('haloWarning', p.warning, { map: halo.map, opacity: 0.9 }),
+        ringWarningSoft: twinBasic('haloWarningSoft', p.warning, { map: halo.map, opacity: 0.5 }),
+        ringSuccess: twinBasic('haloSuccess', p.success, { map: halo.map, opacity: 0.6 }),
+        ringPlanned: twinBasic('haloPlanned', p.info, { map: halo.map, opacity: 0.6 }),
+        hatch: twinBasic('hatch', p.danger, { map: twinHatchSet().map, opacity: 0.85 }),
+        beaconDanger: twinStd('beaconDanger', p.danger, { emissive: p.danger, emissiveIntensity: 0.8, transparent: true, opacity: 0.88, roughness: 0.2 }),
+        beaconWarning: twinStd('beaconWarning', p.warning, { emissive: p.warning, emissiveIntensity: 0.8, transparent: true, opacity: 0.88, roughness: 0.2 }),
+        proxy: twinMat('proxy', () => new THREE.MeshBasicMaterial())
+    };
+};
+
+// Teinte des liquides : couleur de l'arôme fondue dans un ambré de thé infusé
+const twinTeaColor = (hex) => {
+    const [r, g, b] = twinRgb(hex);
+    const mix = (c, t) => Math.round(c * 0.58 + t * 0.42);
+    return `#${[mix(r, 196), mix(g, 112), mix(b, 38)].map(v => Math.min(255, v).toString(16).padStart(2, '0')).join('')}`;
+};
+
+const twinColorMats = (color) => ({
+    liquid: twinStd('liquidTea', twinShade(twinTeaColor(color), 0.72), { roughness: 0.06, envMap: Twin.envTarget?.texture || null, envMapIntensity: 1.2 })
+});
+
+const TWIN_STATE_COLORS = { critical: '#D9776C', empty: '#D9776C', low: '#E3B85A', ok: '#8DB86A', unknown: '#B9BDB5' };
+
+const twinShade = (hex, factor) => {
+    let h = safeColor(hex).slice(1);
+    if (h.length < 6) h = h.slice(0, 3).split('').map(c => c + c).join('');
+    const n = parseInt(h.slice(0, 6), 16);
+    const ch = (shift) => {
+        const v = (n >> shift) & 255;
+        const out = factor <= 1 ? v * factor : v + (255 - v) * (factor - 1);
+        return Math.round(Math.min(255, out)).toString(16).padStart(2, '0');
+    };
+    return `#${ch(16)}${ch(8)}${ch(0)}`;
+};
 
 // --- Assemblage instancié : un InstancedMesh par couple géométrie × matériau ---
 const twinBatch = () => new Map();
@@ -4157,6 +4862,8 @@ const twinBatchFlush = (batch, parent) => {
         if (e.colors.some(Boolean)) e.colors.forEach((c, i) => mesh.setColorAt(i, color.set(c || '#ffffff')));
         mesh.castShadow = e.cast;
         mesh.receiveShadow = e.receive;
+        // Verre, films et halos n'entrent pas dans l'occlusion ambiante (sinon voile sombre sur les vitres)
+        if (e.mat.transparent) mesh.userData.twinNoAO = true;
         mesh.computeBoundingSphere();
         parent.add(mesh);
     });
@@ -4165,10 +4872,12 @@ const twinBatchFlush = (batch, parent) => {
 
 // Repère local (position + rotation Y) : part() alimente le lot instancié,
 // mesh() crée un objet individuel (animé), point() convertit en coordonnées monde.
+// Les boîtes reçoivent automatiquement la variante « arêtes adoucies » de leur matériau.
 const twinBuilder = (batch, parent, x, z, rotY = 0, y = 0) => {
     const { THREE } = Twin.lib;
     const origin = new THREE.Matrix4().makeRotationY(rotY).setPosition(x, y, z);
     const dummy = Twin.dummy;
+    const boxed = (geo, mat) => (geo === Twin.geo.box ? twinBevelMat(mat) : mat);
     const matrix = (p, s, o = {}) => {
         dummy.position.set(p[0], p[1], p[2]);
         dummy.rotation.set(o.rx || 0, o.ry || 0, o.rz || 0);
@@ -4179,19 +4888,21 @@ const twinBuilder = (batch, parent, x, z, rotY = 0, y = 0) => {
     return {
         matrix,
         part(geo, mat, p, s, o = {}) {
-            const key = `${geo.uuid}|${mat.uuid}`;
+            const m = boxed(geo, mat);
+            const key = `${geo.uuid}|${m.uuid}`;
             let e = batch.get(key);
             if (!e) {
-                e = { geo, mat, matrices: [], colors: [], cast: o.cast !== false && !mat.transparent, receive: o.receive !== false && !mat.transparent };
+                e = { geo, mat: m, matrices: [], colors: [], cast: o.cast !== false && !mat.transparent, receive: o.receive !== false && !mat.transparent };
                 batch.set(key, e);
             }
             e.matrices.push(matrix(p, s, o));
             e.colors.push(o.color || null);
         },
         mesh(geo, mat, p, s, o = {}) {
-            const mesh = twinMesh(geo, mat, { cast: o.cast !== false && !mat.transparent, receive: !!o.receive });
+            const mesh = twinMesh(geo, boxed(geo, mat), { cast: o.cast !== false && !mat.transparent, receive: !!o.receive });
             matrix(p, s, o).decompose(mesh.position, mesh.quaternion, mesh.scale);
             if (o.renderOrder) mesh.renderOrder = o.renderOrder;
+            if (mat.transparent) mesh.userData.twinNoAO = true;
             parent.add(mesh);
             return mesh;
         },
@@ -4204,6 +4915,198 @@ const twinBuilder = (batch, parent, x, z, rotY = 0, y = 0) => {
 const twinFlat = (b, geo, mat, x, y, z, w, d, o = {}) =>
     b.part(geo, mat, [x, y, z], [w, d, 1], { rx: -Math.PI / 2, cast: false, receive: false, ...o });
 
+// --- Monde : ciel, reflets, lumière, post-traitement (reconstruit à chaque changement de qualité) ---
+// Carte d'environnement « atelier » : pièce claire, réglettes LED au plafond, baies vitrées
+const twinEnvironmentMap = () => {
+    const { THREE } = Twin.lib;
+    const scene = new THREE.Scene();
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const mats = [];
+    const add = (color, intensity, p, s, side = THREE.FrontSide) => {
+        const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(intensity), side });
+        mats.push(mat);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(p[0], p[1], p[2]);
+        mesh.scale.set(s[0], s[1], s[2]);
+        scene.add(mesh);
+    };
+    add('#CFCBC3', 1, [0, 1.4, 0], [26, 5.8, 18], THREE.BackSide);
+    add('#7E7973', 1, [0, -1.48, 0], [26, 0.04, 18]);
+    add('#5F5B56', 1, [0, -1.05, 0], [25.6, 0.85, 17.6], THREE.BackSide);
+    for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 3; j++) add('#FFFFFF', 9, [-9 + i * 6, 4.25, -5 + j * 5], [3.4, 0.05, 0.32]);
+    }
+    add('#E6F0F9', 5, [0, 0.9, -8.95], [20, 1.6, 0.05]);
+    add('#FFF2DE', 3, [-12.95, 0.9, 1], [0.05, 1.6, 9]);
+    add('#E9EEF2', 2.5, [0, 0.9, 8.95], [16, 1.4, 0.05]);
+    add('#4A4744', 1, [12.95, 0.4, 0], [0.05, 2.6, 10]);
+    const pmrem = new THREE.PMREMGenerator(Twin.renderer);
+    const target = pmrem.fromScene(scene, 0.035);
+    pmrem.dispose();
+    geo.dispose();
+    mats.forEach(m => m.dispose());
+    return target;
+};
+
+// Cadre l'ombre portée du soleil sur le bâtiment (projection orthographique ajustée)
+const twinFitShadow = (light, min, max, penumbra) => {
+    const { THREE } = Twin.lib;
+    const cam = light.shadow.camera;
+    cam.position.copy(light.position);
+    cam.lookAt(light.target.position);
+    cam.updateMatrixWorld();
+    const v = new THREE.Vector3();
+    const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    for (let i = 0; i < 8; i++) {
+        v.set(i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]).applyMatrix4(cam.matrixWorldInverse);
+        lo.min(v);
+        hi.max(v);
+    }
+    Object.assign(cam, { left: lo.x - 0.4, right: hi.x + 0.4, bottom: lo.y - 0.4, top: hi.y + 0.4, near: Math.max(0.5, -hi.z - 1), far: -lo.z + 1 });
+    cam.updateProjectionMatrix();
+    light.shadow.radius = twinClamp(penumbra / ((hi.x - lo.x + 0.8) / light.shadow.mapSize.x), 1, 5);
+};
+
+// Lumière « jour + plafonniers » : zénithale douce depuis l'avant-gauche, appoint froid côté fenêtres
+const twinLights = (scene) => {
+    const { THREE } = Twin.lib;
+    const q = Twin.quality;
+    const hemi = new THREE.HemisphereLight(0xf2f5fb, 0xb9ad9b, 0.8);
+    const key = new THREE.DirectionalLight(0xfff3e4, 2.75);
+    key.position.set(-9, 19, 11);
+    key.target.position.set(0, 0, -0.5);
+    key.castShadow = true;
+    key.shadow.mapSize.set(q.shadow, q.shadow);
+    key.shadow.bias = -0.0003;
+    key.shadow.normalBias = 0.02;
+    twinFitShadow(key, [-15.5, -3.7, -10.8], [15.5, 3.1, 10.8], 0.022);
+    const fill = new THREE.DirectionalLight(0xdfe8ff, 0.45);
+    fill.position.set(14, 9, -12);
+    scene.add(hemi, key, key.target, fill);
+};
+
+const twinShadowsDirty = () => {
+    if (Twin.renderer) Twin.renderer.shadowMap.needsUpdate = true;
+};
+
+// Post-traitement : occlusion ambiante (GTAO) puis sortie (tonemapping, sRGB). Économie : rendu direct.
+let TwinAOPass = null;
+const twinSetupComposer = () => {
+    const { THREE, EffectComposer, RenderPass, GTAOPass, OutputPass } = Twin.lib;
+    const q = Twin.quality;
+    if (!q.ao) return;
+    if (!TwinAOPass) {
+        TwinAOPass = class extends GTAOPass {
+            setSize(width, height) {
+                const k = this.twinScale || 1;
+                super.setSize(Math.max(1, Math.round(width * k)), Math.max(1, Math.round(height * k)));
+            }
+
+            // Verre, halos, marqueurs et vapeur n'entrent pas dans le calcul d'occlusion
+            _overrideVisibility() {
+                super._overrideVisibility();
+                const cache = this._visibilityCache;
+                this.scene.traverse(o => {
+                    if (o.visible && o.userData.twinNoAO) {
+                        o.visible = false;
+                        cache.push(o);
+                    }
+                });
+            }
+        };
+    }
+    const size = Twin.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 });
+    const composer = new EffectComposer(Twin.renderer, target);
+    composer.addPass(new RenderPass(Twin.scene, Twin.camera));
+    const ao = new TwinAOPass(Twin.scene, Twin.camera, size.x, size.y);
+    ao.twinScale = q.ao;
+    ao.output = GTAOPass.OUTPUT.Default;
+    ao.blendIntensity = 1;
+    ao.updateGtaoMaterial({ radius: 0.36, distanceExponent: 1.2, thickness: 0.6, scale: 1.7, samples: q.level === 'high' ? 16 : 12, distanceFallOff: 1, screenSpaceRadius: false });
+    ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 5, radiusExponent: 1.4, rings: 2, samples: 16 });
+    composer.addPass(ao);
+    const output = new OutputPass();
+    composer.addPass(output);
+    Object.assign(Twin, { composer, aoPass: ao, outputPass: output });
+};
+
+const twinRender = () => {
+    if (Twin.composer) Twin.composer.render();
+    else Twin.renderer.render(Twin.scene, Twin.camera);
+};
+
+const twinBuildWorld = () => {
+    const { THREE } = Twin.lib;
+    const level = twinResolveQuality();
+    Twin.quality = { setting: twinQualitySetting(), level, ...TWIN_QUALITY_LEVELS[level] };
+    Twin.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Twin.quality.dpr));
+    const scene = new THREE.Scene();
+    Twin.scene = scene;
+    scene.background = twinSkyTexture();
+    scene.fog = new THREE.Fog(TWIN_SKY.horizon, 60, 170);
+    Twin.envTarget = twinEnvironmentMap();
+    scene.environment = Twin.envTarget.texture;
+    scene.environmentIntensity = 0.62;
+    twinLights(scene);
+    Twin.dynamic = new THREE.Group();
+    Twin.markers = new THREE.Group();
+    Twin.markers.userData.twinNoAO = true;
+    scene.add(Twin.dynamic, Twin.markers);
+    Twin.cutaways = [];
+    twinBuildEnvironment();
+    twinBuildMarkers();
+    twinSetupComposer();
+    twinShadowsDirty();
+};
+
+const twinDisposeWorld = () => {
+    if (!Twin.scene) return;
+    Twin.scene.traverse(o => {
+        if (o.isInstancedMesh) o.dispose();
+        if (o.isLight && o.shadow?.map) o.shadow.dispose();
+        if (o.isMesh || o.isPoints || o.isLine) {
+            o.geometry?.dispose();
+            (Array.isArray(o.material) ? o.material : [o.material]).forEach(mat => mat?.dispose());
+        }
+    });
+    Object.values(Twin.geo).forEach(g => g.dispose());
+    Object.values(Twin.mats).forEach(mat => mat.dispose());
+    Twin.variants.forEach(mat => mat.dispose());
+    Twin.textures.forEach(t => t.dispose());
+    Twin.envTarget?.dispose();
+    Twin.composer?.dispose();
+    Twin.aoPass?.dispose();
+    Twin.outputPass?.dispose();
+    Twin.proxies?.clear();
+    Object.assign(Twin, {
+        scene: null, dynamic: null, markers: null, composer: null, aoPass: null, outputPass: null, envTarget: null,
+        geo: {}, mats: {}, variants: new Map(), textures: [], texSets: {},
+        steam: [], cutaways: [], flashes: [], fills: [], pulseMats: []
+    });
+};
+
+// Changement de qualité : on garde le moteur (contexte WebGL, caméra, commandes) et on reconstruit le monde
+const twinApplyQuality = () => {
+    if (!Twin.renderer || !Twin.lib) return;
+    const pos = Twin.camera.position.clone();
+    const target = Twin.controls.target.clone();
+    twinDisposeWorld();
+    twinBuildWorld();
+    twinResize();
+    if (Twin.model && Twin.container) {
+        twinBuildDynamic(Twin.model);
+        twinBuildLabels(Twin.model);
+        twinPositionMarkers();
+    }
+    Twin.camera.position.copy(pos);
+    Twin.controls.target.copy(target);
+    Twin.controls.update();
+    twinRenderQualityMenu();
+    twinWake();
+};
+
 const twinInitEngine = () => {
     const { THREE, OrbitControls } = Twin.lib;
     Twin.palette = {
@@ -4214,41 +5117,29 @@ const twinInitEngine = () => {
         success: twinCssColor('--success', '#5C8A3C'),
         info: twinCssColor('--info', '#2E72B8'),
         bg: twinCssColor('--bg', '#F5F5F0'),
-        floor: twinCssColor('--bg-secondary', '#FAFAF7'),
-        ground: twinCssColor('--bg-tertiary', '#EFECE4'),
         zones: Object.fromEntries(TWIN_ZONES.map(z => [z.id, twinCssColor(z.token, '#5D7B3E')]))
     };
     const compact = window.matchMedia?.('(max-width: 768px)').matches;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, compact ? 1.75 : 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    // Ombres statiques : recalculées seulement quand la scène change (pas à chaque mouvement de caméra)
+    renderer.shadowMap.autoUpdate = false;
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1.0;
     renderer.domElement.className = 'twin-gl';
     renderer.domElement.setAttribute('role', 'img');
     renderer.domElement.setAttribute('aria-label', "Vue 3D de l'atelier ThéCol. Utilisez la liste des objets pour une navigation au clavier.");
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(Twin.palette.bg);
-    scene.fog = new THREE.Fog(Twin.palette.bg, 45, 95);
-    // Reflets d'atelier pour l'inox (sans carte d'environnement, le métal paraît noir)
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    const room = new Twin.lib.RoomEnvironment();
-    scene.environment = pmrem.fromScene(room, 0.04).texture;
-    scene.environmentIntensity = 0.55;
-    room.dispose?.();
-    pmrem.dispose();
-
-    const camera = new THREE.PerspectiveCamera(38, 1.6, 0.05, 250);
+    const camera = new THREE.PerspectiveCamera(36, 1.6, 0.1, 400);
     camera.position.set(...TWIN_VIEW_OVERVIEW.pos);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.minDistance = 0.8;
-    controls.maxDistance = 48;
+    controls.maxDistance = compact ? 58 : 50;
     controls.maxPolarAngle = Math.PI * 0.46;
     controls.screenSpacePanning = false;
     controls.autoRotateSpeed = 0.5;
@@ -4260,33 +5151,15 @@ const twinInitEngine = () => {
     controls.addEventListener('start', () => { Twin.tween = null; });
     controls.update();
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0xd9d2c0, 0.85));
-    const sun = new THREE.DirectionalLight(0xfff4e2, 2.2);
-    sun.position.set(-8, 17, 11);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(compact ? 1024 : 2048, compact ? 1024 : 2048);
-    Object.assign(sun.shadow.camera, { left: -20, right: 20, top: 14, bottom: -14, near: 2, far: 50 });
-    sun.shadow.bias = -0.0004;
-    sun.shadow.normalBias = 0.015;
-    scene.add(sun);
-    const fill = new THREE.DirectionalLight(0xe8f0ff, 0.45);
-    fill.position.set(10, 9, -7);
-    scene.add(fill);
-
     Object.assign(Twin, {
-        renderer, scene, camera, controls,
+        renderer, camera, controls,
         raycaster: new THREE.Raycaster(),
         ndc: new THREE.Vector2(),
         tmp: new THREE.Vector3(),
         dummy: new THREE.Object3D(),
-        dynamic: new THREE.Group(),
-        markers: new THREE.Group(),
         proxies: new THREE.Group()
     });
-    scene.add(Twin.dynamic);
-    scene.add(Twin.markers);
-    twinBuildEnvironment();
-    twinBuildMarkers();
+    twinBuildWorld();
 
     const canvas = renderer.domElement;
     canvas.addEventListener('pointermove', (e) => {
@@ -4318,275 +5191,747 @@ const twinInitEngine = () => {
     });
 };
 
-// --- Éléments réutilisables (dimensions réelles) ---
-// Palette Europe 1,20 × 0,80 × 0,144 m (longueur sur x)
-const twinPallet = (b, x, z) => {
-    const g = twinGeometries();
-    const m = twinMaterials();
-    [-0.32, -0.16, 0, 0.16, 0.32].forEach(dz => b.part(g.box, m.wood, [x, 0.132, z + dz], [1.2, 0.022, 0.1]));
-    [-0.525, 0, 0.525].forEach(dx => [-0.33, 0, 0.33].forEach(dz => b.part(g.box, m.woodDark, [x + dx, 0.083, z + dz], [0.15, 0.078, 0.14])));
-    [-0.33, 0, 0.33].forEach(dz => b.part(g.box, m.wood, [x, 0.022, z + dz], [1.2, 0.022, 0.14]));
-};
-const TWIN_PALLET_TOP = 0.144;
+// --- Bâtiment : terrain arboré, rez-de-chaussée, dalle de l'étage, façades, cloisons coupées (maquette) ---
+const TWIN_TREES = [
+    [-16.8, -15.2, 1.1, 0], [-10.2, -16.4, 1.25, 1], [-3.6, -15.6, 1.0, 2], [3.1, -16.8, 1.2, 3], [9.4, -15.4, 1.05, 0],
+    [15.8, -16.2, 1.25, 1], [-19.6, -6.4, 1.15, 2], [-20.2, 3.2, 1.0, 3], [19.8, -7.0, 1.1, 1], [20.4, 2.6, 1.2, 0],
+    [-17.6, 13.8, 0.95, 1], [17.0, 14.2, 1.0, 2]
+];
+// Feuillages d'automne (orangé, jaune, vert, rouille), nuances tirées au hasard par bouquet
+const TWIN_TREE_COLORS = [
+    ['#B8733A', '#C98744', '#A6612F', '#8E5A2E'],
+    ['#C7A548', '#B8963E', '#D2B45C', '#9C8236'],
+    ['#748A44', '#86984F', '#647A3A', '#5A6B35'],
+    ['#A4513A', '#B4623F', '#8F4532', '#7C4A33']
+];
 
-// Casier à bouteilles 30 × 40 cm (x × z), hauteur selon le format
-const twinCrate = (b, x, y, z, color, h) => {
-    const g = twinGeometries();
+const TWIN_ROOMS = [
+    { id: 'labo', x: [-12, -1.76], z: [-8, -1.06], floor: 'floorLab' },
+    { id: 'laverie', x: [-1.76, 1.76], z: [-8, -1.06], floor: 'floorMosaic' },
+    { id: 'stock', x: [1.76, 12], z: [-8, -1.06], floor: 'floorLab' },
+    { id: 'couloir', x: [-12, 12], z: [-1.06, 1.46], floor: 'floorGrey' },
+    { id: 'reserve', x: [-12, -1.76], z: [1.46, 8], floor: 'floorMosaic' },
+    { id: 'vestiaire', x: [-1.76, 1.76], z: [1.46, 8], floor: 'floorGrey' },
+    { id: 'expedition', x: [1.76, 12], z: [1.46, 8], floor: 'floorGrey' }
+];
+
+// Façades : [centre, largeur] des fenêtres et portes le long du mur ; finitions intérieures par tronçon
+const TWIN_FACADES = [
+    { id: 'back', axis: 'x', at: -8.125, out: -1, from: -12.25, to: 12.25,
+        windows: [[-9.4, 2.6], [-5.0, 2.6], [0, 1.4], [4.9, 2.6], [9.3, 2.6]], doors: [],
+        finish: [[-12.25, -1.76, 'panel'], [-1.76, 1.76, 'faience'], [1.76, 12.25, 'panel']] },
+    { id: 'front', axis: 'x', at: 8.125, out: 1, from: -12.25, to: 12.25,
+        windows: [[-5.0, 2.0], [0, 1.4], [5.2, 2.4], [9.2, 2.4]], doors: [],
+        finish: [[-12.25, -8.0, 'plaster'], [-8.0, -1.76, 'faience'], [-1.76, 12.25, 'panel']] },
+    { id: 'west', axis: 'z', at: -12.125, out: -1, from: -8, to: 8,
+        windows: [], doors: [[0.2, 1.0]], finish: [[-8, 1.46, 'panel'], [1.46, 8, 'plaster']] },
+    { id: 'east', axis: 'z', at: 12.125, out: 1, from: -8, to: 8,
+        windows: [[-4.5, 2.4]], doors: [[4.3, 1.8]], finish: [[-8, 8, 'panel']] }
+];
+
+// Cloisons intérieures (coupées) : côté A = x ou z négatif, côté B = positif
+const TWIN_PARTITIONS = [
+    { axis: 'x', at: -1.06, from: -12, to: 12, doors: [[-4.0, 1.0], [0, 0.9], [2.85, 1.0]],
+        finA: [[-12, -1.76, 'panel'], [-1.76, 1.76, 'faience'], [1.76, 12, 'panel']], finB: [[-12, 12, 'panel']] },
+    { axis: 'x', at: 1.46, from: -12, to: 12, doors: [[-4.0, 1.0], [0, 0.9], [4.0, 1.6]],
+        finA: [[-12, 12, 'panel']], finB: [[-12, -8.0, 'plaster'], [-8.0, -1.76, 'faience'], [-1.76, 12, 'panel']] },
+    { axis: 'z', at: -1.76, from: -8, to: -1.12, doors: [[-2.7, 0.9]], finA: [[-8, -1.12, 'panel']], finB: [[-8, -1.12, 'faience']] },
+    { axis: 'z', at: 1.76, from: -8, to: -1.12, doors: [], finA: [[-8, -1.12, 'faience']], finB: [[-8, -1.12, 'panel']] },
+    { axis: 'z', at: -1.76, from: 1.52, to: 8, doors: [], finA: [[1.52, 8, 'faience']], finB: [[1.52, 8, 'panel']] },
+    { axis: 'z', at: 1.76, from: 1.52, to: 8, doors: [], finA: [[1.52, 8, 'panel']], finB: [[1.52, 8, 'panel']] },
+    { axis: 'z', at: -8.0, from: 1.52, to: 8, doors: [[3.0, 0.9]], finA: [[1.52, 8, 'plaster']], finB: [[1.52, 8, 'coldPanel']] }
+];
+
+const twinTree = (b, x, z, s, k) => {
     const m = twinMaterials();
-    const rim = twinShade(color, 0.72);
-    b.part(g.box, m.tint, [x, y + 0.006, z], [0.29, 0.012, 0.39], { color });
-    b.part(g.box, m.tint, [x, y + h / 2, z + 0.195], [0.3, h, 0.01], { color });
-    b.part(g.box, m.tint, [x, y + h / 2, z - 0.195], [0.3, h, 0.01], { color });
-    b.part(g.box, m.tint, [x + 0.145, y + h / 2, z], [0.01, h, 0.38], { color });
-    b.part(g.box, m.tint, [x - 0.145, y + h / 2, z], [0.01, h, 0.38], { color });
-    b.part(g.box, m.tint, [x, y + h - 0.008, z + 0.195], [0.31, 0.016, 0.016], { color: rim });
-    b.part(g.box, m.tint, [x, y + h - 0.008, z - 0.195], [0.31, 0.016, 0.016], { color: rim });
-    b.part(g.box, m.tint, [x + 0.145, y + h - 0.008, z], [0.016, 0.016, 0.39], { color: rim });
-    b.part(g.box, m.tint, [x - 0.145, y + h - 0.008, z], [0.016, 0.016, 0.39], { color: rim });
-    b.part(g.box, m.dark, [x, y + h * 0.72, z + 0.201], [0.12, 0.03, 0.004], { cast: false });
-    b.part(g.box, m.dark, [x, y + h * 0.72, z - 0.201], [0.12, 0.03, 0.004], { cast: false });
+    const g = twinGeometries();
+    const ground = -TWIN_PLAN.plinth;
+    const rnd = twinRandom(Math.round((x + 40) * 131 + (z + 40) * 17));
+    const trunk = 5.2 * s;
+    b.part(g.trunk, m.bark, [x, ground + trunk / 2, z], [0.19 * s, trunk, 0.19 * s]);
+    [0.9, 2.6, 4.3].forEach((a, i) => {
+        const t = a + k;
+        b.part(g.trunk, m.bark, [x + Math.cos(t) * 0.45 * s, ground + trunk * (0.6 + i * 0.09), z + Math.sin(t) * 0.45 * s],
+            [0.06 * s, 1.5 * s, 0.06 * s], { rx: Math.sin(t) * 0.7, rz: -Math.cos(t) * 0.7 });
+    });
+    // Houppier : bouquets de feuillage répartis dans un ellipsoïde (plus denses vers l'extérieur)
+    const pal = TWIN_TREE_COLORS[k % TWIN_TREE_COLORS.length];
+    const cy = ground + trunk * 0.9 + 1.4 * s;
+    const [rx, ry, rz] = [2.1 * s, 2.3 * s, 2.1 * s];
+    for (let i = 0; i < 22; i++) {
+        const a = rnd() * Math.PI * 2;
+        const u = rnd() * 1.6 - 0.6;
+        const f = 0.55 + rnd() * 0.45;
+        const c = Math.sqrt(1 - Math.min(1, u * u));
+        const size = (0.6 + rnd() * 0.4) * s;
+        b.part(g.crown, m.leaves, [x + Math.cos(a) * c * rx * f, cy + u * ry * f, z + Math.sin(a) * c * rz * f],
+            [size, size * 0.85, size], { color: pal[Math.floor(rnd() * pal.length)] });
+    }
+    b.part(g.crown, m.leaves, [x, cy, z], [1.6 * s, 1.7 * s, 1.6 * s], { color: pal[3] });
 };
 
-const twinCrateBottles = (b, x, y, z, count, crateSize, contenanceCl, color) => {
-    const g = twinGeometries();
+// Terrain (pelouse d'automne, pavés), rez-de-chaussée vitré, entrée sous auvent, dalle de l'étage
+const twinBuildSite = (b) => {
     const m = twinMaterials();
+    const g = twinGeometries();
+    const P = TWIN_PLAN;
+    const ground = -P.plinth;
+    const W = P.x1 - P.x0 + 2 * P.wall;
+    const D = P.z1 - P.z0 + 2 * P.wall;
+    const h = P.plinth - 0.32;
+    b.part(g.plane, m.grass, [0, ground, 0], [280, 280, 1], { rx: -Math.PI / 2, cast: false });
+    b.part(g.box, m.pavers, [0, ground + 0.02, 0], [W + 4.6, 0.04, D + 4.6], { cast: false });
+    b.part(g.box, m.pavers, [4.2, ground + 0.02, D / 2 + 6.3], [3.2, 0.04, 8], { cast: false });
+    b.part(g.box, m.facade, [0, ground + h / 2, 0], [W, h, D]);
+    const gy = ground + 1.85;
+    [[W, D / 2], [W, -D / 2]].forEach(([len, z]) => {
+        const s = Math.sign(z);
+        b.part(g.box, m.darkGlass, [0, gy, z + s * 0.012], [len - 1.4, 1.5, 0.03], { cast: false });
+        [-0.77, 0.77].forEach(dy => b.part(g.box, m.bronze, [0, gy + dy, z + s * 0.03], [len - 1.3, 0.06, 0.05]));
+        for (let x = -len / 2 + 0.7; x <= len / 2 - 0.69; x += 1.6) b.part(g.box, m.bronze, [x, gy, z + s * 0.03], [0.06, 1.56, 0.05]);
+    });
+    [[D, W / 2], [D, -W / 2]].forEach(([len, x]) => {
+        const s = Math.sign(x);
+        b.part(g.box, m.darkGlass, [x + s * 0.012, gy, 0], [0.03, 1.5, len - 1.4], { cast: false });
+        [-0.77, 0.77].forEach(dy => b.part(g.box, m.bronze, [x + s * 0.03, gy + dy, 0], [0.05, 0.06, len - 1.3]));
+        for (let z = -len / 2 + 0.7; z <= len / 2 - 0.69; z += 1.6) b.part(g.box, m.bronze, [x + s * 0.03, gy, z], [0.05, 1.56, 0.06]);
+    });
+    // Entrée de l'immeuble : portes vitrées, auvent, paillasson
+    b.part(g.box, m.bronze, [4.2, ground + 1.2, D / 2 + 0.05], [2.3, 2.4, 0.06]);
+    b.part(g.box, m.darkGlass, [4.2, ground + 1.15, D / 2 + 0.085], [2.1, 2.2, 0.02], { cast: false });
+    b.part(g.box, m.slab, [4.2, ground + 2.7, D / 2 + 0.9], [3.6, 0.14, 1.8]);
+    b.part(g.box, m.mat, [4.2, ground + 0.045, D / 2 + 0.9], [1.6, 0.01, 0.9], { cast: false });
+    // Dalle de l'étage (nez de dalle blanc)
+    b.part(g.box, m.slab, [0, -0.16, 0], [W + 0.2, 0.32, D + 0.2]);
+    TWIN_TREES.forEach(t => twinTree(b, ...t));
+};
+
+// Découpe [from, to] aux bords des ouvertures ([centre, largeur]) et aux changements de finition
+const twinSpans = (from, to, holes, splits = []) => {
+    const pts = [...new Set([from, to, ...splits, ...holes.flatMap(([c, w]) => [c - w / 2, c + w / 2])])]
+        .filter(v => v >= from - 1e-6 && v <= to + 1e-6)
+        .sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const c = pts[i + 1];
+        if (c - a < 0.004) continue;
+        const mid = (a + c) / 2;
+        out.push({ a, b: c, mid, hole: holes.find(([hc, hw]) => Math.abs(mid - hc) < hw / 2) || null });
+    }
+    return out;
+};
+
+const twinFinishAt = (list, v) => (list.find(([a, b]) => v >= a - 1e-6 && v <= b + 1e-6) || list[0])[2];
+
+// Boîte de mur le long de x (axis 'x', z = at) ou de z (axis 'z', x = at) ; off décale dans l'épaisseur
+const twinWallBox = (b, mat, axis, at, a, c, y0, y1, thick, off = 0, o = {}) => {
+    const g = twinGeometries();
+    const len = c - a;
+    const mid = (a + c) / 2;
+    if (axis === 'x') b.part(g.box, mat, [mid, (y0 + y1) / 2, at + off], [len, y1 - y0, thick], o);
+    else b.part(g.box, mat, [at + off, (y0 + y1) / 2, mid], [thick, y1 - y0, len], o);
+};
+
+// Cloison coupée à hauteur d'appui : parement de chaque pièce, chapeau sombre (coupe), plinthes, huisseries
+const twinPartition = (b, w) => {
+    const m = twinMaterials();
+    const P = TWIN_PLAN;
+    const thick = P.part;
+    const splits = [...w.finA, ...w.finB].flatMap(f => [f[0], f[1]]);
+    twinSpans(w.from, w.to, w.doors, splits).forEach(s => {
+        if (s.hole) return;
+        [[w.finA, -1], [w.finB, 1]].forEach(([fin, side]) => {
+            const key = twinFinishAt(fin, s.mid);
+            twinWallBox(b, m[key], w.axis, w.at, s.a, s.b, 0, P.cut, thick / 2, side * thick / 4);
+            if (key === 'panel') twinWallBox(b, m.skirting, w.axis, w.at, s.a, s.b, 0, 0.07, 0.012, side * (thick / 2 + 0.006));
+        });
+        twinWallBox(b, m.cap, w.axis, w.at, s.a, s.b, P.cut, P.cut + 0.012, thick + 0.004);
+    });
+    w.doors.forEach(([c, dw]) => {
+        twinWallBox(b, m.frame, w.axis, w.at, c - dw / 2, c - dw / 2 + 0.05, 0, P.cut + 0.012, thick + 0.03);
+        twinWallBox(b, m.frame, w.axis, w.at, c + dw / 2 - 0.05, c + dw / 2, 0, P.cut + 0.012, thick + 0.03);
+        twinWallBox(b, m.alu, w.axis, w.at, c - dw / 2 + 0.05, c + dw / 2 - 0.05, 0, 0.006, thick, 0, { cast: false });
+    });
+};
+
+// Fenêtre à deux vantaux (cadre bronze anodisé), vitrage, appui intérieur et bavette alu
+const twinWindow = (up, f, c, w) => {
+    const m = twinMaterials();
+    const P = TWIN_PLAN;
+    const y0 = P.cut;
+    const y1 = P.head;
+    const fr = 0.06;
+    const box = (mat, a, cc, ya, yb, thick, off = 0, o = {}) => twinWallBox(up, mat, f.axis, f.at, a, cc, ya, yb, thick, off, o);
+    box(m.bronze, c - w / 2, c - w / 2 + fr, y0, y1, 0.09);
+    box(m.bronze, c + w / 2 - fr, c + w / 2, y0, y1, 0.09);
+    box(m.bronze, c - w / 2 + fr, c + w / 2 - fr, y1 - fr, y1, 0.09);
+    box(m.bronze, c - w / 2 + fr, c + w / 2 - fr, y0, y0 + fr, 0.09);
+    box(m.bronze, c - 0.03, c + 0.03, y0 + fr, y1 - fr, 0.08);
+    box(m.windowGlass, c - w / 2 + fr, c + w / 2 - fr, y0 + fr, y1 - fr, 0.012);
+    box(m.sill, c - w / 2 - 0.04, c + w / 2 + 0.04, y0 - 0.004, y0 + 0.022, 0.2, -f.out * 0.1);
+    box(m.alu, c - w / 2 - 0.02, c + w / 2 + 0.02, y0 - 0.03, y0 + 0.004, 0.08, f.out * (P.wall / 2 + 0.03));
+    [c - 0.08, c + 0.08].forEach(hx => box(m.bronze, hx - 0.012, hx + 0.012, (y0 + y1) / 2 - 0.06, (y0 + y1) / 2 + 0.06, 0.03, -f.out * 0.06));
+};
+
+// Façade : partie basse toujours visible (coupée, chapeau sombre) ; partie haute fenêtrée rangée dans un
+// groupe masqué quand la caméra est du côté extérieur de ce mur (on voit l'intérieur sans perdre le fond).
+const twinFacade = (b, up, f) => {
+    const m = twinMaterials();
+    const P = TWIN_PLAN;
+    const T = P.wall;
+    const extOff = f.out * (T / 2 - 0.085);
+    const intOff = -f.out * (T / 2 - 0.04);
+    const splits = f.finish.flatMap(x => [x[0], x[1]]);
+    twinSpans(f.from, f.to, f.doors, splits).forEach(s => {
+        if (s.hole) return;
+        const fin = twinFinishAt(f.finish, s.mid);
+        twinWallBox(b, m.facade, f.axis, f.at, s.a, s.b, 0, P.cut, 0.17, extOff);
+        twinWallBox(b, m[fin], f.axis, f.at, s.a, s.b, 0, P.cut, 0.08, intOff);
+        if (fin === 'panel') twinWallBox(b, m.skirting, f.axis, f.at, s.a, s.b, 0, 0.07, 0.012, -f.out * (T / 2 + 0.006));
+        twinWallBox(b, m.cap, f.axis, f.at, s.a, s.b, P.cut, P.cut + 0.012, T + 0.004);
+    });
+    twinSpans(f.from, f.to, [...f.windows, ...f.doors], splits).forEach(s => {
+        const fin = twinFinishAt(f.finish, s.mid);
+        const y0 = !s.hole ? P.cut : f.doors.includes(s.hole) ? 2.1 : P.head;
+        twinWallBox(up, m.facade, f.axis, f.at, s.a, s.b, y0, P.height, 0.17, extOff);
+        twinWallBox(up, m[fin], f.axis, f.at, s.a, s.b, y0, P.height, 0.08, intOff);
+        twinWallBox(up, m.slab, f.axis, f.at, s.a, s.b, P.height, P.height + 0.03, T + 0.02);
+    });
+    f.windows.forEach(([c, w]) => twinWindow(up, f, c, w));
+};
+
+const twinBuildShell = (b, uppers) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    TWIN_ROOMS.forEach(r => {
+        const w = r.x[1] - r.x[0];
+        const d = r.z[1] - r.z[0];
+        b.part(g.plane, m[r.floor], [(r.x[0] + r.x[1]) / 2, 0.002, (r.z[0] + r.z[1]) / 2], [w, d, 1], { rx: -Math.PI / 2, cast: false });
+    });
+    TWIN_FACADES.forEach(f => twinFacade(b, uppers[f.id].b, f));
+    TWIN_PARTITIONS.forEach(w => twinPartition(b, w));
+};
+
+// --- Mobilier ---
+// Meuble bas de labo : caissons blancs, portes, lisse vert-de-gris à clips rouges, socle en retrait, plan sauge.
+// Repère local : longueur sur x, façade vers +z (les deux faces si doubleSided).
+const twinLabCabinets = (s, w, d, { doubleSided = false } = {}) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const h = TWIN_LAB.benchH;
+    const top = h - 0.03;
+    s.part(g.box, m.labPlinth, [0, 0.05, 0], [w - 0.04, 0.1, d - (doubleSided ? 0.16 : 0.12)]);
+    s.part(g.box, m.labWhite, [0, 0.1 + (top - 0.1) / 2, 0], [w, top - 0.1, d - 0.04]);
+    const n = Math.max(1, Math.round(w / 0.6));
+    const dw = w / n;
+    (doubleSided ? [1, -1] : [1]).forEach(side => {
+        const fz = side * (d / 2 - 0.02);
+        for (let i = 0; i < n; i++) {
+            const cx = -w / 2 + dw * (i + 0.5);
+            s.part(g.box, m.labWhite, [cx, 0.1 + (top - 0.16) / 2, fz + side * 0.009], [dw - 0.008, top - 0.18, 0.018]);
+            s.part(g.box, m.labRed, [cx + (i % 2 ? 1 : -1) * (dw / 2 - 0.04), top - 0.035, fz + side * 0.037], [0.024, 0.044, 0.012]);
+        }
+        s.part(g.box, m.labRail, [0, top - 0.035, fz + side * 0.02], [w, 0.034, 0.03]);
+    });
+    s.part(g.box, m.counter, [0, h - 0.015, 0], [w + 0.02, 0.03, d + 0.02]);
+};
+
+// Évier encastré dans le plan sauge + robinetterie de labo émaillée blanche à manettes vertes
+const twinLabSink = (s, x, z, w = 0.52, d = 0.38) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const h = TWIN_LAB.benchH;
+    s.part(g.box, m.sinkInner, [x, h + 0.0015, z], [w, 0.003, d], { cast: false });
+    s.part(g.box, m.counter, [x, h + 0.004, z - d / 2 - 0.012], [w + 0.04, 0.008, 0.024], { cast: false });
+    s.part(g.cylLow, m.steelDark, [x + w * 0.3, h + 0.004, z + d * 0.22], [0.022, 0.004, 0.022], { cast: false });
+    const fz = z - d / 2 - 0.09;
+    s.part(g.cylLow, m.faucet, [x, h + 0.17, fz], [0.016, 0.34, 0.016]);
+    s.part(g.cylLow, m.faucet, [x, h + 0.335, fz + 0.09], [0.013, 0.19, 0.013], { rx: Math.PI / 2 });
+    s.part(g.cylLow, m.faucet, [x, h + 0.29, fz + 0.18], [0.011, 0.1, 0.011]);
+    [-1, 1].forEach(sd => {
+        s.part(g.cylLow, m.faucet, [x + sd * 0.055, h + 0.12, fz], [0.012, 0.09, 0.012], { rz: Math.PI / 2 });
+        s.part(g.cyl, m.faucetGreen, [x + sd * 0.105, h + 0.12, fz], [0.022, 0.03, 0.022], { rz: Math.PI / 2 });
+    });
+};
+
+// Armoire haute de labo (2,2 m) ; repère local : façade vers +z
+const twinTallCabinet = (s, w, d, h = 2.2) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    s.part(g.box, m.labPlinth, [0, 0.05, 0], [w - 0.04, 0.1, d - 0.1]);
+    s.part(g.box, m.labWhite, [0, 0.1 + (h - 0.1) / 2, 0], [w, h - 0.1, d - 0.03]);
+    const n = Math.max(1, Math.round(w / 0.6));
+    const dw = w / n;
+    for (let i = 0; i < n; i++) {
+        const cx = -w / 2 + dw * (i + 0.5);
+        s.part(g.box, m.labWhite, [cx, 0.1 + (h - 0.12) / 2, d / 2 - 0.006], [dw - 0.008, h - 0.14, 0.018]);
+        if (i % 2 === 0) s.part(g.cyl, m.alu, [cx + dw / 2 - 0.05, 1.05, d / 2 + 0.012], [0.019, 0.022, 0.019], { rx: Math.PI / 2 });
+    }
+    s.part(g.box, m.labRail, [0, h - 0.07, d / 2 + 0.008], [w, 0.03, 0.025]);
+};
+
+// Cartons « Einkochautomat » rangés sur les armoires
+const twinWeckBoxMaterial = () => twinCanvasMaterial('weckBox', 256, 256, (g, w) => {
+    g.fillStyle = '#F2F1EC';
+    g.fillRect(0, 0, w, w);
+    g.strokeStyle = '#D23B33';
+    g.lineWidth = 5;
+    g.beginPath();
+    g.moveTo(74, 96);
+    g.lineTo(74, 196);
+    g.quadraticCurveTo(128, 212, 182, 196);
+    g.lineTo(182, 96);
+    g.stroke();
+    g.beginPath();
+    g.ellipse(128, 96, 54, 11, 0, 0, Math.PI * 2);
+    g.stroke();
+    g.beginPath();
+    g.arc(128, 74, 9, 0, Math.PI * 2);
+    g.stroke();
+    g.fillStyle = '#D23B33';
+    g.fillRect(182, 172, 24, 8);
+    g.font = '700 30px Outfit, sans-serif';
+    g.textAlign = 'center';
+    g.fillText('Einkochautomat', 128, 46);
+}, { roughness: 0.85 });
+
+// Bac en plastique noir 30 × 40 cm (bouteilles) ; repère : coin bas au centre du casier
+const twinCrate = (b, x, y, z, h, mat) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const c = mat || m.crateBlack;
+    b.part(g.box, c, [x, y + 0.006, z], [0.29, 0.012, 0.39]);
+    [[0, 0.195, 0.3, 0.01], [0, -0.195, 0.3, 0.01]].forEach(([dx, dz, w, t]) => b.part(g.box, c, [x + dx, y + h / 2, z + dz], [w, h, t]));
+    [0.145, -0.145].forEach(dx => b.part(g.box, c, [x + dx, y + h / 2, z], [0.01, h, 0.38]));
+    [0.201, -0.201].forEach(dz => b.part(g.box, m.dark, [x, y + h * 0.78, z + dz], [0.11, 0.028, 0.004], { cast: false }));
+};
+
+// Bouteilles debout dans un casier (pleines : thé, étiquette, bouchon noir ; vides : verre seul)
+const twinCrateBottles = (b, x, y, z, count, crateSize, contenanceCl, opts = {}) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
     const [cols, rows] = crateSize >= 24 ? [4, 6] : crateSize >= 12 ? [3, 4] : [2, 3];
     const spec = twinBottleSpec(contenanceCl);
     const dx = 0.28 / cols;
     const dz = 0.38 / rows;
     const r = Math.min(spec.d / 2, Math.min(dx, dz) / 2 - 0.003);
-    const liquid = twinShade(color, 1.18);
     for (let i = 0; i < Math.min(count, cols * rows); i++) {
         const bx = x - 0.14 + dx * (i % cols + 0.5);
         const bz = z - 0.19 + dz * (Math.floor(i / cols) + 0.5);
-        b.part(g.bottle, m.bottleTint, [bx, y, bz], [r, spec.h, r], { color: liquid });
-        b.part(g.cylLow, m.cap, [bx, y + spec.h + 0.006, bz], [r * 0.36, 0.014, r * 0.36]);
+        twinBottle(b, bx, y, bz, r, spec.h, opts);
     }
 };
 
-const twinFigureParts = (emit, mats) => {
-    const g = twinGeometries();
-    [-1, 1].forEach(sx => {
-        emit(g.capsule, mats.pants, [sx * 0.1, 0.46, 0], [0.14, 0.42, 0.14]);
-        emit(g.box, mats.dark, [sx * 0.1, 0.04, 0.04], [0.12, 0.08, 0.26]);
-        emit(g.capsule, mats.shirt, [sx * 0.27, 1.13, 0.02], [0.11, 0.28, 0.11], { rz: sx * 0.12 });
-        emit(g.sphere, mats.skin, [sx * 0.31, 0.84, 0.04], [0.05, 0.055, 0.05]);
-    });
-    emit(g.capsule, mats.shirt, [0, 1.17, 0], [0.42, 0.3, 0.26]);
-    emit(g.box, mats.apron, [0, 1.0, 0.13], [0.34, 0.58, 0.02]);
-    emit(g.sphere, mats.skin, [0, 1.62, 0], [0.105, 0.125, 0.11]);
-    emit(g.dome, mats.cap, [0, 1.66, -0.01], [0.12, 0.09, 0.125]);
-    [-1, 1].forEach(sx => emit(g.sphere, mats.dark, [sx * 0.04, 1.64, 0.1], [0.012, 0.012, 0.012]));
-};
-
-// --- Environnement statique (atelier d'environ 24 × 16 m) ---
-const twinBuildEnvironment = () => {
-    const { THREE } = Twin.lib;
+const twinBottle = (b, x, y, z, r, h, { color = null, labelMat = null, upsideDown = false } = {}) => {
     const m = twinMaterials();
     const g = twinGeometries();
+    if (upsideDown) {
+        b.part(g.bottle, m.bottleGlass, [x, y + h, z], [r, h, r], { rx: Math.PI });
+        return;
+    }
+    if (color) {
+        b.part(g.liquid, m.liquid, [x, y, z], [r, h, r], { color: twinTeaColor(color) });
+        b.part(g.cylLow, m.capBlack, [x, y + h * 0.985, z], [r * 0.66, h * 0.07, r * 0.66]);
+        // Économie : bouteille pleine réduite au thé et au bouchon (vue d'en haut, le verre et l'étiquette se voient peu)
+        if (Twin.quality.level === 'low') return;
+        if (labelMat) b.part(g.band, labelMat, [x, y + h * 0.3, z], [r * 1.012, h * 0.26, r * 1.012], { cast: false });
+    }
+    b.part(g.bottle, m.bottleGlass, [x, y, z], [r, h, r]);
+};
+
+// Chariot rouleur bleu pour caisses 60 × 40 (repère : centre au sol)
+const twinDolly = (b, x, z, ry = 0) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const o = { ry };
+    const c = Math.cos(ry);
+    const s = Math.sin(ry);
+    const at = (lx, lz) => [x + lx * c + lz * s, z - lx * s + lz * c];
+    b.part(g.box, m.dolly, [x, 0.11, z], [0.62, 0.04, 0.42], o);
+    [[0.27, 0.17], [-0.27, 0.17], [0.27, -0.17], [-0.27, -0.17]].forEach(([lx, lz]) => {
+        const [px, pz] = at(lx, lz);
+        b.part(g.box, m.steelDark, [px, 0.075, pz], [0.05, 0.03, 0.05], o);
+        b.part(g.cyl, m.rubber, [px, 0.04, pz], [0.038, 0.03, 0.038], { rx: Math.PI / 2, ry });
+    });
+};
+
+// Caisse verte ajourée 60 × 40 × 24 cm (commandes)
+const twinGreenCrate = (b, x, y, z, ry = 0) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const H = 0.24;
+    const s = twinBuilderAt(b, x, y, z, ry);
+    s(g.box, m.crateGreenSolid, [0, 0.008, 0], [0.59, 0.016, 0.39]);
+    [[0, 0.196, 0.6, 0.012], [0, -0.196, 0.6, 0.012]].forEach(([lx, lz, w, t]) => {
+        s(g.box, m.crateGreen, [lx, H / 2, lz], [w, H - 0.05, t]);
+        s(g.box, m.crateGreenSolid, [lx, H - 0.012, lz], [w, 0.024, t + 0.006]);
+        s(g.box, m.crateGreenSolid, [lx, 0.02, lz], [w, 0.024, t + 0.004]);
+    });
+    [0.295, -0.295].forEach(lx => {
+        s(g.box, m.crateGreen, [lx, H / 2, 0], [0.012, H - 0.05, 0.38]);
+        s(g.box, m.crateGreenSolid, [lx, H - 0.012, 0], [0.018, 0.024, 0.38]);
+        s(g.box, m.crateGreenSolid, [lx, 0.02, 0], [0.016, 0.024, 0.38]);
+    });
+};
+
+// Petit adaptateur : pose une pièce dans un repère (x, y, z, ry) à l'intérieur d'un builder
+const twinBuilderAt = (b, x, y, z, ry) => {
+    const c = Math.cos(ry);
+    const s = Math.sin(ry);
+    return (geo, mat, p, sc, o = {}) => b.part(geo, mat, [x + p[0] * c + p[2] * s, y + p[1], z - p[0] * s + p[2] * c], sc, { ...o, ry: (o.ry || 0) + ry });
+};
+
+// --- Pièces ---
+// Laboratoire de production : paillasse sous les fenêtres (cuves, plaques, évier), îlot d'embouteillage,
+// armoires hautes, réfrigérateur, coffret électrique, étagère des infuseurs
+const twinBuildLab = (batch, env, up) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const h = TWIN_LAB.benchH;
+    const bench = twinBuilder(batch, env, -6.98, TWIN_LAB.benchZ);
+    twinLabCabinets(bench, 9.92, 0.7);
+    twinLabSink(bench, 0.1, 0.06);
+    // Balance, bocaux d'ingrédients, cul-de-poule, infuseurs à mailles
+    bench.part(g.box, m.white, [0.95, h + 0.025, 0.05], [0.26, 0.05, 0.26]);
+    bench.part(g.box, m.steel, [0.95, h + 0.054, 0.03], [0.23, 0.008, 0.19]);
+    bench.part(g.box, m.screen, [0.95, h + 0.03, 0.181], [0.1, 0.025, 0.003], { cast: false });
+    ['#C0392B', '#6C3483', '#E2C55A', '#4E8B3A'].forEach((c, i) => {
+        const jx = 1.45 + i * 0.15;
+        bench.part(g.cyl, m.tint, [jx, h + 0.065, -0.18], [0.048, 0.12, 0.048], { color: twinShade(c, 0.8) });
+        bench.part(g.cylLow, m.jarGlass, [jx, h + 0.09, -0.18], [0.056, 0.18, 0.056]);
+        bench.part(g.cyl, m.steel, [jx, h + 0.19, -0.18], [0.059, 0.02, 0.059]);
+    });
+    bench.part(g.bowl, m.steelShell, [2.3, h, 0.02], [0.15, 0.2, 0.15]);
+    [2.85, 3.2].forEach(ix => {
+        bench.part(g.cyl, m.mesh, [ix, h + 0.1, -0.05], [0.1, 0.2, 0.1]);
+        bench.part(g.torus, m.steel, [ix, h + 0.2, -0.05], [0.1, 0.1, 0.5], { rx: Math.PI / 2 });
+    });
+    // Îlot d'embouteillage à double face
+    const [ix, iz] = TWIN_LAB.island;
+    const isl = twinBuilder(batch, env, ix, iz);
+    twinLabCabinets(isl, 4.6, 1.2, { doubleSided: true });
+    // Remplisseuse : cuve de tête sur potence, tuyaux vers 4 becs au-dessus d'un casier
+    const fx = -0.6;
+    isl.part(g.box, m.steel, [fx, h + 0.006, -0.2], [0.36, 0.012, 0.28]);
+    isl.part(g.cylLow, m.steel, [fx, h + 0.4, -0.3], [0.014, 0.8, 0.014]);
+    isl.part(g.cyl, m.steel, [fx, h + 0.66, -0.3], [0.15, 0.26, 0.15]);
+    isl.part(g.cyl, m.steel, [fx, h + 0.795, -0.3], [0.155, 0.012, 0.155]);
+    isl.part(g.cylLow, m.steelDark, [fx, h + 0.51, -0.3], [0.03, 0.05, 0.03]);
+    isl.part(g.box, m.steel, [fx, h + 0.45, -0.12], [0.5, 0.025, 0.025]);
+    for (let k = 0; k < 4; k++) {
+        const nx = fx - 0.18 + k * 0.12;
+        isl.part(g.cylLow, m.jarGlass, [nx, h + 0.48, -0.21], [0.008, 0.2, 0.008], { rx: 0.55 });
+        isl.part(g.cylLow, m.chrome, [nx, h + 0.4, -0.12], [0.008, 0.08, 0.008]);
+    }
+    twinCrate(isl, fx, h, -0.12 + 0.07, 0.18);
+    for (let k = 0; k < 4; k++) twinBottle(isl, fx - 0.105 + k * 0.07, h + 0.012, -0.04, 0.032, 0.25, {});
+    twinCrate(isl, 0.1, h, 0.15, 0.18);
+    twinCrateBottles(isl, 0.1, h + 0.012, 0.15, 12, 12, 50, { color: '#C57A2A', labelMat: twinBottleLabelMaterial('Thé froid', '#C57A2A') });
+    twinCrate(isl, -1.5, h, 0.12, 0.18);
+    twinCrateBottles(isl, -1.5, h + 0.012, 0.12, 12, 12, 50, {});
+    isl.part(g.cyl, m.label, [0.95, h + 0.05, -0.25], [0.08, 0.1, 0.08], { rx: Math.PI / 2 });
+    isl.part(g.cylLow, m.dark, [0.95, h + 0.05, -0.25], [0.03, 0.102, 0.03], { rx: Math.PI / 2 });
+    isl.part(g.box, m.label, [1.5, h + 0.004, 0.2], [0.21, 0.004, 0.3], { ry: 0.2, cast: false });
+    isl.part(g.funnel, m.steelShell, [1.95, h, -0.15], [0.09, 0.17, 0.09]);
+    // Armoires hautes contre la façade ouest, cartons d'Einkochautomat posés dessus
+    const tall = twinBuilder(batch, env, -11.7, -5.4, Math.PI / 2);
+    twinTallCabinet(tall, 3.6, 0.6);
+    const weck = twinWeckBoxMaterial();
+    [-1.3, -0.45, 0.4, 1.25].forEach((lx, i) => tall.part(g.box, weck, [lx, 2.2 + 0.21, 0.02], [0.42, 0.42, 0.42], { ry: (i % 2 ? 0.04 : -0.03) }));
+    // Réfrigérateur de labo (relevé de températures sur la porte)
+    const fr = twinBuilder(batch, env, -11.66, -2.35, Math.PI / 2);
+    fr.part(g.box, m.whitePlastic, [0, 0.64, 0], [0.6, 1.28, 0.62]);
+    fr.part(g.box, m.whitePlastic, [0, 0.66, 0.318], [0.58, 1.2, 0.02]);
+    fr.part(g.box, m.alu, [0.24, 0.85, 0.335], [0.025, 0.32, 0.02]);
+    fr.part(g.box, m.label, [-0.06, 0.85, 0.329], [0.21, 0.28, 0.002], { cast: false });
+    // Murs (partie haute) : étagère des infuseurs entre les fenêtres, coffret de prises industrielles CEE
+    const wz = TWIN_PLAN.z0;
+    up.back.b.part(g.box, m.white, [-7.2, 1.62, wz + 0.16], [1.3, 0.025, 0.3]);
+    [-7.75, -6.65].forEach(bx => up.back.b.part(g.box, m.alu, [bx, 1.56, wz + 0.1], [0.02, 0.1, 0.2]));
+    [-7.6, -7.25, -6.9].forEach(ix2 => up.back.b.part(g.cyl, m.mesh, [ix2, 1.72, wz + 0.16], [0.11, 0.19, 0.11]));
+    up.back.b.part(g.box, m.whiteDark, [-2.55, 1.55, wz + 0.07], [0.32, 0.44, 0.12]);
+    [[-2.64, 1.62, m.cee], [-2.46, 1.62, m.cee], [-2.64, 1.46, m.cee], [-2.46, 1.46, m.ceeBlue]].forEach(([cx, cy, mat]) =>
+        up.back.b.part(g.cyl, mat, [cx, cy, wz + 0.15], [0.045, 0.06, 0.045], { rx: Math.PI / 2 }));
+    up.back.b.part(g.cylLow, m.dark, [-2.46, 1.38, wz + 0.17], [0.012, 0.18, 0.012]);
+};
+
+// Laverie : plonge inox double bac, égouttoir à bouteilles retournées, casiers de bouteilles vides, siphon
+const twinBuildLaverie = (batch, env) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const s = twinBuilder(batch, env, 0, -7.66);
+    s.part(g.box, m.steel, [0, 0.9, 0], [3.1, 0.04, 0.66], { receive: true });
+    s.part(g.box, m.steel, [0, 1.0, -0.32], [3.1, 0.2, 0.02]);
+    [-1.5, -0.5, 0.5, 1.5].forEach(lx => [-1, 1].forEach(sd => s.part(g.box, m.steel, [lx, 0.44, sd * 0.28], [0.04, 0.88, 0.04])));
+    s.part(g.box, m.steel, [0, 0.16, 0], [3.0, 0.02, 0.58], { receive: true });
+    [-0.75, 0.05].forEach(bx => {
+        s.part(g.box, m.steelDark, [bx, 0.921, 0.02], [0.62, 0.002, 0.46], { cast: false });
+        s.part(g.cylLow, m.dark, [bx, 0.923, 0.02], [0.03, 0.002, 0.03], { cast: false });
+    });
+    s.part(g.cylLow, m.chrome, [-0.35, 1.25, -0.24], [0.015, 0.7, 0.015]);
+    s.part(g.torus, m.chrome, [-0.35, 1.45, -0.24], [0.05, 0.05, 2.5]);
+    s.part(g.cylLow, m.chrome, [-0.35, 1.6, -0.14], [0.012, 0.22, 0.012], { rx: Math.PI / 2 });
+    s.part(g.cylLow, m.dark, [-0.35, 1.22, -0.08], [0.018, 0.1, 0.018]);
+    // Égouttoir inox : bouteilles retournées sur trois niveaux
+    const r = twinBuilder(batch, env, 1.3, -4.3, -Math.PI / 2);
+    [-0.6, 0.6].forEach(lx => [-0.2, 0.2].forEach(lz => r.part(g.box, m.steel, [lx, 0.8, lz], [0.025, 1.6, 0.025])));
+    [0.35, 0.85, 1.35].forEach(y => {
+        r.part(g.box, m.steel, [0, y, 0], [1.22, 0.015, 0.42], { receive: true });
+        for (let k = 0; k < 7; k++) {
+            [-0.09, 0.09].forEach(lz => twinBottle(r, -0.51 + k * 0.17, y + 0.008, lz, 0.033, 0.25, { upsideDown: true }));
+        }
+    });
+    // Casiers de bouteilles propres le long de la cloison
+    const c = twinBuilder(batch, env, -1.42, -5.4, Math.PI / 2);
+    [0, 0.42].forEach(lx => [0, 1, 2].forEach(k => {
+        twinCrate(c, lx, k * 0.26, 0, 0.26);
+        if (k === 2) twinCrateBottles(c, lx, k * 0.26 + 0.012, 0, 12, 12, 50, {});
+    }));
+    s.part(g.box, m.steelDark, [0, 0.004, 3.1], [0.26, 0.004, 0.26], { cast: false });
+};
+
+// Stock de produits finis (les piles de casiers sont dynamiques) : chariots garés, casiers vides, horloge
+const twinBuildStockRoom = (batch, env, up) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, env, 0, 0);
+    twinDolly(b, 2.35, -2.0, 0.1);
+    twinDolly(b, 2.4, -2.55, -0.05);
+    const c = twinBuilder(batch, env, 2.2, -7.5, Math.PI / 2);
+    [0, 1, 2, 3].forEach(k => twinCrate(c, 0, k * 0.26, 0, 0.26));
+    const wz = TWIN_PLAN.z0;
+    up.back.b.part(g.cyl, m.white, [7.1, 2.2, wz + 0.03], [0.16, 0.03, 0.16], { rx: Math.PI / 2 });
+    up.back.b.part(g.torus, m.dark, [7.1, 2.2, wz + 0.045], [0.16, 0.16, 0.6]);
+    up.back.b.part(g.box, m.dark, [7.1, 2.24, wz + 0.05], [0.01, 0.09, 0.004], { cast: false });
+    up.back.b.part(g.box, m.dark, [7.13, 2.2, wz + 0.052], [0.07, 0.008, 0.004], { rz: 0.4, cast: false });
+};
+
+// Couloir : extincteurs, porte de secours, balais, caisses vertes empilées, enseigne ThéCol
+const twinBuildCorridor = (batch, env, up) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, env, 0, 0);
+    [[-5.1, -0.9], [6.2, 1.3]].forEach(([x, z]) => {
+        b.part(g.cyl, m.extinguisher, [x, 0.42, z], [0.08, 0.5, 0.08]);
+        b.part(g.cylLow, m.dark, [x, 0.71, z], [0.035, 0.08, 0.035]);
+        b.part(g.box, m.dark, [x + 0.04, 0.74, z], [0.1, 0.02, 0.02]);
+    });
+    // Porte de secours (bout ouest) : battant bois, barre anti-panique, signalétique
+    const dx = TWIN_PLAN.x0 - 0.05;
+    b.part(g.box, m.wood, [dx, TWIN_PLAN.cut / 2, 0.2], [0.05, TWIN_PLAN.cut, 0.96]);
+    b.part(g.box, m.chrome, [dx + 0.065, 1.0, 0.2], [0.03, 0.04, 0.8]);
+    up.west.b.part(g.box, m.wood, [dx, (TWIN_PLAN.cut + 2.1) / 2, 0.2], [0.05, 2.1 - TWIN_PLAN.cut, 0.96]);
+    up.west.b.part(g.box, twinSignMaterial('sortie', '#1E8E4E', '#FFFFFF', 'SORTIE'), [TWIN_PLAN.x0 + 0.02, 2.3, 0.2], [0.5, 0.16, 0.02], { cast: false, ry: Math.PI / 2 });
+    // Range-balais (photo du couloir) près du vestiaire
+    const w = TWIN_PLAN.south - 0.08;
+    b.part(g.box, m.alu, [1.25, 1.02, w], [0.42, 0.04, 0.03]);
+    [1.08, 1.22, 1.36].forEach((x, i) => {
+        b.part(g.cylLow, i === 1 ? m.ceeBlue : m.dark, [x, 0.72, w - 0.04], [0.013, 1.32, 0.013]);
+        b.part(g.box, m.dark, [x, 0.07, w - 0.05], [0.26, 0.05, 0.06]);
+    });
+    b.part(g.box, m.extinguisher, [1.55, 0.3, w - 0.06], [0.22, 0.03, 0.26], { rx: -1.2 });
+    // Caisses vertes empilées et caisses noires pliées
+    [0, 1, 2].forEach(k => twinGreenCrate(b, 7.35, k * 0.24, 1.12, 0));
+    [0, 1].forEach(k => b.part(g.box, m.crateBlack, [8.15, 0.03 + k * 0.05, 1.12], [0.6, 0.05, 0.4]));
+    // Enseigne ThéCol au bout du couloir (façade est)
+    up.east.b.part(g.box, twinSignMaterial('thecol', Twin.palette.primary, '#FFFFFF', 'ThéCol', 'Thé froid artisanal'),
+        [TWIN_PLAN.x1 - 0.02, 1.95, 0.2], [1.68, 0.42, 0.02], { cast: false, ry: -Math.PI / 2 });
+};
+
+// Réserve : chambre froide (évaporateur, climatiseur, porte isotherme) et préparation carrelée (plans blancs)
+const twinBuildReserve = (batch, env, up) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, env, 0, 0);
+    const wx = TWIN_PLAN.x0;
+    // Évaporateur au mur (partie haute de la façade ouest)
+    up.west.b.part(g.box, m.whitePlastic, [wx + 0.26, 2.45, 4.8], [0.44, 0.38, 0.86]);
+    up.west.b.part(g.cyl, m.dark, [wx + 0.485, 2.45, 4.6], [0.15, 0.012, 0.15], { rz: Math.PI / 2 });
+    up.west.b.part(g.cyl, m.dark, [wx + 0.485, 2.45, 5.0], [0.15, 0.012, 0.15], { rz: Math.PI / 2 });
+    up.west.b.part(g.box, m.hazard, [wx + 0.482, 2.55, 5.18], [0.004, 0.08, 0.06], { cast: false });
+    up.west.b.part(g.cylLow, m.dark, [wx + 0.1, 2.18, 4.55], [0.03, 0.18, 0.03]);
+    up.west.b.part(g.cylLow, m.chrome, [wx + 0.16, 2.2, 4.75], [0.012, 0.14, 0.012]);
+    // Climatiseur mobile et sa gaine
+    b.part(g.box, m.whitePlastic, [wx + 0.3, 0.38, 7.55], [0.34, 0.76, 0.32]);
+    b.part(g.box, m.dark, [wx + 0.3, 0.68, 7.392], [0.2, 0.05, 0.004], { cast: false });
+    b.part(g.cyl, m.hoseBeige, [wx + 0.12, 0.93, 7.55], [0.07, 0.34, 0.07]);
+    up.west.b.part(g.cyl, m.hoseBeige, [wx + 0.12, 1.75, 7.55], [0.07, 1.3, 0.07]);
+    b.part(g.box, m.mat, [-7.55, 0.006, 3.0], [0.6, 0.012, 0.9], { cast: false });
+    // Porte isotherme grise ouverte (gonds et poignée chromés)
+    const door = twinBuilder(batch, env, -7.94, 3.45, Math.PI / 2 + 0.12);
+    door.part(g.box, m.doorGrey, [0, 0.98, 0.45], [0.08, 1.95, 0.9]);
+    door.part(g.box, m.alu, [0, 0.98, 0.45], [0.084, 1.9, 0.86]);
+    door.part(g.box, m.doorGrey, [0, 0.98, 0.45], [0.088, 1.82, 0.78]);
+    [0.35, 1.6].forEach(y => door.part(g.box, m.chrome, [0.05, y, 0.12], [0.02, 0.06, 0.28]));
+    door.part(g.box, m.chrome, [0.06, 1.0, 0.72], [0.025, 0.04, 0.24]);
+    // Plans de préparation blancs (façade sud), balance, cul-de-poule, rouleaux de papier, boîtes de fruits séchés
+    const k = twinBuilder(batch, env, -4.92, 7.66, Math.PI);
+    const kw = 5.7;
+    k.part(g.box, m.labPlinth, [0, 0.05, 0], [kw - 0.04, 0.1, 0.56]);
+    k.part(g.box, m.kitchenWhite, [0, 0.49, 0], [kw, 0.78, 0.62]);
+    const n = Math.round(kw / 0.6);
+    for (let i = 0; i < n; i++) {
+        const cx = -kw / 2 + kw / n * (i + 0.5);
+        k.part(g.box, m.kitchenWhite, [cx, 0.48, 0.32], [kw / n - 0.01, 0.74, 0.018]);
+        k.part(g.box, m.whiteDark, [cx, 0.8, 0.338], [0.16, 0.02, 0.02]);
+    }
+    k.part(g.box, m.kitchenWhite, [0, 0.9, 0.01], [kw + 0.02, 0.03, 0.66]);
+    k.part(g.cyl, m.steel, [-1.8, 0.94, 0.05], [0.12, 0.02, 0.12]);
+    k.part(g.bowl, m.steelShell, [-1.2, 0.915, 0.0], [0.17, 0.22, 0.17]);
+    for (let i = 0; i < 8; i++) k.part(g.cyl, m.white, [0.2 + (i % 4) * 0.12, 0.98, -0.1 + Math.floor(i / 4) * 0.12], [0.055, 0.13, 0.055]);
+    k.part(g.box, m.film, [0.38, 0.99, -0.04], [0.5, 0.15, 0.26]);
+    k.part(g.box, m.valveRed, [0.38, 0.99, 0.092], [0.5, 0.03, 0.004], { cast: false });
+    const fruit = twinContentMaterial('fruit');
+    [0, 1, 2].forEach(i => {
+        const y = 0.915 + i * 0.27;
+        k.part(g.box, fruit, [1.95, y + 0.11, 0], [0.37, 0.21, 0.27]);
+        k.part(g.box, m.boxPlastic, [1.95, y + 0.13, 0], [0.4, 0.26, 0.3]);
+        k.part(g.box, m.boxLid, [1.95, y + 0.265, 0], [0.41, 0.014, 0.31]);
+    });
+    // Chariot inox à trois plateaux (préparation)
+    const t = twinBuilder(batch, env, -6.4, 6.55, 0.12);
+    [0.16, 0.5, 0.86].forEach(y => t.part(g.box, m.steel, [0, y, 0], [0.8, 0.02, 0.5]));
+    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
+        t.part(g.cylLow, m.steel, [sx * 0.39, 0.5, sz * 0.24], [0.012, 0.8, 0.012]);
+        t.part(g.cyl, m.rubber, [sx * 0.39, 0.04, sz * 0.24], [0.04, 0.03, 0.04], { rx: Math.PI / 2 });
+    }));
+    t.part(g.bowl, m.steelShell, [-0.2, 0.87, 0], [0.14, 0.18, 0.14]);
+    t.part(g.box, fruit, [0.17, 0.96, 0], [0.27, 0.17, 0.2]);
+    t.part(g.box, m.boxPlastic, [0.17, 0.995, 0], [0.3, 0.25, 0.23]);
+    t.part(g.box, m.boxLid, [0.17, 1.125, 0], [0.31, 0.014, 0.24]);
+    [0, 1].forEach(i => t.part(g.box, m.kraft, [0.05 + i * 0.3, 0.6, 0.02], [0.26, 0.18, 0.34]));
+};
+
+// Vestiaire et bureau : portant à blouses (employés absents), banc, pointeuse, bureau avec écran et imprimante
+const twinBuildVestiaire = (batch, env) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, env, 0, 0);
+    // Portant à blouses le long de la cloison ouest
+    const rx = -1.32;
+    [2.1, 5.7].forEach(z => {
+        b.part(g.box, m.alu, [rx, 0.9, z], [0.035, 1.8, 0.035]);
+        b.part(g.box, m.alu, [rx, 0.02, z], [0.45, 0.04, 0.04]);
+    });
+    b.part(g.cylLow, m.chrome, [rx, 1.78, 3.9], [0.014, 3.6, 0.014], { rx: Math.PI / 2 });
+    // Banc
+    b.part(g.box, m.wood, [-0.72, 0.45, 3.9], [0.36, 0.04, 2.4]);
+    [3.0, 4.8].forEach(z => b.part(g.box, m.steelDark, [-0.72, 0.22, z], [0.3, 0.44, 0.04]));
+    // Pointeuse sur pied, face au couloir
+    b.part(g.box, m.steelDark, [1.3, 0.58, 2.0], [0.07, 1.16, 0.07]);
+    b.part(g.box, m.dark, [1.3, 1.3, 1.97], [0.24, 0.32, 0.12]);
+    b.part(g.box, m.screen, [1.3, 1.36, 1.909], [0.15, 0.1, 0.004], { cast: false });
+    b.part(g.box, m.steel, [1.3, 1.21, 1.909], [0.11, 0.05, 0.004], { cast: false });
+    // Bureau (imprimante, écran affichant le jumeau, classeurs verts, chaise)
+    const d = twinBuilder(batch, env, 0, 7.6);
+    d.part(g.box, m.white, [0, 0.74, 0], [3.0, 0.03, 0.7], { receive: true });
+    [-1.42, 1.42].forEach(x => [-0.3, 0.3].forEach(z => d.part(g.box, m.alu, [x, 0.36, z], [0.04, 0.72, 0.04])));
+    d.part(g.box, m.dark, [0, 0.765, 0.14], [0.22, 0.015, 0.16]);
+    d.part(g.box, m.dark, [0, 0.9, 0.18], [0.05, 0.27, 0.03]);
+    d.part(g.box, m.dark, [0, 1.07, 0.15], [0.6, 0.36, 0.03]);
+    d.part(g.box, twinMonitorMaterial(), [0, 1.07, 0.134], [0.56, 0.32, 0.002], { cast: false, ry: Math.PI });
+    d.part(g.box, m.plasticLight, [0, 0.762, -0.12], [0.44, 0.015, 0.14]);
+    d.part(g.box, m.dark, [-0.95, 0.85, 0.05], [0.45, 0.2, 0.34]);
+    d.part(g.box, m.plasticLight, [-0.95, 0.955, 0.05], [0.4, 0.01, 0.28]);
+    [0.85, 0.95, 1.05].forEach(x => d.part(g.box, m.crateGreenSolid, [x, 0.9, 0.18], [0.07, 0.3, 0.26]));
+    d.part(g.cyl, m.dark, [1.25, 0.81, -0.05], [0.04, 0.12, 0.04]);
+    const ch = twinBuilder(batch, env, 0.2, 6.95, 0.15);
+    ch.part(g.box, m.plastic, [0, 0.47, 0], [0.46, 0.07, 0.44]);
+    ch.part(g.box, m.plastic, [0, 0.82, -0.2], [0.42, 0.55, 0.06], { rx: -0.08 });
+    ch.part(g.cylLow, m.steelDark, [0, 0.25, 0], [0.03, 0.4, 0.03]);
+    [0, 1, 2, 3, 4].forEach(i => {
+        const a = i * Math.PI * 2 / 5;
+        ch.part(g.box, m.dark, [Math.cos(a) * 0.15, 0.05, Math.sin(a) * 0.15], [0.3, 0.025, 0.04], { ry: -a });
+    });
+};
+
+// Écran du bureau : l'application ThéCol Gestion ouverte
+const twinMonitorMaterial = () => twinCanvasMaterial('monitor', 256, 160, (g, w, h) => {
+    g.fillStyle = '#F5F5F0';
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = '#5D7B3E';
+    g.fillRect(0, 0, 46, h);
+    g.fillStyle = '#FFFFFF';
+    for (let i = 0; i < 4; i++) g.fillRect(56 + i * 50, 14, 42, 30);
+    g.fillStyle = '#DCE6D2';
+    g.fillRect(56, 54, 192, 92);
+    g.fillStyle = '#8BA66B';
+    for (let i = 0; i < 6; i++) g.fillRect(66 + i * 30, 130 - i * 11, 18, 10 + i * 11);
+}, { roughness: 0.3, extra: { emissive: '#FFFFFF', emissiveIntensity: 0.55 } });
+
+// Expédition : monte-charge inox, chariots garés, caisses vertes vides
+const twinBuildExpedition = (batch, env, up) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, env, 0, 0);
+    const ex = TWIN_PLAN.x1;
+    const zc = 4.3;
+    const cut = TWIN_PLAN.cut;
+    [[b, 0, cut], [up.east.b, cut, 2.1]].forEach(([s, y0, y1]) => {
+        [-0.45, 0.45].forEach(dz => s.part(g.box, m.steel, [ex + 0.05, (y0 + y1) / 2, zc + dz], [0.04, y1 - y0, 0.88]));
+        [-0.92, 0.92].forEach(dz => s.part(g.box, m.steelDark, [ex - 0.02, (y0 + y1) / 2, zc + dz], [0.08, y1 - y0, 0.06]));
+    });
+    b.part(g.box, m.steelDark, [ex - 0.02, 0.005, zc], [0.3, 0.01, 1.8], { cast: false });
+    up.east.b.part(g.box, m.steelDark, [ex - 0.02, 2.13, zc], [0.08, 0.06, 1.9]);
+    up.east.b.part(g.box, m.dark, [ex - 0.03, 2.3, zc], [0.03, 0.12, 0.22]);
+    up.east.b.part(g.box, m.ledOrange, [ex - 0.046, 2.3, zc], [0.004, 0.06, 0.08], { cast: false });
+    b.part(g.box, m.steel, [ex - 0.03, 1.0, zc + 1.12], [0.03, 0.22, 0.1]);
+    b.part(g.cylLow, m.ledOrange, [ex - 0.05, 1.04, zc + 1.12], [0.02, 0.01, 0.02], { rz: Math.PI / 2, cast: false });
+    b.part(g.cylLow, m.dark, [ex - 0.05, 0.96, zc + 1.12], [0.02, 0.01, 0.02], { rz: Math.PI / 2, cast: false });
+    twinDolly(b, 11.25, 7.42, 0);
+    twinDolly(b, 11.3, 6.9, 0.08);
+    [0, 1, 2, 3, 4].forEach(k => twinGreenCrate(b, 10.5, k * 0.24, 7.55, 0));
+};
+
+// --- Assemblage du décor statique (les parties hautes des façades forment des groupes à coupe automatique) ---
+const twinBuildEnvironment = () => {
+    const { THREE } = Twin.lib;
     const env = new THREE.Group();
     const batch = twinBatch();
     const b = twinBuilder(batch, env, 0, 0);
-
-    const ground = b.mesh(g.plane, m.ground, [0, -0.21, 0], [140, 140, 1], { rx: -Math.PI / 2, cast: false, receive: true });
-    ground.receiveShadow = true;
-    b.part(g.box, m.floor, [0, -0.1, 0], [24.4, 0.2, 16.4], { cast: false });
-    const tiles = b.mesh(g.plane, twinTileMaterial(34, 23), [-6.9, 0.002, -4.55], [10.3, 7.0, 1], { rx: -Math.PI / 2, cast: false });
-    tiles.receiveShadow = true;
-
-    TWIN_ZONES.forEach(zone => {
-        const [x0, z0, x1, z1] = zone.bounds;
-        const color = Twin.palette.zones[zone.id];
-        const w = x1 - x0;
-        const d = z1 - z0;
-        const cx = (x0 + x1) / 2;
-        const cz = (z0 + z1) / 2;
-        twinFlat(b, g.plane, twinBasic(`zoneTint:${zone.id}`, color, { opacity: 0.07 }), cx, 0.004, cz, w, d);
-        const border = twinBasic(`zoneBorder:${zone.id}`, color, { opacity: 0.6 });
-        twinFlat(b, g.plane, border, cx, 0.006, z0, w, 0.06);
-        twinFlat(b, g.plane, border, cx, 0.006, z1, w, 0.06);
-        twinFlat(b, g.plane, border, x0, 0.006, cz, 0.06, d);
-        twinFlat(b, g.plane, border, x1, 0.006, cz, 0.06, d);
-    });
-    for (let x = -11.2; x < 11.2; x += 0.8) twinFlat(b, g.plane, m.marking, x + 0.2, 0.007, 0.2, 0.42, 0.06);
-    for (let z = -7.4; z < 1.2; z += 0.8) twinFlat(b, g.plane, m.marking, 0, 0.007, z + 0.2, 0.06, 0.42);
-    twinFlat(b, g.plane, m.dark, -9.55, 0.005, -4.75, 3.2, 0.12);
-
-    // Murs : fond haut (fenêtres + enseigne), côtés bas en coupe, quais de chargement
-    const backZ = -8.1;
-    const inner = backZ + 0.1;
-    b.part(g.box, m.wall, [0, 1.4, backZ], [24.4, 3.0, 0.2], { receive: true });
-    b.part(g.box, m.wallTrim, [0, 2.92, backZ], [24.5, 0.06, 0.26]);
-    [-12.1, -6.1, 6.1, 12.1].forEach(x => b.part(g.box, m.wallTrim, [x, 1.4, inner + 0.07], [0.3, 3.0, 0.14]));
-    [-8.6, -3.6, 3.6, 8.6].forEach(x => {
-        b.part(g.box, m.windowFrame, [x, 1.9, inner + 0.02], [3.0, 1.25, 0.04]);
-        b.part(g.box, m.windowGlass, [x, 1.9, inner + 0.045], [2.86, 1.11, 0.01], { cast: false });
-        [-0.72, 0, 0.72].forEach(dx => b.part(g.box, m.windowFrame, [x + dx, 1.9, inner + 0.055], [0.04, 1.11, 0.012], { cast: false }));
-    });
-    b.mesh(g.box, twinSignMaterial('thecol', Twin.palette.primary, '#FFFFFF', 'ThéCol', 'Thé froid artisanal'), [0, 2.0, inner + 0.03], [2.6, 0.65, 0.03], { cast: false });
-    b.part(g.box, m.wall, [-12.1, 0.5, 0], [0.2, 1.2, 16.2], { receive: true });
-    b.part(g.box, m.wallTrim, [-12.1, 1.12, 0], [0.26, 0.05, 16.2]);
-    const docks = [3.2, 6.0];
-    [[-8.2, 2.0], [4.4, 4.8], [7.2, 8.2]].forEach(([z0, z1]) => {
-        b.part(g.box, m.wall, [12.1, 0.5, (z0 + z1) / 2], [0.2, 1.2, z1 - z0], { receive: true });
-        b.part(g.box, m.wallTrim, [12.1, 1.12, (z0 + z1) / 2], [0.26, 0.05, z1 - z0]);
-    });
-    docks.forEach(dz => {
-        b.part(g.box, m.steelDark, [11.5, 0.02, dz], [1.0, 0.04, 2.2], { receive: true });
-        for (let k = 0; k < 11; k++) b.part(g.box, m.tint, [10.94, 0.008, dz - 1.0 + k * 0.2], [0.12, 0.01, 0.2], { color: k % 2 ? '#26282B' : '#E9B825', cast: false });
-        [-1, 1].forEach(s => {
-            b.part(g.box, m.hazard, [12.1, 0.62, dz + s * 1.15], [0.24, 1.24, 0.1]);
-            b.part(g.box, m.rubber, [12.32, 0.55, dz + s * 0.95], [0.18, 0.3, 0.22]);
+    const uppers = {};
+    TWIN_FACADES.forEach(f => {
+        const group = new THREE.Group();
+        const ub = twinBatch();
+        uppers[f.id] = { group, batch: ub, b: twinBuilder(ub, group, 0, 0) };
+        Twin.cutaways.push({
+            group,
+            nx: f.axis === 'z' ? f.out : 0,
+            nz: f.axis === 'x' ? f.out : 0,
+            px: f.axis === 'z' ? f.at : 0,
+            pz: f.axis === 'x' ? f.at : 0
         });
-        b.part(g.box, m.steelDark, [11.92, 1.45, dz - 1.45], [0.06, 0.06, 0.35]);
-        b.part(g.box, m.lamp, [11.92, 1.4, dz - 1.3], [0.14, 0.08, 0.14], { cast: false });
     });
-
-    [docks[0] - 1.35, (docks[0] + docks[1]) / 2, docks[1] + 1.35].forEach(bz => {
-        b.part(g.cylLow, m.hazard, [10.7, 0.45, bz], [0.08, 0.9, 0.08]);
-        b.part(g.cylLow, m.dark, [10.7, 0.75, bz], [0.083, 0.06, 0.083]);
-    });
-
-    // Camion porteur à quai (porte 1) : caisse 5,8 m, plancher à 1 m
-    const t = twinBuilder(batch, env, 15.4, docks[0]);
-    t.part(g.box, m.white, [0, 2.15, 0], [5.8, 2.3, 2.3]);
-    for (let k = 0; k < 9; k++) t.part(g.box, m.whiteDark, [-2.84 + k * 0.71, 2.15, 0], [0.04, 2.32, 2.33]);
-    t.part(g.box, m.brand, [0, 1.06, 0], [5.82, 0.16, 2.32]);
-    t.part(g.box, m.dark, [-2.91, 2.15, 0], [0.02, 2.1, 2.1], { cast: false });
-    [-1, 1].forEach(s => t.part(g.box, m.whiteDark, [-2.38, 2.15, s * 1.18], [1.05, 2.1, 0.035]));
-    const truckSign = twinSignMaterial('truck', '#FFFFFF', Twin.palette.primary, 'ThéCol', 'Livraison fraîche');
-    t.mesh(g.box, truckSign, [0.4, 2.25, 1.157], [3.9, 0.98, 0.008], { cast: false });
-    t.mesh(g.box, truckSign, [0.4, 2.25, -1.157], [3.9, 0.98, 0.008], { cast: false, ry: Math.PI });
-    t.part(g.box, m.dark, [0.6, 0.72, 0], [7.4, 0.2, 1.1]);
-    [-1.5, 3.95].forEach(x => [-1, 1].forEach(s => {
-        t.part(g.cyl, m.rubber, [x, 0.4, s * 0.95], [0.4, 0.28, 0.4], { rx: Math.PI / 2 });
-        t.part(g.cylLow, m.chrome, [x, 0.4, s * 1.1], [0.18, 0.02, 0.18], { rx: Math.PI / 2 });
-    }));
-    t.part(g.box, m.brand, [3.95, 1.55, 0], [1.9, 2.0, 2.3]);
-    t.part(g.box, m.brand, [3.7, 2.68, 0], [1.2, 0.26, 2.1]);
-    t.part(g.box, m.glassDark, [4.91, 1.95, 0], [0.04, 0.75, 1.95], { cast: false });
-    [-1, 1].forEach(s => {
-        t.part(g.box, m.glassDark, [4.25, 1.95, s * 1.155], [0.8, 0.55, 0.02], { cast: false });
-        t.part(g.box, m.lamp, [4.925, 0.85, s * 0.8], [0.03, 0.15, 0.28], { cast: false });
-        t.part(g.box, m.dark, [4.75, 2.05, s * 1.32], [0.07, 0.3, 0.05]);
-        t.part(g.box, m.dark, [4.75, 2.1, s * 1.24], [0.03, 0.03, 0.16]);
-        t.part(g.box, m.steelDark, [4.1, 0.45, s * 1.16], [0.45, 0.05, 0.1]);
-    });
-    t.part(g.box, m.dark, [4.91, 1.0, 0], [0.04, 0.5, 1.2], { cast: false });
-    t.part(g.box, m.dark, [4.98, 0.5, 0], [0.14, 0.22, 2.3]);
-    t.part(g.cyl, m.chrome, [2.2, 0.62, -0.75], [0.24, 0.8, 0.24], { rz: Math.PI / 2 });
-
-    // Plan de travail inox adossé au mur : plaques (dynamiques), planche, bocaux, balance, évier
-    const L = TWIN_LAB;
-    const w = twinBuilder(batch, env, L.tableX, L.tableZ);
-    const Ht = L.tableH;
-    const half = L.tableW / 2;
-    w.part(g.box, m.steel, [0, Ht - 0.02, 0], [L.tableW, 0.04, L.tableD], { receive: true });
-    w.part(g.box, m.steel, [0, Ht + 0.1, -L.tableD / 2 + 0.01], [L.tableW, 0.2, 0.02]);
-    w.part(g.box, m.steel, [0, Ht - 0.09, L.tableD / 2 - 0.01], [L.tableW, 0.1, 0.02]);
-    [-half + 0.05, 0, half - 0.05].forEach(lx => [-1, 1].forEach(s => w.part(g.box, m.steel, [lx, (Ht - 0.04) / 2, s * (L.tableD / 2 - 0.05)], [0.04, Ht - 0.04, 0.04])));
-    w.part(g.box, m.steel, [0, 0.2, 0], [L.tableW - 0.06, 0.02, L.tableD - 0.08], { receive: true });
-    [-1.6, -1.15, -0.7].forEach(sx => w.part(g.sack, m.kraft, [sx, 0.21, 0.02], [0.2, 0.28, 0.13]));
-    [0.55, 0.85].forEach(sx => {
-        w.part(g.box, m.white, [sx, 0.37, 0], [0.24, 0.32, 0.16]);
-        w.part(g.cylLow, m.valveRed, [sx + 0.07, 0.55, -0.04], [0.025, 0.04, 0.025]);
-    });
-    w.part(g.box, m.woodLight, [-0.2, Ht + 0.01, 0.06], [0.4, 0.02, 0.28]);
-    w.part(g.box, m.chrome, [-0.16, Ht + 0.024, 0.06], [0.2, 0.004, 0.025], { ry: 0.3 });
-    w.part(g.box, m.dark, [-0.29, Ht + 0.026, 0.1], [0.08, 0.01, 0.022], { ry: 0.3 });
-    w.part(g.cylLow, m.steel, [0.2, Ht + 0.08, -0.15], [0.06, 0.16, 0.06]);
-    [[-0.02, 0.1], [0.02, -0.08]].forEach(([dx, rz]) => {
-        w.part(g.box, m.steel, [0.2 + dx, Ht + 0.24, -0.15], [0.012, 0.22, 0.012], { rz });
-        w.part(g.sphere, m.steel, [0.2 + dx * 3, Ht + 0.36, -0.15], [0.03, 0.02, 0.03]);
-    });
-    ['#C0392B', '#6C3483', '#E8E4C9', '#4E8B3A'].forEach((c, i) => {
-        const jx = 0.45 + i * 0.14;
-        w.part(g.cyl, m.tint, [jx, Ht + 0.065, -0.2], [0.045, 0.12, 0.045], { color: c });
-        w.part(g.cylLow, m.jarGlass, [jx, Ht + 0.09, -0.2], [0.055, 0.18, 0.055]);
-        w.part(g.cyl, m.steel, [jx, Ht + 0.19, -0.2], [0.058, 0.02, 0.058]);
-    });
-    w.part(g.box, m.white, [1.15, Ht + 0.025, 0.05], [0.25, 0.05, 0.25]);
-    w.part(g.box, m.steel, [1.15, Ht + 0.054, 0.02], [0.22, 0.008, 0.18]);
-    w.part(g.box, m.screen, [1.15, Ht + 0.03, 0.176], [0.1, 0.025, 0.003], { cast: false });
-    w.part(g.box, m.steelDark, [1.6, Ht + 0.001, 0.02], [0.52, 0.003, 0.42], { cast: false });
-    w.part(g.box, m.basin, [1.6, Ht + 0.003, 0.02], [0.44, 0.002, 0.34], { cast: false });
-    w.part(g.cylLow, m.chrome, [1.6, Ht + 0.13, -0.26], [0.018, 0.26, 0.018]);
-    w.part(g.cylLow, m.chrome, [1.6, Ht + 0.26, -0.18], [0.014, 0.17, 0.014], { rx: Math.PI / 2 });
-    w.part(g.cylLow, m.chrome, [1.6, Ht + 0.22, -0.095], [0.012, 0.08, 0.012]);
-    w.part(g.box, m.chrome, [1.6, Ht + 0.28, -0.28], [0.02, 0.015, 0.09]);
-
-    // Poste d'embouteillage adossé au mur + caisses vides
-    const e = twinBuilder(batch, env, L.bottling[0], L.bottling[1]);
-    e.part(g.box, m.steel, [0, 0.88, 0], [1.6, 0.04, 0.6], { receive: true });
-    [-0.76, 0.76].forEach(lx => [-1, 1].forEach(s => e.part(g.box, m.steel, [lx, 0.43, s * 0.26], [0.04, 0.86, 0.04])));
-    e.part(g.box, m.steel, [0, 0.18, 0], [1.54, 0.02, 0.52], { receive: true });
-    e.part(g.box, m.steel, [-0.15, 1.34, -0.12], [0.5, 0.24, 0.22]);
-    e.part(g.cylLow, m.steelDark, [-0.15, 1.5, -0.12], [0.07, 0.08, 0.07]);
-    [-1, 1].forEach(s => e.part(g.box, m.steelDark, [-0.15 + s * 0.22, 1.08, -0.2], [0.04, 0.38, 0.04]));
-    const fill = twinBottleSpec(50);
-    for (let k = 0; k < 4; k++) {
-        const nx = -0.33 + k * 0.12;
-        e.part(g.cylLow, m.chrome, [nx, 1.18, -0.05], [0.01, 0.08, 0.01]);
-        e.part(g.bottle, m.bottleTint, [nx, 0.9, -0.05], [fill.d / 2, fill.h, fill.d / 2], { color: '#D9A86C' });
-    }
-    e.part(g.box, m.white, [0.5, 1.05, -0.18], [0.22, 0.3, 0.16]);
-    e.part(g.cylLow, m.ledOn, [0.45, 1.12, -0.098], [0.02, 0.006, 0.02], { rx: Math.PI / 2, cast: false });
-    e.part(g.cylLow, m.valveRed, [0.55, 1.12, -0.098], [0.02, 0.006, 0.02], { rx: Math.PI / 2, cast: false });
-    twinCrate(e, 0.4, 0.9, 0.06, '#8E959B', 0.18);
-    [0, 1, 2, 3, 4].forEach(k => twinCrate(e, 1.3, k * 0.18, 0.0, '#8E959B', 0.18));
-
-    // Chariot inox (ingrédients) et enrouleur de tuyau de lavage
-    const c = twinBuilder(batch, env, -6.6, -3.6, 0.35);
-    [0.16, 0.5, 0.86].forEach(y => c.part(g.box, m.steel, [0, y, 0], [0.8, 0.02, 0.5], { receive: true }));
-    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
-        c.part(g.cylLow, m.steel, [sx * 0.39, 0.5, sz * 0.24], [0.012, 0.8, 0.012]);
-        c.part(g.cyl, m.rubber, [sx * 0.39, 0.04, sz * 0.24], [0.04, 0.03, 0.04], { rx: Math.PI / 2 });
-    }));
-    c.part(g.cylLow, m.steel, [-0.39, 0.95, 0], [0.012, 0.5, 0.012], { rx: Math.PI / 2 });
-    [-1, 1].forEach(sz => c.part(g.cylLow, m.steel, [-0.39, 0.92, sz * 0.24], [0.01, 0.06, 0.01]));
-    [-0.22, 0.03, 0.26].forEach((sx, i) => c.part(g.sack, m.kraft, [sx, 0.87, 0], [0.11, 0.2 - i * 0.02, 0.09]));
-    [-0.18, 0.18].forEach(sx => c.part(g.box, m.white, [sx, 0.28, 0], [0.3, 0.22, 0.3]));
-    const hose = twinBuilder(batch, env, -6.7, inner);
-    hose.part(g.box, m.steelDark, [0, 1.0, 0.02], [0.4, 0.4, 0.04]);
-    hose.part(g.cylLow, m.hazard, [0, 1.0, 0.11], [0.18, 0.12, 0.18], { rx: Math.PI / 2 });
-    hose.part(g.torus, m.dark, [0, 1.0, 0.11], [0.15, 0.15, 1.6]);
-    hose.part(g.cylLow, m.chrome, [0.24, 0.6, 0.06], [0.015, 0.4, 0.015]);
-
-    // Vestiaire : casiers, banc, pointeuse
-    for (let k = 0; k < 6; k++) {
-        const lz = 4.0 + k * 0.41;
-        b.part(g.box, m.locker, [1.15, 0.9, lz], [0.45, 1.8, 0.4]);
-        b.part(g.box, m.lockerDoor, [0.922, 0.9, lz], [0.008, 1.72, 0.37]);
-        [0, 1, 2].forEach(v => b.part(g.box, m.dark, [0.917, 1.62 - v * 0.045, lz], [0.004, 0.02, 0.22], { cast: false }));
-        b.part(g.box, m.chrome, [0.915, 0.95, lz + 0.13], [0.008, 0.1, 0.02], { cast: false });
-    }
-    b.part(g.box, m.woodDark, [0.4, 0.44, 5.0], [0.3, 0.04, 2.2]);
-    [4.1, 5.9].forEach(z => b.part(g.box, m.steelDark, [0.4, 0.21, z], [0.26, 0.42, 0.04]));
-    b.part(g.box, m.steelDark, [1.2, 0.6, 2.2], [0.08, 1.2, 0.08]);
-    b.part(g.box, m.dark, [1.13, 1.35, 2.2], [0.12, 0.3, 0.24]);
-    b.part(g.box, m.screen, [1.068, 1.4, 2.2], [0.004, 0.14, 0.18], { cast: false });
-    b.part(g.box, m.steel, [1.068, 1.26, 2.2], [0.004, 0.04, 0.1], { cast: false });
-
-    // Extincteurs, transpalette
-    [[-1.5, inner, 0], [12.0, 1.2, -Math.PI / 2]].forEach(([x, z, ry]) => {
-        const f = twinBuilder(batch, env, x, z, ry);
-        f.part(g.cyl, m.extinguisher, [0, 0.4, 0.12], [0.08, 0.5, 0.08]);
-        f.part(g.cylLow, m.dark, [0, 0.69, 0.12], [0.035, 0.08, 0.035]);
-        f.part(g.box, m.dark, [0.04, 0.72, 0.12], [0.1, 0.02, 0.02]);
-        f.part(g.box, m.extinguisher, [0, 1.15, 0.01], [0.2, 0.2, 0.01], { cast: false });
-    });
-    const pj = twinBuilder(batch, env, 10.6, -1.6, Math.PI / 2);
-    [-1, 1].forEach(s => {
-        pj.part(g.box, m.steelDark, [0.1, 0.045, s * 0.2], [1.15, 0.05, 0.16]);
-        pj.part(g.cylLow, m.rubber, [0.6, 0.04, s * 0.2], [0.04, 0.1, 0.04], { rx: Math.PI / 2 });
-    });
-    pj.part(g.box, m.rackOrange, [-0.6, 0.28, 0], [0.26, 0.46, 0.52]);
-    pj.part(g.cyl, m.rubber, [-0.6, 0.08, 0], [0.08, 0.12, 0.08], { rx: Math.PI / 2 });
-    pj.part(g.cylLow, m.steelDark, [-0.82, 0.82, 0], [0.02, 0.9, 0.02], { rz: 0.35 });
-    pj.part(g.box, m.dark, [-0.98, 1.24, 0], [0.05, 0.05, 0.3]);
-
+    twinBuildSite(b);
+    twinBuildShell(b, uppers);
+    twinBuildLab(batch, env, uppers);
+    twinBuildLaverie(batch, env);
+    twinBuildStockRoom(batch, env, uppers);
+    twinBuildCorridor(batch, env, uppers);
+    twinBuildReserve(batch, env, uppers);
+    twinBuildVestiaire(batch, env);
+    twinBuildExpedition(batch, env, uppers);
     twinBatchFlush(batch, env);
+    Object.values(uppers).forEach(u => {
+        twinBatchFlush(u.batch, u.group);
+        env.add(u.group);
+    });
     Twin.scene.add(env);
+};
+
+// Façades côté caméra : seule la partie basse (coupée) reste visible, comme sur une maquette
+const twinUpdateCutaways = () => {
+    const cam = Twin.camera.position;
+    let changed = false;
+    Twin.cutaways.forEach(c => {
+        const show = (cam.x - c.px) * c.nx + (cam.z - c.pz) * c.nz < 0;
+        if (c.group.visible !== show) {
+            c.group.visible = show;
+            changed = true;
+        }
+    });
+    if (changed) twinShadowsDirty();
 };
 
 const twinBuildMarkers = () => {
@@ -4642,82 +5987,48 @@ const twinAddFill = (id, targets, fill) => {
     Twin.prevFill.set(id, fill);
 };
 
-// --- Équipement de production : cuve inox 25 L sur trépied ---
+// --- Équipement de production : cuve 25 L (cuiseur inox à robinet) posée sur la paillasse ---
 const twinBuildCuve = (batch, e, x, z) => {
     const m = twinMaterials();
     const g = twinGeometries();
-    const cm = e.couleur ? twinColorMats(e.couleur) : null;
-    const b = twinBuilder(batch, Twin.dynamic, x, z);
-    const { R, H, stand } = TWIN_CUVE;
-    const cone = 0.26 * H;
-    const body0 = stand + cone;
-    const rim = stand + H;
+    const b = twinBuilder(batch, Twin.dynamic, x, z, 0, TWIN_LAB.benchH);
+    const { R } = TWIN_CUVE;
     const planned = e.status === 'planned';
-    // Pieds jusqu'au fond conique (rayon 0,14 m → hauteur de contact sur le cône)
-    const legR = 0.14;
-    const legTop = stand + (legR - 0.1 * R) / (0.9 * R) * cone;
-    for (let k = 0; k < 3; k++) {
-        const a = -Math.PI / 2 + k * (Math.PI * 2 / 3);
-        const lx = Math.cos(a) * legR;
-        const lz = Math.sin(a) * legR;
-        b.part(g.cylLow, m.steel, [lx, legTop / 2, lz], [0.011, legTop, 0.011]);
-        b.part(g.cylLow, m.rubber, [lx, 0.008, lz], [0.022, 0.016, 0.022]);
-    }
-    b.part(g.torus, m.steel, [0, 0.16, 0], [legR, legR, 0.5], { rx: Math.PI / 2 });
-    b.part(g.tankShell, m.steelShell, [0, stand, 0], [R, H, R]);
-    b.part(g.torus, m.steel, [0, rim + 0.004, 0], [R * 0.955, R * 0.955, 0.8], { rx: Math.PI / 2 });
-    [0.5, 0.78].forEach(f => b.part(g.torus, m.steelDark, [0, stand + H * f, 0], [R * 1.003, R * 1.003, 0.3], { rx: Math.PI / 2, cast: false }));
-    b.part(g.torus, cm ? cm.band : m.steelDark, [0, rim - 0.04, 0], [R * 1.01, R * 1.01, 0.7], { rx: Math.PI / 2, cast: false });
-    [-1, 1].forEach(s => {
-        b.part(g.box, m.steel, [s * (R + 0.028), rim - 0.08, 0], [0.012, 0.012, 0.09]);
-        [-0.04, 0.04].forEach(dz => b.part(g.box, m.steel, [s * (R + 0.014), rim - 0.08, dz], [0.028, 0.01, 0.01]));
-    });
-    // Vanne de vidange sous la pointe du cône
-    b.part(g.cylLow, m.steel, [0, stand - 0.04, 0], [0.012, 0.09, 0.012]);
-    b.part(g.cylLow, m.steel, [0, stand - 0.08, 0.06], [0.011, 0.13, 0.011], { rx: Math.PI / 2 });
-    b.part(g.box, m.chrome, [0, stand - 0.08, 0.13], [0.035, 0.035, 0.03]);
-    b.part(g.box, m.valveRed, [0.02, stand - 0.055, 0.13], [0.075, 0.008, 0.014]);
-    // Tube de niveau en verre + raccords + graduations
-    const tubeX = 0.1;
-    const tubeZ = Math.sqrt(R * R - tubeX * tubeX) + 0.028;
-    const t0 = body0 + 0.02;
-    const t1 = rim - 0.07;
-    const tubeLen = t1 - t0;
-    b.part(g.cylLow, m.sightGlass, [tubeX, (t0 + t1) / 2, tubeZ], [0.009, tubeLen, 0.009]);
-    [t0, t1].forEach(ty => b.part(g.cylLow, m.steel, [tubeX, ty, tubeZ - 0.02], [0.006, 0.04, 0.006], { rx: Math.PI / 2 }));
-    for (let k = 1; k < 5; k++) b.part(g.box, m.dark, [tubeX + 0.014, t0 + tubeLen * k / 5, tubeZ], [0.01, 0.002, 0.002], { cast: false });
-    const plateX = -0.075;
+    b.part(g.cyl, m.plastic, [0, 0.016, 0], [R * 0.97, 0.032, R * 0.97]);
+    b.part(g.cuve, m.steelShell, [0, 0, 0], [1, 1, 1]);
+    // Thermostat, voyant de chauffe, robinet de soutirage, poignées
+    b.part(g.cyl, m.plastic, [-0.07, 0.07, R + 0.01], [0.026, 0.02, 0.026], { rx: Math.PI / 2 });
+    b.part(g.box, m.white, [-0.07, 0.083, R + 0.021], [0.004, 0.014, 0.003], { cast: false });
+    b.part(g.cyl, planned ? m.ledOrange : m.ledOff, [-0.015, 0.07, R + 0.003], [0.008, 0.01, 0.008], { rx: Math.PI / 2, cast: false });
+    b.part(g.cylLow, m.chrome, [0.07, 0.06, R + 0.03], [0.012, 0.06, 0.012], { rx: Math.PI / 2 });
+    b.part(g.cylLow, m.chrome, [0.07, 0.042, R + 0.055], [0.01, 0.035, 0.01]);
+    b.part(g.box, m.plastic, [0.07, 0.085, R + 0.05], [0.014, 0.05, 0.012], { rx: -0.4 });
+    [-1, 1].forEach(s => b.part(g.box, m.plastic, [s * (R + 0.02), 0.37, 0], [0.03, 0.025, 0.11]));
     b.mesh(g.box, twinPlateMaterial(`cuve${e.numero}`, `CUVE ${e.numero}`, `${e.capacite} L`, Twin.palette.primary),
-        [plateX, stand + H * 0.58, Math.sqrt(R * R - plateX * plateX) + 0.004], [0.11, 0.055, 0.003], { cast: false, ry: Math.asin(plateX / R) });
-    // Couvercle : ouvert (charnière arrière) si une production est planifiée
+        [0, 0.24, R + 0.004], [0.12, 0.06, 0.003], { cast: false });
+    // Couvercle posé si la cuve est libre ; relevé contre l'arrière quand une production est planifiée
     if (planned) {
-        const a = 1.42;
-        b.part(g.cyl, m.steel, [0, rim + 0.012 + Math.sin(a) * R, -R + Math.cos(a) * R], [R * 1.03, 0.008, R * 1.03], { rx: -a });
-        b.part(g.box, m.steelDark, [0, rim + 0.01, -R - 0.006], [0.08, 0.016, 0.016]);
-        twinFlat(b, g.ring, m.ringPlanned, 0, 0.008, 0, 0.3, 0.3);
+        b.part(g.cuveLid, m.steelShell, [0, 0.608, -0.108], [1, 1, 1], { rx: -1.15 });
+        b.part(g.sphere, m.plastic, [0, 0.64, -0.178], [0.025, 0.018, 0.025]);
+        twinFlat(b, g.plane, m.ringPlanned, 0, 0.004, 0, 0.66, 0.66);
     } else {
-        b.part(g.cyl, m.steel, [0, rim + 0.01, 0], [R * 1.03, 0.008, R * 1.03]);
-        b.part(g.torus, m.chrome, [0, rim + 0.004, 0], [R * 1.035, R * 1.035, 0.5], { rx: Math.PI / 2, cast: false });
-        b.part(g.cylLow, m.steelDark, [0, rim + 0.025, 0], [0.018, 0.022, 0.018]);
+        b.part(g.cuveLid, m.steelShell, [0, 0.423, 0], [1, 1, 1]);
+        b.part(g.sphere, m.plastic, [0, 0.497, 0], [0.025, 0.018, 0.025]);
     }
-    if (planned && cm) {
-        const liquid = b.mesh(g.cyl, cm.liquid, [0, 0, 0], [1, 1, 1], { cast: false });
-        const tube = b.mesh(g.cylLow, cm.liquid, [tubeX, 0, tubeZ], [1, 1, 1], { cast: false });
-        twinAddFill(e.id, [
-            { mesh: liquid, base: body0 - 0.004, radius: R * 0.965, maxH: rim - 0.02 - body0 },
-            { mesh: tube, base: t0, radius: 0.006, maxH: tubeLen }
-        ], e.fill);
+    if (planned && e.couleur) {
+        const liquid = b.mesh(g.cyl, twinColorMats(e.couleur).liquid, [0, 0, 0], [1, 1, 1], { cast: false });
+        twinAddFill(e.id, [{ mesh: liquid, base: TWIN_LAB.benchH + 0.1, radius: 0.18, maxH: 0.29 }], e.fill);
     } else {
         Twin.prevFill.set(e.id, 0);
     }
-    twinRegister(e, b, { hit: { p: [0, (rim + 0.04) / 2, 0], s: [0.38, rim + 0.04, 0.38] }, top: rim + 0.4, radius: 0.3 });
+    twinRegister(e, b, { hit: { p: [0, 0.27, 0], s: [0.46, 0.56, 0.46] }, top: 0.85, radius: 0.3 });
 };
 
-// --- Équipement de production : plaque à induction posée sur le plan + casserole ---
+// --- Plaque à induction sur la paillasse + casserole (vapeur quand elle chauffe) ---
 const twinBuildInduction = (batch, e, x, z) => {
     const m = twinMaterials();
     const g = twinGeometries();
-    const Ht = TWIN_LAB.tableH;
+    const Ht = TWIN_LAB.benchH;
     const b = twinBuilder(batch, Twin.dynamic, x, z, 0, Ht);
     const on = e.status === 'planned';
     b.part(g.box, m.plastic, [0, 0.028, 0], [0.29, 0.056, 0.36]);
@@ -4734,8 +6045,8 @@ const twinBuildInduction = (batch, e, x, z) => {
         b.part(g.box, m.steel, [s * (r + 0.012), py + h - 0.03, -0.03], [0.024, 0.02, 0.03]);
     });
     if (on) {
-        b.part(g.cyl, m.steel, [0.04, py + h + 0.035, -0.05], [r * 1.04, 0.006, r * 1.04], { rz: 0.3 });
-        b.part(g.sphere, m.dark, [0.035, py + h + 0.052, -0.05], [0.016, 0.012, 0.016]);
+        b.part(g.cyl, m.steel, [0.05, py + h + 0.05, -0.07], [r * 1.04, 0.006, r * 1.04], { rz: 0.45 });
+        b.part(g.sphere, m.dark, [0.04, py + h + 0.07, -0.07], [0.016, 0.012, 0.016]);
     } else {
         b.part(g.cyl, m.steel, [0, py + h * 1.03 + 0.004, -0.03], [r * 1.05, 0.006, r * 1.05]);
         b.part(g.sphere, m.dark, [0, py + h * 1.03 + 0.016, -0.03], [0.016, 0.012, 0.016]);
@@ -4743,17 +6054,76 @@ const twinBuildInduction = (batch, e, x, z) => {
     if (on && e.couleur) {
         const liquid = b.mesh(g.cyl, twinColorMats(e.couleur).liquid, [0, 0, -0.03], [1, 1, 1], { cast: false });
         twinAddFill(e.id, [{ mesh: liquid, base: Ht + py + h * 0.065, radius: r * 0.95, maxH: h * 0.88 }], e.fill);
+        twinAddSteam(b.point([0, py + h + 0.01, -0.03]), r * 0.85);
     } else {
         Twin.prevFill.set(e.id, 0);
     }
-    // Étiquette sur le bandeau avant du plan de travail
-    const front = TWIN_LAB.tableZ + TWIN_LAB.tableD / 2 - z + 0.002;
+    // Étiquette sur le chant avant du plan de travail
+    const front = TWIN_LAB.benchZ + 0.36 - z;
     b.mesh(g.box, twinPlateMaterial(`plaque${e.numero}`, `PLAQUE ${e.numero}`, `Casserole ${e.capacite} L`, '#2A2A2A'),
-        [0, -0.09, front], [0.18, 0.08, 0.003], { cast: false });
+        [0, -0.075, front], [0.16, 0.07, 0.003], { cast: false });
     twinRegister(e, b, { hit: { p: [0, (py + h) / 2 + 0.01, -0.01], s: [0.36, py + h + 0.06, 0.4] }, top: py + h + 0.4, radius: 0.24 });
 };
 
-// --- Entrepôt : palette Europe + casiers (8 par couche) + bouteilles visibles ---
+// Vapeur : particules douces au-dessus des casseroles qui chauffent (exclues de l'occlusion ambiante)
+const twinSteamMaterial = () => twinMat('steam', () => new Twin.lib.THREE.ShaderMaterial({
+    uniforms: { map: { value: twinSteamSet().map }, uScale: { value: Twin.steamScale || 700 } },
+    vertexShader: `attribute float aSize;
+attribute float aAlpha;
+uniform float uScale;
+varying float vAlpha;
+void main() {
+	vec4 mv = modelViewMatrix * vec4( position, 1.0 );
+	gl_Position = projectionMatrix * mv;
+	gl_PointSize = aSize * uScale / -mv.z;
+	vAlpha = aAlpha;
+}`,
+    fragmentShader: `uniform sampler2D map;
+varying float vAlpha;
+void main() {
+	float a = texture2D( map, gl_PointCoord ).a * vAlpha;
+	if ( a < 0.004 ) discard;
+	gl_FragColor = vec4( vec3( 0.96 ), a );
+}`,
+    transparent: true,
+    depthWrite: false
+}));
+
+const twinAddSteam = (origin, radius) => {
+    const { THREE } = Twin.lib;
+    const n = Twin.quality.steam;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(n), 1));
+    geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(n), 1));
+    const points = new THREE.Points(geo, twinSteamMaterial());
+    points.frustumCulled = false;
+    points.renderOrder = 2;
+    points.userData.twinNoAO = true;
+    Twin.dynamic.add(points);
+    const rnd = twinRandom(Math.round(Math.abs(origin.x) * 1000 + Math.abs(origin.z) * 37));
+    const steam = { points, origin, radius, seeds: Array.from({ length: n }, () => [rnd(), rnd(), rnd() * Math.PI * 2, 0.6 + rnd() * 0.6]) };
+    Twin.steam.push(steam);
+    twinUpdateSteam(steam, performance.now());
+};
+
+const twinUpdateSteam = (s, now) => {
+    const attrs = s.points.geometry.attributes;
+    const t0 = now / 1000;
+    s.seeds.forEach(([phase, off, ang, speed], i) => {
+        const t = (t0 * 0.3 * speed + phase) % 1;
+        const r = s.radius * (0.25 + off * 0.75) * (1 - t * 0.4);
+        const sway = Math.sin(t0 * 1.3 + ang * 3) * 0.035 * t;
+        attrs.position.setXYZ(i, s.origin.x + Math.cos(ang) * r + sway + t * 0.05, s.origin.y + t * 0.55, s.origin.z + Math.sin(ang) * r - t * 0.03);
+        attrs.aSize.setX(i, 0.07 + t * 0.26);
+        attrs.aAlpha.setX(i, Math.pow(Math.sin(Math.PI * t), 1.4) * 0.3);
+    });
+    attrs.position.needsUpdate = true;
+    attrs.aSize.needsUpdate = true;
+    attrs.aAlpha.needsUpdate = true;
+};
+
+// --- Stock : piles de casiers noirs (8 par couche, ~1,9 m maximum), bouteilles visibles sur le dessus ---
 const TWIN_ORDER_SLOTS = 16;
 const TWIN_SLOTS_8 = [-0.45, -0.15, 0.15, 0.45].flatMap(dx => [0.2, -0.2].map(dz => [dx, dz]));
 
@@ -4761,183 +6131,271 @@ const twinBuildStack = (batch, s, x, z) => {
     const m = twinMaterials();
     const g = twinGeometries();
     const b = twinBuilder(batch, Twin.dynamic, x, z);
-    twinPallet(b, 0, 0);
-    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
-        twinFlat(b, g.plane, m.marking, sx * 0.68, 0.006, sz * 0.36, 0.04, 0.2);
-        twinFlat(b, g.plane, m.marking, sx * 0.6, 0.006, sz * 0.46, 0.2, 0.04);
-    }));
     const spec = twinBottleSpec(s.contenanceCl);
-    const crateH = Math.round(spec.h * 0.7 * 100) / 100;
-    const crates = s.total > 0 ? Math.ceil(s.total / s.crateSize) : 0;
-    const layers = Math.min(8, Math.ceil(crates / 8));
-    let top = TWIN_PALLET_TOP;
+    const crateH = Math.round((spec.h + 0.014) * 1000) / 1000;
+    const maxLayers = Math.max(3, Math.floor(1.9 / crateH));
+    const crates = s.total > 0 ? Math.min(8 * maxLayers, Math.ceil(s.total / s.crateSize)) : 0;
+    const layers = Math.ceil(crates / 8);
+    let top = 0.3;
     if (crates > 0) {
+        const labelMat = twinBottleLabelMaterial(s.arome, s.couleur);
         for (let l = 0; l < layers; l++) {
-            const inLayer = l < layers - 1 || crates > layers * 8 ? 8 : crates - (layers - 1) * 8;
-            const y = TWIN_PALLET_TOP + l * crateH;
+            const inLayer = l < layers - 1 ? 8 : crates - (layers - 1) * 8;
+            const y = l * crateH;
             for (let c = 0; c < inLayer; c++) {
                 const [cx, cz] = TWIN_SLOTS_8[c];
-                twinCrate(b, cx, y, cz, s.couleur, crateH);
+                twinCrate(b, cx, y, cz, crateH);
                 if (l === layers - 1) {
-                    const last = crates <= layers * 8 && c === inLayer - 1;
-                    const count = last ? (s.total - (crates - 1) * s.crateSize) : s.crateSize;
-                    twinCrateBottles(b, cx, y + 0.012, cz, count, s.crateSize, s.contenanceCl, s.couleur);
+                    const count = c === inLayer - 1 ? s.total - (crates - 1) * s.crateSize : s.crateSize;
+                    twinCrateBottles(b, cx, y + 0.012, cz, twinClamp(count, 0, s.crateSize), s.crateSize, s.contenanceCl, { color: s.couleur, labelMat });
                 }
             }
         }
-        top = TWIN_PALLET_TOP + (layers - 1) * crateH + 0.012 + spec.h + 0.02;
-        // Fiche palette sur le premier casier (toujours présent)
-        const [lx] = TWIN_SLOTS_8[0];
-        b.part(g.box, m.label, [lx, TWIN_PALLET_TOP + crateH * 0.45, 0.403], [0.16, 0.08, 0.003], { cast: false });
-        b.part(g.box, m.tint, [lx, TWIN_PALLET_TOP + crateH * 0.45 + 0.03, 0.405], [0.16, 0.016, 0.003], { color: s.couleur, cast: false });
-        for (let k = 0; k < 7; k++) b.part(g.box, m.dark, [lx - 0.05 + k * 0.016, TWIN_PALLET_TOP + crateH * 0.45 - 0.012, 0.405], [0.006, 0.03, 0.002], { cast: false });
+        top = (layers - 1) * crateH + 0.012 + spec.h;
+        const [lx, lz] = TWIN_SLOTS_8[0];
+        b.part(g.box, twinTagMaterial(`stack:${s.id}`, s.arome, s.format, s.couleur), [lx, crateH * 0.45, lz + 0.204], [0.17, 0.106, 0.003], { cast: false });
     } else {
-        const ghost = new Twin.lib.THREE.LineSegments(g.edges, m.ghost);
-        b.matrix([0, TWIN_PALLET_TOP + 0.2, 0], [1.2, 0.4, 0.8]).decompose(ghost.position, ghost.quaternion, ghost.scale);
-        Twin.dynamic.add(ghost);
-        b.part(g.box, m.ghostFill, [0, TWIN_PALLET_TOP + 0.2, 0], [1.2, 0.4, 0.8]);
-        top = TWIN_PALLET_TOP + 0.4;
+        twinFlat(b, g.plane, m.hatch, 0, 0.005, 0, 1.2, 0.8);
     }
-    const ring = { expired: m.ringDanger, invendable: m.ringDanger, rupture: m.ringWarning, warning: m.ringWarningSoft }[s.status];
-    if (ring) twinFlat(b, g.ring, ring, 0, 0.008, 0, 0.82, 0.82);
+    const halo = { expired: m.ringDanger, invendable: m.ringDanger, rupture: m.ringWarning, warning: m.ringWarningSoft }[s.status];
+    if (halo) twinFlat(b, g.plane, halo, 0, 0.004, 0, 1.75, 1.25);
     twinRegister(s, b, { hit: { p: [0, top / 2, 0], s: [1.2, top, 0.8] }, top: top + 0.3, radius: 0.78 });
 };
 
-// --- Expédition : palette Europe de cartons de 12 bouteilles (8 par couche) ---
+// --- Expédition : caisses vertes sur chariots (bouteilles visibles si la commande est produite), bon de livraison ---
+const TWIN_ORDER_COLUMNS = [[-0.32, 0.22], [0.32, 0.22], [-0.32, -0.22], [0.32, -0.22]];
+
 const twinBuildOrder = (batch, o, x, z) => {
     const m = twinMaterials();
     const g = twinGeometries();
     const b = twinBuilder(batch, Twin.dynamic, x, z);
-    twinPallet(b, 0, 0);
-    const boxH = 0.26;
-    const cartons = Math.max(1, Math.ceil(o.totalBt / 12));
-    const layers = Math.min(6, Math.ceil(cartons / 8));
-    const krafts = ['#C9A878', '#C2A070', '#D0B183'];
-    const stripe = o.late ? '#C0392B' : o.urgent ? '#C8960A' : o.statut === 'produite' ? '#5C8A3C' : '#2E72B8';
-    for (let l = 0; l < layers; l++) {
-        const inLayer = l < layers - 1 || cartons > layers * 8 ? 8 : cartons - (layers - 1) * 8;
-        const y = TWIN_PALLET_TOP + l * boxH;
-        for (let c = 0; c < inLayer; c++) {
-            const [cx, cz] = TWIN_SLOTS_8[c];
-            b.part(g.box, m.tint, [cx, y + boxH / 2, cz], [0.296, boxH - 0.004, 0.396], { color: krafts[(l + c) % 3] });
-            if (l === layers - 1) {
-                b.part(g.box, m.kraftTape, [cx, y + boxH + 0.001, cz], [0.05, 0.003, 0.4], { cast: false });
-                if (cz > 0) {
-                    b.part(g.box, m.label, [cx, y + boxH * 0.55, cz + 0.2], [0.12, 0.08, 0.003], { cast: false });
-                    b.part(g.box, m.tint, [cx, y + boxH * 0.55 + 0.032, cz + 0.202], [0.12, 0.014, 0.002], { color: stripe, cast: false });
-                    for (let k = 0; k < 6; k++) b.part(g.box, m.dark, [cx - 0.04 + k * 0.016, y + boxH * 0.55 - 0.014, cz + 0.202], [0.006, 0.03, 0.002], { cast: false });
-                }
+    const ready = o.statut === 'produite';
+    const crates = twinClamp(o.items.reduce((sum, it) => sum + Math.ceil(it.quantite / (2 * twinCrateSize(it.contenanceCl || 50))), 0), 1, 20);
+    const columns = Math.ceil(crates / 5);
+    const heights = [];
+    for (let c = 0; c < columns; c++) {
+        const [cx, cz] = TWIN_ORDER_COLUMNS[c];
+        twinDolly(b, cx, cz, 0);
+        const inCol = Math.min(5, crates - c * 5);
+        heights.push(0.13 + inCol * 0.24);
+        for (let k = 0; k < inCol; k++) {
+            const y = 0.13 + k * 0.24;
+            twinGreenCrate(b, cx, y, cz, 0);
+            const item = o.items[(c * 5 + k) % Math.max(1, o.items.length)];
+            if (ready && k === inCol - 1 && item) {
+                const cl = item.contenanceCl || 50;
+                const size = twinCrateSize(cl);
+                const labelMat = twinBottleLabelMaterial(item.arome, item.couleur);
+                [-0.15, 0.15].forEach(dx => twinCrateBottles(b, cx + dx, y + 0.016, cz, size, size, cl, { color: item.couleur, labelMat }));
             }
         }
     }
-    const top = TWIN_PALLET_TOP + layers * boxH;
-    if (o.statut === 'produite') {
-        // Film étirable ajusté à l'emprise réelle des cartons (couche du bas, la plus complète)
-        const used = TWIN_SLOTS_8.slice(0, Math.min(8, cartons));
-        const x0 = Math.min(...used.map(p => p[0])) - 0.155;
-        const x1 = Math.max(...used.map(p => p[0])) + 0.155;
-        const z0 = Math.min(...used.map(p => p[1])) - 0.205;
-        const z1 = Math.max(...used.map(p => p[1])) + 0.205;
-        const fh = layers * boxH;
-        b.part(g.box, m.film, [(x0 + x1) / 2, TWIN_PALLET_TOP + fh / 2, (z0 + z1) / 2], [x1 - x0, fh + 0.01, z1 - z0]);
-        [x0, x1].forEach(cx => [z0, z1].forEach(cz => b.part(g.box, m.kraftTape, [cx, TWIN_PALLET_TOP + fh / 2, cz], [0.035, fh, 0.035])));
-    }
+    const top = Math.max(...heights);
+    const stripe = o.late ? '#C0392B' : o.urgent ? '#C8960A' : ready ? '#5C8A3C' : '#2E72B8';
+    const [sx, sz] = TWIN_ORDER_COLUMNS[0];
+    b.part(g.box, twinSheetMaterial(`order:${o.commandeId}`, o.numero, o.client, stripe), [sx + 0.02, heights[0] + 0.004, sz], [0.21, 0.004, 0.297], { ry: 0.12, cast: false });
     if (o.late || o.urgent) {
-        // Gyrophare posé sur le premier carton de la couche du haut
-        const [bx, bz] = TWIN_SLOTS_8[0];
-        b.part(g.cylLow, m.steelDark, [bx + 0.08, top + 0.16, bz + 0.1], [0.015, 0.32, 0.015]);
-        b.part(g.sphere, o.late ? m.beaconDanger : m.beaconWarning, [bx + 0.08, top + 0.37, bz + 0.1], [0.06, 0.06, 0.06], { cast: false });
-        twinFlat(b, g.ring, o.late ? m.ringDanger : m.ringWarning, 0, 0.008, 0, 0.82, 0.82);
-    } else if (o.statut === 'produite') {
-        twinFlat(b, g.ring, m.ringSuccess, 0, 0.008, 0, 0.82, 0.82);
+        const k = Math.min(columns - 1, 1);
+        const [bx, bz] = TWIN_ORDER_COLUMNS[k];
+        b.part(g.cyl, m.plastic, [bx + 0.18, heights[k] + 0.025, bz + 0.1], [0.05, 0.05, 0.05]);
+        b.part(g.dome, o.late ? m.beaconDanger : m.beaconWarning, [bx + 0.18, heights[k] + 0.05, bz + 0.1], [0.045, 0.09, 0.045], { cast: false });
+        twinFlat(b, g.plane, o.late ? m.ringDanger : m.ringWarning, 0, 0.004, 0, 1.85, 1.4);
+    } else if (ready) {
+        twinFlat(b, g.plane, m.ringSuccess, 0, 0.004, 0, 1.85, 1.4);
     }
-    twinRegister(o, b, { hit: { p: [0, top / 2, 0], s: [1.2, top, 0.8] }, top: top + 0.55, radius: 0.78 });
+    twinRegister(o, b, { hit: { p: [0, top / 2, 0], s: [1.26, top, 0.86] }, top: top + 0.55, radius: 0.8 });
 };
 
-// --- Consommables : rayonnage 2 × 0,6 × 2 m, 4 niveaux de 3 bacs ---
-const TWIN_SHELF_LEVELS = [0.12, 0.6, 1.08, 1.56];
+// --- Réserve : étagères inox à clayettes (chambre froide) et rayonnages noirs à tablettes (préparation) ---
+const TWIN_SHELF_LEVELS = [0.1, 0.56, 1.02, 1.48];
+const TWIN_RACKS = {
+    cold: [
+        { x: -11.72, z: 2.6, ry: Math.PI / 2, type: 'inox' },
+        { x: -11.72, z: 4.65, ry: Math.PI / 2, type: 'inox' },
+        { x: -10.0, z: 7.72, ry: Math.PI, type: 'inox' },
+        { x: -9.95, z: 1.8, ry: 0, type: 'rack' },
+        { x: -5.0, z: 4.45, ry: Math.PI, type: 'rack' }
+    ],
+    dry: [
+        { x: -6.4, z: 1.8, ry: 0, type: 'rack' },
+        { x: -2.1, z: 3.0, ry: -Math.PI / 2, type: 'rack' },
+        { x: -2.1, z: 5.05, ry: -Math.PI / 2, type: 'rack' },
+        { x: -7.67, z: 4.6, ry: Math.PI / 2, type: 'rack' },
+        { x: -5.0, z: 5.0, ry: 0, type: 'rack' }
+    ]
+};
 
-const twinBuildShelving = (batch, x, z) => {
+const twinBuildRack = (batch, r) => {
     const m = twinMaterials();
     const g = twinGeometries();
-    const b = twinBuilder(batch, Twin.dynamic, x, z);
-    [-1.0, 1.0].forEach(px => {
-        [-0.28, 0.28].forEach(pz => {
-            b.part(g.box, m.rackBlue, [px, 1.0, pz], [0.05, 2.0, 0.05]);
-            b.part(g.box, m.steelDark, [px, 0.005, pz], [0.1, 0.01, 0.1]);
-        });
-        [0.4, 1.0, 1.95].forEach(y => b.part(g.box, m.rackBlue, [px, y, 0], [0.025, 0.025, 0.56]));
-        b.part(g.box, m.rackBlue, [px, 0.7, 0], [0.02, 0.65, 0.02], { rx: 0.62 });
-        b.part(g.box, m.rackBlue, [px, 1.47, 0], [0.02, 0.65, 0.02], { rx: -0.62 });
-    });
+    const b = twinBuilder(batch, Twin.dynamic, r.x, r.z, r.ry);
+    const L = 1.9;
+    const D = 0.5;
+    const H = 1.86;
+    const inox = r.type === 'inox';
+    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
+        b.part(g.box, inox ? m.steel : m.plastic, [sx * (L / 2 - 0.02), H / 2, sz * (D / 2 - 0.02)], [inox ? 0.03 : 0.035, H, inox ? 0.03 : 0.035]);
+        b.part(g.box, inox ? m.steelDark : m.rubber, [sx * (L / 2 - 0.02), 0.008, sz * (D / 2 - 0.02)], [0.045, 0.016, 0.045]);
+    }));
     TWIN_SHELF_LEVELS.forEach(y => {
-        [-0.28, 0.28].forEach(pz => b.part(g.box, m.rackOrange, [0, y - 0.03, pz], [1.95, 0.05, 0.03]));
-        b.part(g.box, m.steel, [0, y, 0], [1.95, 0.02, 0.56], { receive: true });
+        [-1, 1].forEach(sz => b.part(g.box, inox ? m.steel : m.plastic, [0, y - 0.018, sz * (D / 2 - 0.02)], [L, inox ? 0.03 : 0.04, 0.026]));
+        if (inox) {
+            for (let k = 0; k < 11; k++) b.part(g.box, m.steel, [0, y, -D / 2 + 0.04 + k * ((D - 0.08) / 10)], [L - 0.06, 0.012, 0.014]);
+        } else {
+            b.part(g.box, m.board, [0, y, 0], [L - 0.02, 0.012, D - 0.02]);
+        }
     });
-    const slots = [];
-    TWIN_SHELF_LEVELS.forEach(y => [-0.64, 0, 0.64].forEach(sx => slots.push([x + sx, y + 0.01, z])));
-    return slots;
+    const c = Math.cos(r.ry);
+    const s = Math.sin(r.ry);
+    return TWIN_SHELF_LEVELS.flatMap(y => [-0.62, 0, 0.62].map(lx => ({ x: r.x + lx * c, y: y + 0.006, z: r.z - lx * s, ry: r.ry })));
 };
 
-const twinBuildBin = (batch, item, x, y, z) => {
+// Forme du consommable d'après son nom et son unité (photos de la réserve)
+const twinBinKind = (item) => {
+    const n = normalizeName(item.nom);
+    const family = getUnitFamily(item.unite);
+    if (/bouteille|flacon/.test(n)) return 'bottles';
+    if (/bouchon|capsule|couvercle/.test(n)) return 'caps';
+    if (/etiquette/.test(n)) return 'labels';
+    if (family === 'volume') return /^eau/.test(n) ? 'water' : 'jerrycan';
+    if (family === 'mass') return /sucre|farine|^sel/.test(n) ? 'sack' : 'container';
+    return 'box';
+};
+
+const twinContentKind = (nom) => {
+    const n = normalizeName(nom);
+    if (/hibiscus|rose|petale|coquelicot|mauve|cassis/.test(n)) return 'petals';
+    if (/menthe|verveine|herbe|melisse|sauge|thym|romarin|ortie|basilic|citronnelle|alpes/.test(n)) return 'herbs';
+    if (/sureau|camomille|fleur|lavande|tilleul|calendula/.test(n)) return 'flowers';
+    if (/^the|rooibos|mate|matcha|sencha/.test(n)) return 'tea';
+    return 'fruit';
+};
+
+const twinContentMaterial = (kind) => twinMat(`content:${kind}`, () =>
+    new Twin.lib.THREE.MeshStandardMaterial({ map: twinContentSet(kind).map, roughness: 0.92 }));
+
+const twinPackBottleSpec = (nom) => {
+    const n = normalizeName(nom);
+    if (/25|33/.test(n)) return { cl: 25, cols: 4, rows: 3 };
+    if (/1l|100|litre/.test(n)) return { cl: 100, cols: 3, rows: 2 };
+    return { cl: 50, cols: 3, rows: 3 };
+};
+
+const twinBuildBin = (batch, item, slot) => {
     const m = twinMaterials();
     const g = twinGeometries();
-    const b = twinBuilder(batch, Twin.dynamic, x, z, 0, y);
-    const W = 0.58;
-    const D = 0.4;
-    const H = 0.28;
-    b.part(g.box, m.binPlastic, [0, 0.006, 0], [W - 0.02, 0.012, D - 0.02]);
-    b.part(g.box, m.binPlastic, [0, H / 2, -D / 2 + 0.006], [W, H, 0.012]);
-    [-1, 1].forEach(s => b.part(g.box, m.binPlastic, [s * (W / 2 - 0.006), H / 2, 0], [0.012, H, D]));
-    b.part(g.box, m.binPlastic, [0, 0.07, D / 2 - 0.006], [W, 0.14, 0.012]);
+    const b = twinBuilder(batch, Twin.dynamic, slot.x, slot.z, slot.ry, slot.y);
+    const kind = twinBinKind(item);
+    const level = item.quantite > 0 ? item.level : 0;
     const stateColor = TWIN_STATE_COLORS[item.state] || TWIN_STATE_COLORS.unknown;
-    b.part(g.box, m.label, [0, 0.085, D / 2 + 0.002], [0.2, 0.07, 0.003], { cast: false });
-    b.part(g.box, m.tint, [0, 0.114, D / 2 + 0.004], [0.2, 0.014, 0.003], { color: stateColor, cast: false });
-    if (item.level > 0) {
-        const h = Math.max(0.03, 0.24 * item.level);
-        const family = getUnitFamily(item.unite);
-        if (family === 'mass') {
-            [-0.14, 0.14].forEach(sx => b.part(g.sack, m.stateTint, [sx, 0.012, 0], [0.13, h, 0.16], { color: stateColor }));
-        } else if (family === 'volume') {
-            [-0.14, 0.14].forEach(sx => {
-                b.part(g.box, m.stateTint, [sx, 0.012 + h / 2, 0], [0.22, h, 0.3], { color: stateColor });
-                b.part(g.cylLow, m.dark, [sx + 0.06, 0.012 + h + 0.012, -0.09], [0.02, 0.024, 0.02]);
-            });
-        } else {
-            b.part(g.box, m.stateTint, [0, 0.012 + h / 2, 0], [W - 0.04, h, D - 0.04], { color: stateColor });
-            [-0.13, 0.13].forEach(sx => b.part(g.box, m.dark, [sx, 0.012 + h + 0.001, 0], [0.004, 0.002, D - 0.05], { cast: false }));
+    if (kind === 'container') {
+        // Boîte hermétique transparente à couvercle clipsé : le niveau du contenu suit le stock
+        const W = 0.4;
+        const D = 0.3;
+        const H = 0.26;
+        if (level > 0) {
+            const fill = Math.max(0.025, 0.225 * level);
+            b.part(g.box, twinContentMaterial(twinContentKind(item.nom)), [0, 0.008 + fill / 2, 0], [W - 0.03, fill, D - 0.03]);
         }
+        b.part(g.box, m.boxPlastic, [0, H / 2, 0], [W, H, D]);
+        b.part(g.box, m.boxLid, [0, H + 0.007, 0], [W + 0.014, 0.014, D + 0.014]);
+        b.part(g.box, m.boxPlastic, [0, H + 0.019, 0], [W - 0.02, 0.01, D - 0.02]);
+        [-1, 1].forEach(sx => [-1, 1].forEach(sz => b.part(g.box, m.boxClip, [sx * W * 0.27, H - 0.006, sz * (D / 2 + 0.008)], [0.05, 0.034, 0.008])));
+        b.part(g.box, m.label, [0, H * 0.6, D / 2 + 0.002], [0.13, 0.05, 0.002], { cast: false });
+    } else if (kind === 'sack') {
+        const n = level > 0.5 ? 2 : level > 0 ? 1 : 0;
+        for (let k = 0; k < n; k++) b.part(g.box, m.sackPaper, [0.02 * k, 0.065 + k * 0.12, 0], [0.5, 0.13, 0.34], { ry: k * 0.06 });
+    } else if (kind === 'bottles') {
+        // Packs de bouteilles vides sous film rétractable
+        const spec = twinPackBottleSpec(item.nom);
+        const bs = twinBottleSpec(spec.cl);
+        const packs = level > 0.6 ? 2 : level > 0 ? 1 : 0;
+        const pw = spec.cols * bs.d;
+        const pd = spec.rows * bs.d;
+        for (let p = 0; p < packs; p++) {
+            const px = (p - (packs - 1) / 2) * (pw + 0.03);
+            for (let i = 0; i < spec.cols * spec.rows; i++) {
+                twinBottle(b, px - pw / 2 + bs.d * (i % spec.cols + 0.5), 0, -pd / 2 + bs.d * (Math.floor(i / spec.cols) + 0.5), bs.d / 2 - 0.002, bs.h, {});
+            }
+            b.part(g.box, m.film, [px, bs.h * 0.5, 0], [pw + 0.01, bs.h * 0.94, pd + 0.01]);
+        }
+    } else if (kind === 'caps') {
+        if (level > 0) b.part(g.box, twinContentMaterial('caps'), [0, 0.012 + 0.07 * level, 0], [0.3, 0.14 * level, 0.22]);
+        b.part(g.box, m.kraft, [0, 0.004, 0], [0.32, 0.008, 0.24]);
+        [[0, 0.115, 0.32, 0.008], [0, -0.115, 0.32, 0.008]].forEach(([lx, lz, w, t]) => b.part(g.box, m.kraft, [lx, 0.08, lz], [w, 0.16, t]));
+        [0.156, -0.156].forEach(lx => b.part(g.box, m.kraft, [lx, 0.08, 0], [0.008, 0.16, 0.23]));
+        b.part(g.box, m.kraft, [0, 0.16, 0.16], [0.32, 0.008, 0.1], { rx: 0.6 });
+    } else if (kind === 'labels') {
+        const n = Math.ceil(level * 4);
+        for (let k = 0; k < n; k++) {
+            const lx = -0.19 + k * 0.125;
+            b.part(g.cyl, m.label, [lx, 0.05, 0], [0.058, 0.1, 0.058]);
+            b.part(g.cylLow, m.dark, [lx, 0.051, 0], [0.022, 0.101, 0.022]);
+            b.part(g.cyl, m.brand, [lx, 0.0985, 0], [0.059, 0.004, 0.059], { cast: false });
+        }
+    } else if (kind === 'jerrycan' || kind === 'water') {
+        const n = level > 0.5 ? 2 : level > 0 ? 1 : 0;
+        for (let k = 0; k < n; k++) {
+            const lx = (k - (n - 1) / 2) * 0.24;
+            b.part(g.box, kind === 'water' ? m.waterPlastic : m.whitePlastic, [lx, 0.16, 0], [0.2, 0.32, 0.14]);
+            b.part(g.box, kind === 'water' ? m.waterPlastic : m.whitePlastic, [lx - 0.03, 0.345, 0], [0.1, 0.04, 0.03]);
+            b.part(g.cyl, kind === 'water' ? m.ceeBlue : m.valveRed, [lx + 0.06, 0.34, 0], [0.025, 0.03, 0.025]);
+        }
+    } else {
+        const h = 0.12 + 0.18 * level;
+        if (level > 0) b.part(g.box, m.kraft, [0, h / 2, 0], [0.42, h, 0.3]);
+        if (level > 0) b.part(g.box, m.kraftTape, [0, h + 0.001, 0], [0.05, 0.003, 0.31], { cast: false });
     }
-    // Voyant clignotant sur l'étiquette (un anneau au sol déborderait de l'étagère)
+    // Étiquette de rayon à bande d'état, voyant clignotant si le stock est bas ou critique
+    b.part(g.box, m.label, [0, -0.03, 0.262], [0.16, 0.04, 0.003], { cast: false });
+    b.part(g.box, m.tint, [0, -0.016, 0.264], [0.16, 0.012, 0.003], { color: stateColor, cast: false });
     if (item.state === 'critical' || item.state === 'low') {
-        b.part(g.sphere, item.state === 'critical' ? m.beaconDanger : m.beaconWarning, [0.085, 0.085, D / 2 + 0.008], [0.013, 0.013, 0.013], { cast: false });
+        b.part(g.sphere, item.state === 'critical' ? m.beaconDanger : m.beaconWarning, [0.1, -0.03, 0.266], [0.012, 0.012, 0.012], { cast: false });
     }
-    twinRegister(item, b, { hit: { p: [0, H / 2, 0], s: [W, H, D] }, top: H + 0.3, radius: 0.36 });
+    twinRegister(item, b, { hit: { p: [0, 0.2, 0], s: [0.6, 0.42, 0.46] }, top: 0.6, radius: 0.36 });
 };
 
-// --- Équipe : personnage en tenue de production (1,75 m) ---
-const twinBuildFigure = (batch, s, x, z, ry, phase) => {
-    const { THREE } = Twin.lib;
+// --- Équipe : mannequins en tenue d'hygiène (1,75 m) à leur poste, tablier à la couleur de l'employé ---
+const twinFigureParts = (emit, apron) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    [-1, 1].forEach(sx => {
+        emit(g.box, m.shoes, [sx * 0.1, 0.045, 0.03], [0.11, 0.09, 0.27]);
+        emit(g.capsule, m.trousers, [sx * 0.1, 0.47, 0], [0.15, 0.43, 0.15]);
+        emit(g.capsule, m.coat, [sx * 0.21, 1.26, 0.06], [0.095, 0.15, 0.095], { rx: -0.4, rz: sx * 0.08 });
+        emit(g.capsule, m.coat, [sx * 0.19, 1.07, 0.27], [0.085, 0.16, 0.085], { rx: -1.25, rz: sx * -0.12 });
+        emit(g.sphere, m.gloves, [sx * 0.155, 1.0, 0.44], [0.045, 0.032, 0.062]);
+    });
+    emit(g.coat, m.coat, [0, 0, 0], [1, 1, 0.62]);
+    emit(g.box, m.fabric, [0, 1.04, 0.13], [0.33, 0.56, 0.012], { color: apron });
+    emit(g.box, m.fabric, [0, 1.385, 0.108], [0.08, 0.16, 0.01], { color: apron, rx: 0.25 });
+    emit(g.cyl, m.skin, [0, 1.535, 0], [0.048, 0.07, 0.048]);
+    emit(g.sphere, m.skin, [0, 1.645, 0.008], [0.093, 0.115, 0.104]);
+    emit(g.sphere, m.hairnet, [0, 1.672, -0.014], [0.106, 0.09, 0.118]);
+};
+
+const twinBuildFigure = (batch, s, x, z, ry) => {
     const m = twinMaterials();
     const g = twinGeometries();
     const b = twinBuilder(batch, Twin.dynamic, x, z, ry);
-    if (s.present) {
-        const holder = new THREE.Group();
-        holder.position.set(x, 0, z);
-        holder.rotation.y = ry;
-        const body = new THREE.Group();
-        holder.add(body);
-        const local = twinBuilder(batch, body, 0, 0);
-        const mats = { pants: m.pants, dark: m.dark, shirt: twinColorMats(s.couleur).figure, skin: m.skin, apron: m.apron, cap: m.apron };
-        twinFigureParts((geo, mat, p, sc, o) => local.mesh(geo, mat, p, sc, o), mats);
-        Twin.dynamic.add(holder);
-        Twin.bobbers.push({ mesh: body, phase });
-        twinFlat(b, g.ring, m.ringSuccess, 0, 0.008, 0, 0.4, 0.4);
-    } else {
-        const ghost = { pants: m.absent, dark: m.absent, shirt: m.absent, skin: m.absent, apron: m.absent, cap: m.absent };
-        twinFigureParts((geo, mat, p, sc, o) => b.part(geo, mat, p, sc, o), ghost);
-    }
-    twinRegister(s, b, { hit: { p: [0, 0.88, 0], s: [0.6, 1.76, 0.45] }, top: 2.0, radius: 0.4 });
+    twinFigureParts((geo, mat, p, sc, o) => b.part(geo, mat, p, sc, o), s.couleur);
+    twinFlat(b, g.plane, m.ringSuccess, 0, 0.004, 0, 0.95, 0.95);
+    twinRegister(s, b, { hit: { p: [0, 0.88, 0], s: [0.6, 1.76, 0.5] }, top: 2.0, radius: 0.4 });
+};
+
+// Employé absent : sa blouse et son tablier pendent au portant du vestiaire
+const TWIN_COAT_HOOKS = 8;
+const twinBuildCoat = (batch, s, k) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, -1.32, 2.5 + k * 0.42, Math.PI / 2);
+    b.part(g.box, m.chrome, [0, 1.735, 0], [0.4, 0.012, 0.012]);
+    b.part(g.cylLow, m.chrome, [0, 1.76, 0], [0.006, 0.04, 0.006]);
+    b.part(g.coat, m.coat, [0, 0.19, 0], [0.95, 1, 0.42]);
+    [-1, 1].forEach(sx => b.part(g.capsule, m.coat, [sx * 0.205, 1.4, 0], [0.075, 0.2, 0.065], { rz: sx * 0.07 }));
+    b.part(g.box, m.fabric, [0, 1.24, 0.09], [0.3, 0.52, 0.01], { color: s.couleur });
+    b.part(g.box, m.fabric, [0.1, 1.64, 0.088], [0.07, 0.035, 0.004], { color: s.couleur, cast: false });
+    twinRegister(s, b, { hit: { p: [0, 1.25, 0], s: [0.45, 0.95, 0.3] }, top: 1.95, radius: 0.28 });
 };
 
 const twinSignature = (item) => {
@@ -4953,13 +6411,16 @@ const twinSignature = (item) => {
 };
 
 const twinClearDynamic = () => {
-    Twin.dynamic.traverse(o => { if (o.isInstancedMesh) o.dispose(); });
+    Twin.dynamic.traverse(o => {
+        if (o.isInstancedMesh) o.dispose();
+        if (o.isPoints) o.geometry.dispose();
+    });
     Twin.dynamic.clear();
     Twin.proxies.clear();
     Twin.objects.clear();
     Twin.pickables = [];
     Twin.fills = [];
-    Twin.bobbers = [];
+    Twin.steam = [];
 };
 
 const twinBuildDynamic = (model) => {
@@ -4984,27 +6445,38 @@ const twinBuildDynamic = (model) => {
     Twin.stockLayout = { gridX0, gridZ0, stepX, stepZ, rows, cols };
     model.stacks.forEach(s => twinBuildStack(batch, s, gridX0 + s.col * stepX, gridZ0 + s.row * stepZ));
 
-    model.orders.slice(0, TWIN_ORDER_SLOTS).forEach((o, i) => twinBuildOrder(batch, o, 9.4 - (i % 4) * 1.9, 2.4 + Math.floor(i / 4) * 1.5));
+    model.orders.slice(0, TWIN_ORDER_SLOTS).forEach((o, i) => twinBuildOrder(batch, o, 9.4 - (i % 4) * 1.9, 2.65 + Math.floor(i / 4) * 1.4));
 
-    const unitCenters = [2.4, 4.6, 6.8].flatMap(uz => [-10.3, -7.8, -5.3, -2.8].map(ux => [ux, uz]));
-    const units = Math.min(unitCenters.length, Math.ceil(model.bins.length / 12));
-    const slots = [];
-    for (let u = 0; u < units; u++) slots.push(...twinBuildShelving(batch, ...unitCenters[u]));
-    model.bins.slice(0, slots.length).forEach((bin, i) => twinBuildBin(batch, bin, ...slots[i]));
+    // Réserve : ingrédients en chambre froide, emballages sur les rayonnages de la préparation
+    const ingredient = (bin) => ['mass', 'volume'].includes(getUnitFamily(bin.unite));
+    const racks = { cold: [...TWIN_RACKS.cold], dry: [...TWIN_RACKS.dry] };
+    const place = (bins, own, other) => {
+        let slots = [];
+        bins.forEach(bin => {
+            if (!slots.length) {
+                const rack = own.shift() || other.shift();
+                if (!rack) return;
+                slots = twinBuildRack(batch, rack);
+            }
+            twinBuildBin(batch, bin, slots.shift());
+        });
+    };
+    place(model.bins.filter(ingredient), racks.cold, racks.dry);
+    place(model.bins.filter(bin => !ingredient(bin)), racks.dry, racks.cold);
 
+    // Équipe : présents à leur poste (puis dans le couloir), absents représentés par leur blouse au vestiaire
     let station = 0;
     let overflow = 0;
-    let absent = 0;
-    model.staff.forEach((s, i) => {
+    let hook = 0;
+    model.staff.forEach(s => {
         if (s.present && station < TWIN_STATIONS.length) {
             const st = TWIN_STATIONS[station++];
-            twinBuildFigure(batch, s, st.x, st.z, st.ry, i);
+            twinBuildFigure(batch, s, st.x, st.z, st.ry);
         } else if (s.present && overflow < 6) {
-            twinBuildFigure(batch, s, overflow % 2 ? 0.55 : -0.55, 2.2 + Math.floor(overflow / 2) * 0.7, 0, i);
+            twinBuildFigure(batch, s, -0.9 + (overflow % 3) * 0.9, -0.25 + Math.floor(overflow / 3) * 0.85, 0);
             overflow++;
-        } else if (!s.present && absent < 8) {
-            twinBuildFigure(batch, s, -0.9 + (absent % 2) * 0.6, 4.1 + Math.floor(absent / 2) * 0.55, Math.PI / 2, i);
-            absent++;
+        } else if (!s.present && hook < TWIN_COAT_HOOKS) {
+            twinBuildCoat(batch, s, hook++);
         }
     });
 
@@ -5023,6 +6495,7 @@ const twinBuildDynamic = (model) => {
     Twin.pulseMats = [mats.ringDanger, mats.ringWarning, mats.beaconDanger, mats.beaconWarning];
     Twin.pulsing = model.items.some(i => ['expired', 'invendable', 'rupture', 'late', 'urgent'].includes(i.status) || i.state === 'critical');
     Twin.glowing = model.equipement.some(e => e.kind === 'casserole' && e.status === 'planned');
+    twinShadowsDirty();
 };
 
 const twinFlash = (id) => {
@@ -5179,7 +6652,7 @@ const twinPositionMarkers = () => {
 const twinClampTarget = () => {
     const t = Twin.controls?.target;
     if (!t) return;
-    t.x = twinClamp(t.x, -13, 20);
+    t.x = twinClamp(t.x, -13, 13);
     t.z = twinClamp(t.z, -9, 9);
     t.y = twinClamp(t.y, 0, 2.5);
 };
@@ -5339,8 +6812,8 @@ const twinAnimate = (now) => {
         twinMaterials().inductionOn.emissiveIntensity = 0.75 + 0.35 * Math.sin(now / 700);
         active = true;
     }
-    if (Twin.bobbers.length) {
-        Twin.bobbers.forEach(b => { b.mesh.position.y = Math.sin(now / 520 + b.phase) * 0.035; });
+    if (Twin.steam.length) {
+        Twin.steam.forEach(s => twinUpdateSteam(s, now));
         active = true;
     }
     if (Twin.pin?.visible) {
@@ -5358,18 +6831,39 @@ const twinFrame = (now) => {
     }
     const moved = Twin.tween ? false : Twin.controls.update();
     const smooth = moved || twinViewOffsetPending() || !!(Twin.tween || Twin.fills.length || Twin.flashes.length || Twin.controls.autoRotate);
-    // Animations d'ambiance (pulsations, personnages) limitées à ~30 i/s pour la batterie
+    // Animations d'ambiance (pulsations, vapeur) limitées à ~30 i/s pour la batterie
     if (!smooth && !Twin.needsRender && !Twin.pointerDirty && now - (Twin.lastFrame || 0) < 33) {
         Twin.raf = requestAnimationFrame(twinFrame);
         return;
     }
     const active = twinAnimate(now) || smooth;
     if (Twin.pointerDirty) twinUpdateHover();
+    twinMonitorPerf(now, smooth);
     Twin.lastFrame = now;
-    Twin.renderer.render(Twin.scene, Twin.camera);
+    twinUpdateCutaways();
+    twinRender();
     twinUpdateLabels();
     Twin.needsRender = false;
     if (active) Twin.raf = requestAnimationFrame(twinFrame);
+};
+
+// Qualité Auto : si les mouvements de caméra restent saccadés (moins de ~24 i/s), on descend d'un niveau
+const twinMonitorPerf = (now, smooth) => {
+    const perf = Twin.perf;
+    const dt = now - perf.last;
+    perf.last = now;
+    if (!smooth || dt > 120 || Twin.quality?.setting !== 'auto' || Twin.quality.level === 'low') {
+        if (!smooth) perf.frames = 0;
+        return;
+    }
+    perf.avg = perf.frames ? perf.avg * 0.92 + dt * 0.08 : dt;
+    perf.frames++;
+    if (perf.frames > 90 && perf.avg > 42) {
+        perf.frames = 0;
+        Twin.autoQuality = TWIN_QUALITY_ORDER[TWIN_QUALITY_ORDER.indexOf(Twin.quality.level) - 1];
+        showToast(`Qualité 3D réduite (${TWIN_QUALITY_LEVELS[Twin.autoQuality].label}) pour rester fluide`, 'warning');
+        setTimeout(twinApplyQuality, 0);
+    }
 };
 
 const twinSuspend = () => {
@@ -5392,7 +6886,14 @@ const twinResize = () => {
     if (!w || !h) return;
     Twin.size = { w, h };
     Twin.renderer.setSize(w, h, false);
+    if (Twin.composer) {
+        Twin.composer.setPixelRatio(Twin.renderer.getPixelRatio());
+        Twin.composer.setSize(w, h);
+    }
     Twin.camera.aspect = w / h;
+    // Taille apparente des particules de vapeur : pixels du tampon de rendu par mètre, à 1 m
+    Twin.steamScale = h * Twin.renderer.getPixelRatio() / (2 * Math.tan(Twin.camera.fov * Math.PI / 360));
+    if (Twin.mats.steam) Twin.mats.steam.uniforms.uScale.value = Twin.steamScale;
     twinRefreshViewOffset({ instant: true });
     twinWake();
 };
@@ -5473,7 +6974,8 @@ const TWIN_ICONS = {
     prev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>',
     next: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>',
     target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/></svg>',
-    close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+    close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    quality: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5l1.7 4.3 4.3 1.7-4.3 1.7L10 15.5l-1.7-4.3L4 9.5l4.3-1.7z"/><path d="M18 14l.9 2.1 2.1.9-2.1.9L18 20l-.9-2.1-2.1-.9 2.1-.9z"/></svg>'
 };
 
 const twinLiveStatus = () => {
@@ -5503,6 +7005,10 @@ const twinShellHtml = () => {
                     <button type="button" class="twin-icon-btn twin-panel-toggle" data-click="twin-toggle-panel" aria-controls="twinPanel" aria-expanded="${panelExpanded}" title="Liste et alertes">${TWIN_ICONS.list}</button>
                     <button type="button" class="twin-icon-btn" data-click="twin-zone" data-zone="overview" title="Réinitialiser la vue (R)">${TWIN_ICONS.reset}</button>
                     <button type="button" class="twin-icon-btn" data-click="twin-autorotate" aria-pressed="false" title="Rotation automatique">${TWIN_ICONS.rotate}</button>
+                    <div class="twin-quality">
+                        <button type="button" class="twin-icon-btn" data-click="twin-quality-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="twinQualityMenu" title="Qualité du rendu 3D">${TWIN_ICONS.quality}</button>
+                        <div class="twin-quality-menu" id="twinQualityMenu" role="menu" aria-label="Qualité du rendu 3D" hidden></div>
+                    </div>
                     ${fullscreen ? `<button type="button" class="twin-icon-btn" data-click="twin-fullscreen" title="Plein écran (F)">${TWIN_ICONS.full}</button>` : ''}
                 </div>
             </div>
@@ -5879,6 +7385,55 @@ CLICK_HANDLERS['twin-autorotate'] = (el) => {
     twinWake();
 };
 CLICK_HANDLERS['twin-fullscreen'] = () => twinToggleFullscreen();
+
+// Menu « Qualité du rendu » (Auto / Haute / Standard / Économie), mémorisé par appareil
+const twinRenderQualityMenu = () => {
+    const el = document.getElementById('twinQualityMenu');
+    if (!el) return;
+    const setting = twinQualitySetting();
+    const auto = Twin.autoQuality || (twinIsSupported() ? twinDetectQuality() : 'medium');
+    const options = [
+        ['auto', 'Auto', `${TWIN_QUALITY_LEVELS[auto].label} sur cet appareil`],
+        ...[...TWIN_QUALITY_ORDER].reverse().map(k => [k, TWIN_QUALITY_LEVELS[k].label, TWIN_QUALITY_LEVELS[k].hint])
+    ];
+    el.innerHTML = `<p class="twin-quality-title">Qualité du rendu 3D</p>${options.map(([value, label, hint]) => `
+        <button type="button" role="menuitemradio" class="twin-quality-opt" aria-checked="${setting === value}" data-click="twin-quality" data-quality="${value}">
+            <span class="twin-quality-label">${escapeHtml(label)}</span>
+            <span class="twin-quality-hint">${escapeHtml(hint)}</span>
+        </button>`).join('')}`;
+};
+
+const twinCloseQualityMenu = () => {
+    const menu = document.getElementById('twinQualityMenu');
+    if (!menu || menu.hidden) return false;
+    const btn = document.querySelector('[data-click="twin-quality-menu"]');
+    const hadFocus = menu.contains(document.activeElement);
+    menu.hidden = true;
+    btn?.setAttribute('aria-expanded', 'false');
+    if (hadFocus) btn?.focus();
+    return true;
+};
+
+CLICK_HANDLERS['twin-quality-menu'] = (el) => {
+    const menu = document.getElementById('twinQualityMenu');
+    if (!menu) return;
+    if (twinCloseQualityMenu()) return;
+    twinRenderQualityMenu();
+    menu.hidden = false;
+    el.setAttribute('aria-expanded', 'true');
+    menu.querySelector('[aria-checked="true"]')?.focus();
+};
+CLICK_HANDLERS['twin-quality'] = (el) => {
+    const value = el.getAttribute('data-quality');
+    DB.setFilter('twin_quality', value === 'auto' ? '' : value);
+    twinCloseQualityMenu();
+    if (Twin.renderer && Twin.quality && Twin.quality.level !== twinResolveQuality()) twinApplyQuality();
+    else if (Twin.quality) Twin.quality.setting = twinQualitySetting();
+    showToast(`Qualité 3D : ${value === 'auto' ? `Auto (${TWIN_QUALITY_LEVELS[twinResolveQuality()].label})` : TWIN_QUALITY_LEVELS[value].label}`);
+};
+document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest?.('.twin-quality')) twinCloseQualityMenu();
+});
 CLICK_HANDLERS['twin-goto-stock'] = (el) => {
     DB.setFilter('stockQuery', '');
     DB.setFilter('stockArome', el.getAttribute('data-arome') || '');
@@ -6151,6 +7706,7 @@ const initPaletteAndShortcuts = () => {
         }
         if (page !== 'jumeau' || !document.getElementById('twinRoot')) return;
         if (key === 'Escape') {
+            if (twinCloseQualityMenu()) { e.preventDefault(); return; }
             if (Twin.selectedId) { e.preventDefault(); twinSelect(null); }
             return;
         }

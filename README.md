@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.2**
+**v12.3**
 
 ## Adresse
 
@@ -117,6 +117,15 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.3
+
+- **🎨 Jumeau 3D « maquette premium », calqué sur les photos de l'atelier** — L'étage est reconstruit pièce par pièce comme une maquette d'architecte : labo de production (meubles de labo blancs à lisses vert-de-gris et clips rouges, plans en résine vert sauge, évier et robinetterie de labo, armoires hautes avec les cartons d'Einkochautomat, réfrigérateur, prises industrielles), laverie, stock, couloir, réserve avec chambre froide (évaporateur, étagères inox à clayettes, boîtes hermétiques de fruits séchés, rayonnage noir à tablettes), vestiaire-bureau et expédition avec monte-charge. Les cloisons sont coupées à hauteur d'appui ; les façades côté caméra s'abaissent automatiquement, les autres gardent leurs fenêtres à cadres bronze avec les arbres d'automne dehors. Le quai et le camion disparaissent.
+- **Rendu** : ombres douces, occlusion ambiante (GTAO), arêtes adoucies, couleurs neutres, reflets de l'inox sur un environnement d'atelier (réglettes LED, baies vitrées), ciel et terrain. Toutes les matières sont générées par code (linoléum, mosaïque, faïence, crépi, inox brossé, chêne, pelouse, pavés) : aucun fichier image ajouté.
+- **Objets fidèles** : cuves 25 L inox à robinet et thermostat sur la paillasse (couvercle relevé quand une production est planifiée), casseroles sur plaques à induction avec **vapeur**, bouteilles en verre au thé ambré avec étiquette ThéCol et bouchon noir dans des casiers noirs, commandes en **caisses vertes ajourées sur chariots bleus** avec bon de livraison (bouteilles visibles une fois produites), consommables rangés selon leur nature (boîtes dont le niveau suit le stock, sacs kraft, packs de bouteilles sous film, cartons de bouchons, rouleaux d'étiquettes, bidons).
+- **Équipe** : mannequins en blouse, charlotte, gants bleus et tablier à la couleur de l'employé, à leur poste ; un absent est représenté par sa blouse suspendue au portant du vestiaire.
+- **Indicateurs intégrés au décor** : halos d'état au sol, vrais gyrophares sur les commandes en retard ou urgentes, marquage hachuré d'un emplacement vide, étiquettes de rayon à bande d'état et voyant clignotant.
+- **✦ Qualité du rendu** — Nouveau menu dans la barre du jumeau : Auto (choisie selon l'appareil), Haute, Standard ou Économie, mémorisée sur l'appareil. En Auto, la qualité baisse d'un cran si les mouvements de caméra deviennent saccadés. Les ombres ne sont recalculées que lorsque la scène change.
 
 ### Nouveautés v12.2
 
