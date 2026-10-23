@@ -1499,12 +1499,14 @@ const v11FlushQueue = async () => {
             try {
                 const ref = doc(window.firebaseDb, V11.TABLES_COLLECTION, op.table, V11.RECORDS_SUBCOLLECTION, op.recordId);
                 const newVersion = Date.now();
+                let baseUsed = null;
                 const result = await runTransaction(window.firebaseDb, async (transaction) => {
                     const snap = await transaction.get(ref);
                     const remoteRecord = snap.exists() && snap.data().record ? snap.data().record : null;
                     // Base : état serveur au moment de la modification locale. Repli sur la
                     // base chargée au démarrage si l'opération a été créée avant le premier pull.
                     const base = op.base || v11GetBase(op.table, op.recordId) || null;
+                    baseUsed = base;
 
                     if (op.type === 'delete') {
                         if (!snap.exists()) return { action: 'noop', conflicts: [] };
@@ -1586,6 +1588,25 @@ const v11FlushQueue = async () => {
                     V11._versions[op.table][op.recordId] = newVersion;
                 } else if (op.type === 'delete' && op.recordId) {
                     delete V11._versions[op.table]?.[op.recordId];
+                }
+
+                // Réancre les opérations encore en attente sur le même enregistrement :
+                // elles ont été créées pendant cette écriture, donc leur base est périmée.
+                // Sans ce réancrage, la fusion suivante prendrait notre propre écriture
+                // pour une modification distante et signalerait un conflit fantôme.
+                if (result.merged && (result.action === 'merged' || result.action === 'created' || result.action === 'overwrote')) {
+                    const pendingQueue = v11GetQueue();
+                    let rebased = false;
+                    for (const pending of pendingQueue) {
+                        if (pending.table !== op.table || pending.recordId !== op.recordId) continue;
+                        if (pending.id === op.id) continue;
+                        if (pending.type === 'upsert' && pending.record) {
+                            pending.record = v11MergeRecord(baseUsed, pending.record, result.merged).record;
+                        }
+                        pending.base = v11Clone(result.merged);
+                        rebased = true;
+                    }
+                    if (rebased) v11SetQueue(pendingQueue);
                 }
 
                 successfulIds.add(op.id);

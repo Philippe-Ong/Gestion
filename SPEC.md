@@ -74,6 +74,10 @@ Conséquences :
   depuis la `base` : l'enregistrement est rétabli et l'utilisateur averti.
 - Sans `base` connue (première synchronisation), le comportement historique « local
   gagne » est conservé.
+- Après chaque écriture réussie, les opérations **encore en attente** sur le même
+  enregistrement sont réancrées sur le résultat (`base` = résultat fusionné, `record`
+  re-fusionné). Deux modifications rapprochées d'un même champ sur le même appareil
+  (curseur, clics rapides) ne produisent donc pas de conflit fantôme.
 
 Helpers : `v11Equal` (égalité profonde), `v11MergeRecord`, `v11GetBase`, `v11SetBase`,
 `v11SetBaseFromRemote`, `v11ApplyMergedLocal`. Debug : `window.v11Debug.conflicts()`,
