@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.4
+**Current Version:** v12.5
 
 ## 1. Build, Lint, and Test Commands
 
@@ -130,8 +130,8 @@ Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync
 #### V11 collaborative path (after migration)
 - **Per-record storage:** `tables/<table>/records/<recordId>` — one Firestore doc per application record
 - **Offline queue:** `v11GetQueue()` / `v11SetQueue()` — localStorage queue at key `thecol_v11_queue`
-- **Differential writes:** `DB.set()` computes diffs with previous state and enqueues per-record upsert/delete operations
-- **Queue flush:** `v11FlushQueue()` — transactional per-record flush with `_version` conflict detection (local wins)
+- **Differential writes:** `DB.set()` computes diffs with previous state and enqueues per-record upsert/delete operations, each carrying a `base` (last known server state) for three-way merge
+- **Queue flush:** `v11FlushQueue()` — transactional per-record flush; `v11MergeRecord(base, local, remote)` merges field by field so a concurrent edit on another device on a *different* field is preserved. Same-field divergence → local kept + entry in `V11._conflicts` (`window.v11Debug.conflicts()`). A local delete is cancelled if the record changed remotely since `base`.
 - **Real-time listeners:** `v11StartAllListeners()` / `v11StopAllListeners()` — `onSnapshot` per table, debounced re-render at 300 ms
 - **Migration:** `v11RunMigration()` — one-shot migration from `data/<table>` to `tables/<table>/records/<recordId>`, guarded by `syncMeta/migrationLock` (30 s expiry)
 - **Config constants:** `V11` object at line 330 of `app.js` — see `V11.TABLES_COLLECTION`, `V11.RECORDS_SUBCOLLECTION`, `V11.SYNC_META_COLLECTION`, etc.

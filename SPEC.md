@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.4
+**Version:** v12.5
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -37,15 +37,47 @@ Tableau JSON d'opérations en attente de synchronisation Firestore. Chaque opér
   "recordId": "string (ID de l'enregistrement)",
   "record": "object|null (données complètes pour upsert, null pour delete)",
   "timestamp": "number (Date.now())",
-  "knownVersion": "number|null (_version distant au moment du queuing)"
+  "knownVersion": "number|null (_version distant au moment du queuing)",
+  "base": "object|null (état serveur de référence au moment de la modification locale — fusion à trois voies)"
 }
 ```
 
 **Sémantique de fusion** (v11MergeOp) :
 - `upsert` après `delete` pour le même `recordId` → remplace le delete par l'upsert
 - `delete` après `upsert` → conserve le delete
-- `upsert` après `upsert` → conserve le dernier
+- `upsert` après `upsert` → conserve le dernier (et la `base` la plus ancienne)
 - `delete` après `delete` → no-op (déjà supprimé)
+
+### V11 — Fusion à trois voies (v12.5)
+
+Le flush n'écrit plus l'enregistrement local en bloc : chaque opération est rejouée
+dans une transaction Firestore qui relit le document distant et fusionne **champ par
+champ** entre trois versions :
+
+- `base` — état serveur au moment de la modification locale (capturé dans l'opération) ;
+- `local` — `op.record`, l'enregistrement tel que modifié sur cet appareil ;
+- `remote` — le document lu dans la transaction.
+
+Règles par champ :
+| Situation | Valeur retenue |
+|---|---|
+| champ non modifié localement | valeur distante |
+| champ non modifié à distance | valeur locale |
+| même valeur des deux côtés | valeur commune |
+| valeurs différentes des deux côtés | **conflit** : valeur locale conservée + entrée dans `V11._conflicts` + toast |
+
+Conséquences :
+- Deux personnes qui modifient **des champs différents** du même enregistrement ne
+  s'écrasent plus : le résultat contient les deux modifications.
+- Un conflit réel (même champ modifié différemment) est signalé, jamais silencieux.
+- Une suppression locale n'est pas appliquée si le document a été modifié à distance
+  depuis la `base` : l'enregistrement est rétabli et l'utilisateur averti.
+- Sans `base` connue (première synchronisation), le comportement historique « local
+  gagne » est conservé.
+
+Helpers : `v11Equal` (égalité profonde), `v11MergeRecord`, `v11GetBase`, `v11SetBase`,
+`v11SetBaseFromRemote`, `v11ApplyMergedLocal`. Debug : `window.v11Debug.conflicts()`,
+`window.v11Debug.base()`.
 
 ### V11 — Structure Firestore (après migration)
 

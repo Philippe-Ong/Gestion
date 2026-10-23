@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.4**
+**v12.5**
 
 ## Adresse
 
@@ -117,6 +117,14 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.5
+
+- **🔀 Travail à plusieurs sans écrasement** — Les écritures Firestore ne remplacent plus l'enregistrement entier : chaque opération rejoue une **fusion à trois voies** (état serveur de référence / version locale / version distante), **champ par champ**, dans une transaction.
+  - Deux personnes qui modifient des champs différents de la même commande conservent **les deux** modifications.
+  - Un vrai conflit (même champ modifié différemment) est signalé par un toast et journalisé (`window.v11Debug.conflicts()`) — jamais silencieux.
+  - Une suppression locale est annulée si l'enregistrement a été modifié sur un autre appareil entre-temps.
+  - Les champs restés inchangés localement prennent automatiquement la valeur distante.
 
 ### Nouveautés v12.4
 
