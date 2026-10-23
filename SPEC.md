@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.11
+**Version:** v11.13
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -37,15 +37,47 @@ Tableau JSON d'opérations en attente de synchronisation Firestore. Chaque opér
   "recordId": "string (ID de l'enregistrement)",
   "record": "object|null (données complètes pour upsert, null pour delete)",
   "timestamp": "number (Date.now())",
-  "knownVersion": "number|null (_version distant au moment du queuing)"
+  "knownVersion": "number|null (_version distant au moment du queuing)",
+  "base": "object|null (état serveur de référence au moment de la modification locale — fusion à trois voies)"
 }
 ```
 
 **Sémantique de fusion** (v11MergeOp) :
 - `upsert` après `delete` pour le même `recordId` → remplace le delete par l'upsert
 - `delete` après `upsert` → conserve le delete
-- `upsert` après `upsert` → conserve le dernier
+- `upsert` après `upsert` → conserve le dernier (et la `base` la plus ancienne)
 - `delete` après `delete` → no-op (déjà supprimé)
+
+### V11 — Fusion à trois voies (v11.13)
+
+Le flush n'écrit plus l'enregistrement local en bloc : chaque opération est rejouée
+dans une transaction Firestore qui relit le document distant et fusionne **champ par
+champ** entre trois versions :
+
+- `base` — état serveur au moment de la modification locale (capturé dans l'opération) ;
+- `local` — `op.record`, l'enregistrement tel que modifié sur cet appareil ;
+- `remote` — le document lu dans la transaction.
+
+Règles par champ :
+| Situation | Valeur retenue |
+|---|---|
+| champ non modifié localement | valeur distante |
+| champ non modifié à distance | valeur locale |
+| même valeur des deux côtés | valeur commune |
+| valeurs différentes des deux côtés | **conflit** : valeur locale conservée + entrée dans `V11._conflicts` + toast |
+
+Conséquences :
+- Deux personnes qui modifient **des champs différents** du même enregistrement ne se
+  s'écrasent plus : le résultat contient les deux modifications.
+- Un conflit réel (même champ modifié différemment) est signalé, jamais silencieux.
+- Une suppression locale n'est pas appliquée si le document a été modifié à distance
+  depuis la `base` : l'enregistrement est rétabli et l'utilisateur averti.
+- Sans `base` connue (première synchronisation), le comportement historique « local
+  gagne » est conservé.
+
+Helpers : `v11Equal` (égalité profonde), `v11MergeRecord`, `v11GetBase`, `v11SetBase`,
+`v11SetBaseFromRemote`, `v11ApplyMergedLocal`. Debug : `window.v11Debug.conflicts()`,
+`window.v11Debug.base()`.
 
 ### V11 — Structure Firestore (après migration)
 
@@ -216,35 +248,34 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 }
 ```
 
-**Export PDF des BL (`exportBLPDF`, v11.11 — pixel-perfect avec fonds A4 rasterisés) :**
-Génère un aperçu HTML au format A4 dans une nouvelle fenêtre, sans bibliothèque externe. L'utilisateur imprime ou enregistre via la boîte de dialogue du navigateur (`window.print()`). Depuis v11.11, le rendu est **pixel-perfect** : plutôt que d'assembler des médias individuels, l'export superpose des données variables (Calibri, positionnées en mm) sur deux fonds A4 rasterisés extraits du template Excel lui-même.
+**Export PDF des BL (`exportBLPDF`, v11.12 — vrai fichier PDF via jsPDF) :**
+Génère et télécharge directement un fichier `.pdf` nommé `BL-XXXXX_YYYY-MM-DD.pdf` (même mécanisme de téléchargement que l'export Excel), sans fenêtre d'impression ni popup. La bibliothèque **jsPDF 3.0.3** est chargée via CDN dans `index.html` (cdnjs, empreinte SRI, hôte déjà autorisé par le CSP). Le rendu reste **pixel-perfect** : les données variables sont dessinées en vectoriel (texte net, sélectionnable) par-dessus deux fonds A4 rasterisés extraits du template Excel lui-même.
 
 - **Fonds rasterisés (depuis v11.11) :**
   - `icons/bl-template/page-full.png` — fond complet de la dernière page (inclut logo, coordonnées, titre, tableau, IFCO, facturation, signature, décor montagne)
   - `icons/bl-template/page-continuation.png` — fond des pages de continuation (en-tête avec logo, coordonnées, titre, tableau vide)
-  - Ces images sont rendues en `position: absolute; inset: 0; object-fit: fill` et couvrent intégralement la page A4 (210×297 mm). Tous les éléments fixes du template Excel (logo, trames, titres, grille du tableau, blocs IFCO/facturation/signature/montagne) sont dans le raster ; seules les données variables sont superposées en HTML/CSS.
-- **Données variables superposées :**
-  - Numéro BL (positionné à 101,3 mm de la gauche, 16 mm du haut)
-  - Date (163,5 mm × 50,8 mm)
-  - Bloc destinataire (144,5 mm × 61,7 mm, jusqu'à 4 lignes, aligné à droite, Calibri 11 pt, interligne 5,29 mm)
-  - En-têtes de colonnes « Arôme » (86,1 mm) et « Format » (115,7 mm), superposés séparément (pas de `<table>` native — les en-têtes sont des `<div>` positionnés)
-  - Lignes articles (à partir de 25,4 mm × 101 mm, largeur 101 mm) : chaque ligne est une grille CSS (`grid-template-columns: 13% 47% 29% 11%`) de hauteur fixe 5,29 mm, avec `font-family: Calibri; font-size: 11 pt`
+  - Chaque fond est incorporé en pleine page A4 (`doc.addImage(..., 0, 0, 210, 297)`). Les images sont chargées une seule fois puis mises en cache en dataURL (`loadBLTemplateAsset`, cache `BL_PDF_ASSETS`). Tous les éléments fixes du template Excel (logo, trames, titres, grille du tableau, blocs IFCO/facturation/signature/montagne) sont dans le raster ; seules les données variables sont dessinées par-dessus.
+- **Données variables dessinées (cotes en mm identiques au gabarit v11.11) :**
+  - Numéro BL (centré sur 106,3 mm de la gauche, 16 mm du haut)
+  - Date (alignée à droite sur 181,2 mm, 50,8 mm du haut)
+  - Bloc destinataire (aligné à droite sur 181,3 mm, à partir de 61,7 mm du haut, jusqu'à 4 lignes, interligne 5,29 mm)
+  - En-têtes de colonnes « Arôme » (86,1 mm) et « Format » (115,7 mm)
+  - Lignes articles (à partir de 25,4 mm × 101 mm, largeur 101 mm, colonnes 13 / 47 / 29 / 11 %, hauteur de ligne fixe 5,29 mm, 11 pt)
   - Caisses IFCO verte et noire (25,4 mm de la gauche, positions 154,7 mm et 160 mm du haut)
   - Marques de facturation (115,5 mm de la gauche, positions 149 / 154,35 / 159,7 mm du haut)
-  - Société cliente en bas (27 mm × 192,65 mm, Calibri 16 pt)
+  - Société cliente en bas (27 mm × 192,65 mm, 16 pt)
   - Pied de page « BL-XXX · Page X / N » (centré, en bas de page) — uniquement si `pageCount > 1`
   - Mention « Suite — page X » sur les pages de continuation (121 mm × 21 mm)
-- **Typographie :** `font-family: Calibri, Arial, sans-serif` — correspond exactement à la police du template Excel.
+- **Typographie :** Helvetica (police standard PDF, équivalent proche d'Arial/Calibri). Le helper `baselineFromTop()` convertit les « top » CSS du gabarit en lignes de base PDF avec les métriques Calibri (ascent 0,75 em, interligne « normal » ≈ 1,226 em). Les textes trop longs pour leur colonne sont automatiquement réduits en taille (`maxWidth`) au lieu d'être tronqués.
 - **Fusion et tri :** les lignes de livraison de même arôme+format sont fusionnées (quantité cumulée). Les articles sont triés alphabétiquement par arôme puis par format.
 - **Données imprimées :** fond complet du template (logo, coordonnées, titre, grille, IFCO, signature, montagne) via raster + numéro BL, date, destinataire, en-têtes Arôme/Format, lignes article, caisses IFCO livrées, cases de facturation, société cliente.
 - **Données non imprimées :** numéro de commande, notes internes (`livraison.notes`), total bouteilles.
 - **Pagination :**
   - 18 lignes articles maximum par page de continuation.
-  - Dernière page : **5** lignes maximum (réduit depuis 11 en v11.10 pour s'aligner sur le template rasterisé).
-  - Chaque page est un conteneur `position: relative` de 210×297 mm avec `break-after: page`.
+  - Dernière page : **5** lignes maximum (alignée sur le tableau du template rasterisé).
   - Le fond raster est utilisé : `page-continuation.png` pour toutes les pages sauf la dernière, `page-full.png` pour la dernière.
-  - Pas d'en-tête répété en HTML — le fond raster contient déjà les éléments fixes.
-- **Évolution depuis v11.10 :** l'approche précédente (assemblage de 6 médias individuels — `logo.jpeg`, `contact.png`, `title.png`, `to.jpeg`, `signature.png`, `mountain.png`) est remplacée par deux fonds A4 complets rasterisés. Les 6 médias individuels sont conservés dans `icons/bl-template/` mais ne sont plus utilisés par `exportBLPDF`.
+- **Hors-ligne :** si jsPDF n'est pas chargé (`window.jspdf` absent), un toast d'erreur explicite s'affiche et rien n'est généré.
+- **Évolution :** v11.10 assemblait 6 médias individuels en HTML ; v11.11 a introduit les fonds A4 rasterisés avec `window.print()` ; v11.12 remplace la fenêtre d'impression par un vrai fichier téléchargé (jsPDF). Les 6 médias individuels (`logo.jpeg`, `contact.png`, `title.png`, `to.jpeg`, `signature.png`, `mountain.png`) sont conservés dans `icons/bl-template/` mais ne sont plus utilisés par `exportBLPDF`.
 - **Horodatage d'export :** seul `recordBLExportDate()` est appelé (clé locale `thecol_bl_export_dates`). Aucune opération V11 ni écriture Firestore.
 - **Export Excel (`exportBLExcel`) :** inchangé (toujours basé sur `templates/bl_template.xlsx`), disponible en parallèle. Le choix du format se fait depuis la modale Préparer BL via les boutons `data-click="export-bl-excel"` / `data-click="export-bl-pdf"`.
 - **Fonction de dispatch :** `exportPreparedBL(livraisonId, format)` — appelle `exportBLExcel` ou `exportBLPDF` selon le format.

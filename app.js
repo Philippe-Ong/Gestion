@@ -395,7 +395,9 @@ const V11 = {
     _conflictNotified: new Set(), // Set of "table/recordId" notified once per session
     _bootstrapping: false,    // true during boot before first remote load when ready locally
     _migrating: false,         // true during migration (lock acquired → finally)
-    _memoryProtectedTables: new Set() // tables whose queue could not be persisted; no pull/snapshot
+    _memoryProtectedTables: new Set(), // tables whose queue could not be persisted; no pull/snapshot
+    _base: {},                 // { table: { recordId: record } } — dernier état serveur connu (fusion 3 voies)
+    _conflicts: []             // journal des conflits de champs détectés pendant la session
 };
 
 // Early init: enable v11 queuing BEFORE bootLocal runs so all local changes go to queue.
@@ -459,26 +461,30 @@ const v11MergeOp = (queue, newOp) => {
     const idx = queue.findIndex(op => op.table === newOp.table && op.recordId === newOp.recordId);
     if (idx !== -1) {
         const existing = queue[idx];
-        // delete after upsert → keep the delete, preserve knownVersion
+        // delete after upsert → keep the delete, preserve knownVersion + base
         if (newOp.type === 'delete' && existing.type === 'upsert') {
             newOp.id = generateId(); // fresh id so flush removal is safe
             newOp.knownVersion = existing.knownVersion;
+            newOp.base = existing.base ?? newOp.base ?? null;
             queue[idx] = newOp;
             return;
         }
-        // upsert after delete → replace delete with upsert, preserve knownVersion
+        // upsert after delete → replace delete with upsert, preserve knownVersion + base
         if (newOp.type === 'upsert' && existing.type === 'delete') {
             newOp.id = generateId(); // fresh id so flush removal is safe
             newOp.knownVersion = existing.knownVersion;
+            newOp.base = existing.base ?? newOp.base ?? null;
             queue[idx] = newOp;
             return;
         }
-        // upsert after upsert → keep the OLDEST knownVersion but create a new op.id
-        // so flush only removes the latest merged op, never a more recent one.
+        // upsert after upsert → keep the OLDEST knownVersion AND the OLDEST base
+        // (état serveur au moment de la première modification locale), et créer un
+        // nouvel op.id pour que le flush ne retire que l'opération fusionnée.
         if (newOp.type === 'upsert' && existing.type === 'upsert') {
             const oldestKnownVersion = existing.knownVersion !== null ? existing.knownVersion : newOp.knownVersion;
             newOp.id = generateId(); // fresh id so flush removal is safe
             newOp.knownVersion = oldestKnownVersion;
+            newOp.base = existing.base ?? newOp.base ?? null;
             queue[idx] = newOp;
             return;
         }
@@ -488,11 +494,113 @@ const v11MergeOp = (queue, newOp) => {
     queue.push(newOp);
 };
 
-const v11EnqueueOp = (table, type, recordId, record) => {
+// --- V11 — Fusion à trois voies (base serveur / local / distant) ---
+// Empêche d'écraser un champ modifié par un autre appareil :
+//   - champ modifié seulement localement  → valeur locale
+//   - champ modifié seulement à distance  → valeur distante
+//   - champ modifié des deux côtés avec la même valeur → valeur commune
+//   - champ modifié différemment des deux côtés → conflit explicite (locale conservée)
+const v11Clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+
+// Égalité profonde indépendante de l'ordre des clés (JSON.stringify en dépendrait).
+const v11Equal = (a, b) => {
+    if (a === b) return true;
+    if (a === null || b === null || a === undefined || b === undefined) return false;
+    if (typeof a !== typeof b) return false;
+    if (typeof a !== 'object') return false;
+    const aArr = Array.isArray(a);
+    if (aArr !== Array.isArray(b)) return false;
+    if (aArr) {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) if (!v11Equal(a[i], b[i])) return false;
+        return true;
+    }
+    const ak = Object.keys(a);
+    const bk = Object.keys(b);
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) {
+        if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+        if (!v11Equal(a[k], b[k])) return false;
+    }
+    return true;
+};
+
+// Retourne { record, conflicts } où conflicts liste les champs divergents.
+const v11MergeRecord = (base, local, remote) => {
+    const conflicts = [];
+    if (!base) return { record: v11Clone(local), conflicts };
+    if (!local) return { record: v11Clone(remote), conflicts };
+    if (!remote) return { record: v11Clone(local), conflicts };
+    const out = {};
+    const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
+    for (const k of keys) {
+        const hasB = Object.prototype.hasOwnProperty.call(base, k);
+        const hasL = Object.prototype.hasOwnProperty.call(local, k);
+        const hasR = Object.prototype.hasOwnProperty.call(remote, k);
+        const b = hasB ? base[k] : undefined;
+        const l = hasL ? local[k] : undefined;
+        const r = hasR ? remote[k] : undefined;
+        if (l === undefined && r === undefined) continue;
+        const localChanged = !v11Equal(l, b);
+        const remoteChanged = !v11Equal(r, b);
+        if (!localChanged) {
+            if (hasR) out[k] = v11Clone(r);
+        } else if (!remoteChanged) {
+            if (hasL) out[k] = v11Clone(l);
+        } else if (v11Equal(l, r)) {
+            if (hasL) out[k] = v11Clone(l);
+        } else {
+            out[k] = v11Clone(l);
+            conflicts.push(k);
+        }
+    }
+    return { record: out, conflicts };
+};
+
+const v11GetBase = (table, recordId) => {
+    const t = V11._base[table];
+    if (!t) return null;
+    const rec = t[recordId];
+    return rec === undefined ? null : rec;
+};
+
+const v11SetBase = (table, recordId, record) => {
+    if (!V11._base[table]) V11._base[table] = {};
+    if (record === null || record === undefined) delete V11._base[table][recordId];
+    else V11._base[table][recordId] = v11Clone(record);
+};
+
+const v11SetBaseFromRemote = (table, records) => {
+    const map = {};
+    for (const r of (records || [])) {
+        if (r && typeof r.id === 'string' && r.id) map[r.id] = v11Clone(r);
+    }
+    V11._base[table] = map;
+};
+
+// Aligne le cache local sur le résultat fusionné, uniquement si l'enregistrement
+// local n'a pas été modifié entre-temps (sinon le listener réconciliera).
+const v11ApplyMergedLocal = (table, recordId, localBefore, merged) => {
+    if (v11Equal(localBefore, merged)) return;
+    const current = DB.get(table);
+    const idx = current.findIndex(r => r && r.id === recordId);
+    if (idx === -1) return;
+    if (!v11Equal(current[idx], localBefore)) return;
+    current[idx] = v11Clone(merged);
+    DB._applyRemoteSnapshot(table, current);
+    if (V11._localCache[table]) {
+        const cacheIdx = V11._localCache[table].findIndex(r => r && r.id === recordId);
+        if (cacheIdx !== -1) V11._localCache[table][cacheIdx] = v11Clone(merged);
+    }
+};
+
+const v11EnqueueOp = (table, type, recordId, record, base) => {
     const queue = v11GetQueue();
     // Store the last known remote version for this record (null if never synced)
     const knownVersion = V11._versions[table]?.[recordId] ?? null;
-    v11MergeOp(queue, { id: generateId(), table, type, recordId, record, timestamp: Date.now(), knownVersion });
+    // Base de fusion : dernier état serveur connu au moment de la modification locale.
+    const baseRecord = base !== undefined ? base : v11GetBase(table, recordId);
+    v11MergeOp(queue, { id: generateId(), table, type, recordId, record, timestamp: Date.now(), knownVersion, base: baseRecord || null });
     const persisted = v11SetQueue(queue);
     if (!persisted) {
         // Queue could NOT be persisted to localStorage — mark table as memory-protected.
@@ -1270,54 +1378,86 @@ const v11FlushQueue = async () => {
         for (const op of startQueue) {
             try {
                 const ref = doc(window.firebaseDb, V11.TABLES_COLLECTION, op.table, V11.RECORDS_SUBCOLLECTION, op.recordId);
-                let newVersion = Date.now();
+                const newVersion = Date.now();
                 const result = await runTransaction(window.firebaseDb, async (transaction) => {
                     const snap = await transaction.get(ref);
-                    const remoteVersion = snap.exists() ? snap.data()._version : null;
+                    const remoteRecord = snap.exists() && snap.data().record ? snap.data().record : null;
+                    // Base : état serveur au moment de la modification locale. Repli sur la
+                    // base chargée au démarrage si l'opération a été créée avant le premier pull.
+                    const base = op.base || v11GetBase(op.table, op.recordId) || null;
 
-                    // Determine conflict: remote changed since we queued
-                    let isConflict = false;
-                    if (op.type === 'upsert') {
-                        if (snap.exists() && (op.knownVersion === null || remoteVersion !== op.knownVersion)) {
-                            isConflict = true;
-                        } else if (!snap.exists() && op.knownVersion !== null) {
-                            isConflict = true;
+                    if (op.type === 'delete') {
+                        if (!snap.exists()) return { action: 'noop', conflicts: [] };
+                        if (base && remoteRecord && !v11Equal(remoteRecord, base)) {
+                            // Modifié ailleurs depuis notre base : ne pas détruire ces modifications.
+                            return { action: 'blocked-delete', conflicts: [], merged: remoteRecord };
                         }
-                    } else if (op.type === 'delete') {
-                        if (snap.exists() && (op.knownVersion === null || remoteVersion !== op.knownVersion)) {
-                            isConflict = true;
-                        }
+                        transaction.delete(ref);
+                        return { action: 'deleted', conflicts: [] };
                     }
 
-                    // Apply local last-write-wins regardless of conflict
-                    if (op.type === 'upsert' && op.record) {
-                        transaction.set(ref, {
-                            record: op.record,
-                            updatedAt: new Date().toISOString(),
-                            _version: newVersion
-                        });
-                    } else if (op.type === 'delete') {
-                        if (snap.exists()) {
-                            transaction.delete(ref);
-                        }
+                    if (!op.record) return { action: 'noop', conflicts: [] };
+
+                    if (!snap.exists()) {
+                        const record = v11Clone(op.record);
+                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), _version: newVersion });
+                        return { action: 'created', conflicts: [], merged: record };
                     }
 
-                    return { isConflict };
+                    if (!base) {
+                        // Aucune base connue (première synchronisation) : comportement historique.
+                        const record = v11Clone(op.record);
+                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), _version: newVersion });
+                        return { action: 'overwrote', conflicts: [], merged: record };
+                    }
+
+                    const merge = v11MergeRecord(base, op.record, remoteRecord);
+                    transaction.set(ref, { record: merge.record, updatedAt: new Date().toISOString(), _version: newVersion });
+                    return { action: 'merged', conflicts: merge.conflicts, merged: merge.record };
                 });
 
-                // Notification de conflit (une fois par session par enregistrement).
-                // Cas bénin : écriture locale sans version de base connue (1re sync, ou
-                // migration au boot avant chargement des versions V11) → LWW local, pas
-                // d'alerte utilisateur (console seulement). Seul un vrai conflit concurrent
-                // (version de base connue mais divergente à distance) alerte l'utilisateur.
-                if (result.isConflict) {
-                    const key = `${op.table}/${op.recordId}`;
-                    if (op.knownVersion === null) {
-                        console.warn(`[V11] « ${op.table} »/${op.recordId} écrit sans version de base connue — version locale conservée (bénin).`);
-                    } else if (!V11._conflictNotified.has(key)) {
-                        V11._conflictNotified.add(key);
-                        showToast(`Conflit sur « ${op.table} »/${op.recordId} : version locale conservée.`, 'warning');
+                const conflictKey = `${op.table}/${op.recordId}`;
+
+                if (result.action === 'blocked-delete') {
+                    v11SetBase(op.table, op.recordId, result.merged);
+                    V11._conflicts.push({ table: op.table, recordId: op.recordId, fields: ['(suppression)'], at: new Date().toISOString() });
+                    if (!V11._conflictNotified.has(conflictKey)) {
+                        V11._conflictNotified.add(conflictKey);
+                        showToast(`Suppression annulée sur « ${op.table} » : l'enregistrement a été modifié sur un autre appareil.`, 'warning');
                     }
+                    // Rétablir l'enregistrement local (il avait été retiré par DB.set).
+                    const cur = DB.get(op.table);
+                    if (!cur.some(r => r && r.id === op.recordId)) {
+                        cur.push(v11Clone(result.merged));
+                        DB._applyRemoteSnapshot(op.table, cur);
+                    }
+                    successfulIds.add(op.id);
+                    continue;
+                }
+
+                if (result.action === 'noop') {
+                    successfulIds.add(op.id);
+                    continue;
+                }
+
+                if (result.conflicts && result.conflicts.length > 0) {
+                    V11._conflicts.push({ table: op.table, recordId: op.recordId, fields: result.conflicts, at: new Date().toISOString() });
+                    if (!V11._conflictNotified.has(conflictKey)) {
+                        V11._conflictNotified.add(conflictKey);
+                        showToast(
+                            `Conflit sur « ${op.table} » (${result.conflicts.join(', ')}) : votre version a été conservée, les autres champs ont été fusionnés.`,
+                            'warning'
+                        );
+                    }
+                    console.warn('[V11] Conflit de champs', conflictKey, result.conflicts);
+                }
+
+                // La base devient l'état réellement écrit sur le serveur.
+                if (result.action === 'deleted') {
+                    v11SetBase(op.table, op.recordId, null);
+                } else if (result.merged) {
+                    v11SetBase(op.table, op.recordId, result.merged);
+                    if (op.type === 'upsert') v11ApplyMergedLocal(op.table, op.recordId, op.record, result.merged);
                 }
 
                 // Update local version map
@@ -1454,6 +1594,8 @@ const v11LoadTableRecords = async (table) => {
         if (!V11._versions[table]) V11._versions[table] = {};
         Object.assign(V11._versions[table], result.versions);
         v11SaveVersions();
+        // Base de fusion = état serveur de référence
+        v11SetBaseFromRemote(table, result.records);
         DB._applyRemoteSnapshot(table, result.records);
         return result.records;
     } catch (e) {
@@ -2042,50 +2184,6 @@ const v11StartListener = (table) => {
             const records = result.records;
             const remoteVersions = result.versions;
 
-            // Map id -> record pour détecter le self-echo de l'écriture locale.
-            // Si le document distant reçu par le snapshot est strictement égal
-            // au payload en attente (op.record), c'est l'écho renvoyé par
-            // Firestore après l'upsert local : aucun conflit à notifier pour
-            // cette op. Les vrais conflits concurrents (vraie divergence sur
-            // un autre device) ne sont pas affectés.
-            const snapshotRecordMap = new Map();
-            for (const r of records) {
-                if (r && r.id) snapshotRecordMap.set(r.id, r);
-            }
-
-            // Conflict detection: compare known versions in pending queue ops with remote versions.
-            // Harmonized with flush transaction logic (Fix v11.2): tout document distant existant
-            // avec base version inconnue est un conflit LWW local. _conflictNotified évite les doublons.
-            const queue = v11GetQueue();
-            const pendingForTable = queue.filter(op => op.table === table);
-            for (const op of pendingForTable) {
-                if (op.type === 'upsert' && op.recordId) {
-                    const remoteVersion = remoteVersions[op.recordId];
-                    const conflictKey = `${table}/${op.recordId}`;
-                    if (remoteVersion !== undefined) {
-                        // Self-echo : le snapshot distant est strictement le payload
-                        // qu'on vient d'écrire. On saute la notification de conflit
-                        // pour cette op, sans toucher à la queue et sans désactiver
-                        // les vrais conflits sur d'autres enregistrements.
-                        const remoteRecord = snapshotRecordMap.get(op.recordId);
-                        if (op.record && remoteRecord &&
-                            JSON.stringify(op.record) === JSON.stringify(remoteRecord)) {
-                            continue;
-                        }
-                        if (op.knownVersion === null) {
-                            // Bénin : écriture locale sans version de base connue (1re sync /
-                            // migration au boot). LWW local — console seulement, pas de toast.
-                            console.warn(`[V11] « ${table} »/${op.recordId} : écriture locale sans version de base connue (distante ${remoteVersion}), version locale conservée (bénin).`);
-                        } else if (op.knownVersion !== remoteVersion && !V11._conflictNotified.has(conflictKey)) {
-                            // Vrai conflit concurrent : version de base connue mais divergente à distance.
-                            V11._conflictNotified.add(conflictKey);
-                            console.warn(`[V11] Conflit détecté sur « ${table} »/${op.recordId}: version distante ${remoteVersion} ≠ version connue ${op.knownVersion}. Conservation de la version locale.`);
-                            showToast(`Conflit sur un enregistrement de « ${table} » : version locale conservée.`, 'warning');
-                        }
-                    }
-                }
-            }
-
             // Update version map with remote versions
             if (!V11._versions[table]) V11._versions[table] = {};
             Object.assign(V11._versions[table], remoteVersions);
@@ -2094,21 +2192,23 @@ const v11StartListener = (table) => {
             // Guard: discard if session changed after validation
             if (sessionGen !== _appSessionGen) return;
 
-            // Apply remote snapshot to localStorage (without triggering sync loop)
-            DB._applyRemoteSnapshot(table, records);
-            if (sessionGen !== _appSessionGen) return;
+            // Le snapshot distant devient la base de fusion.
+            v11SetBaseFromRemote(table, records);
 
-            // Re-apply pending queue operations for this table (local wins unconditionally)
-            const current = DB.get(table);
-            const resultMap = new Map(current.map(r => [r.id, r]));
-            for (const op of pendingForTable) {
-                if (op.type === 'upsert' && op.record) {
-                    resultMap.set(op.recordId, op.record);
-                } else if (op.type === 'delete') {
-                    resultMap.delete(op.recordId);
-                }
+            // Superposition des modifications locales en attente, champ par champ :
+            // les champs que l'autre appareil a modifiés sont conservés, les champs
+            // modifiés localement gardent la valeur locale. Aucun écrasement global.
+            const pendingNow = v11GetQueue().filter(op => op.table === table);
+            const working = new Map(records.map(r => [r.id, r]));
+            for (const op of pendingNow) {
+                if (op.type === 'delete') { working.delete(op.recordId); continue; }
+                if (!op.record) continue;
+                const remoteRec = working.get(op.recordId) || null;
+                if (!remoteRec) { working.set(op.recordId, v11Clone(op.record)); continue; }
+                const merge = v11MergeRecord(op.base || null, op.record, remoteRec);
+                working.set(op.recordId, merge.record);
             }
-            DB._applyRemoteSnapshot(table, Array.from(resultMap.values()));
+            DB._applyRemoteSnapshot(table, Array.from(working.values()));
             if (sessionGen !== _appSessionGen) return;
 
             // Debounced re-render of current view — différé si un champ dans
@@ -2243,11 +2343,14 @@ const v11OverlayQueueOnCache = () => {
         const current = DB.get(table);
         const resultMap = new Map(current.map(r => [r.id, r]));
         for (const op of ops) {
-            if (op.type === 'upsert' && op.record && op.record.id) {
-                resultMap.set(op.recordId, op.record);
-            } else if (op.type === 'delete') {
-                resultMap.delete(op.recordId);
-            }
+            if (op.type === 'delete') { resultMap.delete(op.recordId); continue; }
+            if (!op.record || !op.record.id) continue;
+            const remoteRec = resultMap.get(op.recordId) || null;
+            if (!remoteRec) { resultMap.set(op.recordId, v11Clone(op.record)); continue; }
+            // Fusion champ par champ avec la base distante : ne réécrase pas
+            // les modifications faites entre-temps sur un autre appareil.
+            const base = op.base || v11GetBase(table, op.recordId) || null;
+            resultMap.set(op.recordId, v11MergeRecord(base, op.record, remoteRec).record);
         }
         DB._applyRemoteSnapshot(table, Array.from(resultMap.values()));
     }
@@ -2466,6 +2569,10 @@ window.v11Debug = {
     getVersions: () => V11._versions,
     saveVersions: v11SaveVersions,
     conflictNotified: () => V11._conflictNotified,
+    conflicts: () => V11._conflicts,
+    base: () => V11._base,
+    mergeRecord: v11MergeRecord,
+    equal: v11Equal,
     status: () => ({
         isReady: V11._isReady,
         bootstrapping: V11._bootstrapping,
@@ -5781,6 +5888,7 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
     // Met à jour les versions commande
     if (!V11._versions['commandes']) V11._versions['commandes'] = {};
     V11._versions['commandes'][commandeId] = txVersion;
+    v11SetBase('commandes', commandeId, result.updatedCommande);
 
     // Met à jour / supprime les lots dans le cache local
     const allLots = DB.get('lots');
@@ -5804,6 +5912,9 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
         } else {
             V11._versions['lots'][info.lotId] = txVersion + 1;
         }
+        // Base de fusion alignée sur l'état réellement écrit
+        const rec = allLots.find(l => String(l.id) === String(info.lotId)) || null;
+        v11SetBase('lots', info.lotId, rec);
     }
     v11SaveVersions();
 
@@ -6889,8 +7000,36 @@ const exportPreparedBL = (livraisonId, format) => {
     }
 };
 
+// v11.12 : fonds de page du template BL (dataURL) mis en cache pour jsPDF.
+const BL_PDF_ASSETS = {};
+const loadBLTemplateAsset = (file) => {
+    if (!BL_PDF_ASSETS[file]) {
+        BL_PDF_ASSETS[file] = new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', 'icons/bl-template/' + file, true);
+            xhr.responseType = 'blob';
+            xhr.onload = () => {
+                if (xhr.status !== 200) {
+                    reject(new Error('Template introuvable : ' + file + ' (HTTP ' + xhr.status + ')'));
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(new Error('Lecture impossible : ' + file));
+                reader.readAsDataURL(xhr.response);
+            };
+            xhr.onerror = () => reject(new Error('Chargement impossible : ' + file));
+            xhr.send();
+        }).catch(err => {
+            // Échec non mis en cache : la prochaine tentative rechargera l'image.
+            delete BL_PDF_ASSETS[file];
+            throw err;
+        });
+    }
+    return BL_PDF_ASSETS[file];
+};
+
 const exportBLPDF = (livraisonId) => {
-    let popup = null;
     try {
         const livraisons = DB.get('livraisons') || [];
         const clients = DB.get('clients') || [];
@@ -6976,137 +7115,110 @@ const exportBLPDF = (livraisonId) => {
         const pageChunks = buildPageChunks(sortedItems.length);
         const pageCount = pageChunks.length;
 
-        const fullPageUrl = new URL('icons/bl-template/page-full.png', window.location.href).href;
-        const continuationPageUrl = new URL('icons/bl-template/page-continuation.png', window.location.href).href;
-        const escapeAttr = (v) => escapeHtml(v).replace(/"/g, '&quot;');
+        if (!window.jspdf || !window.jspdf.jsPDF) {
+            showToast('Bibliothèque PDF non chargée — vérifiez la connexion internet puis rechargez l\'app', 'error');
+            return;
+        }
 
         const recipientLines = [clientSociete, clientContact, clientAdresse, clientLocalite].filter(Boolean).slice(0, 4);
         const clientBottom = clientSociete || clientContact;
         const factMark = (mode) => (livraison.facturationMode === mode ? 'x' : '');
 
-        let pagesHtml = '';
-        let offset = 0;
-        for (let p = 0; p < pageChunks.length; p++) {
-            const isLastPage = p === pageChunks.length - 1;
-            const pageNumber = p + 1;
-            const size = pageChunks[p];
-            const chunk = sortedItems.slice(offset, offset + size);
-            offset += size;
-            const rowsHtml = chunk.map(it => `
-                <div class="pdf-row">
-                    <div class="pdf-cell pdf-qtt">${escapeHtml(String(it.quantite))}</div>
-                    <div class="pdf-cell pdf-desc">ThéCol - Thé Froid Artisanal</div>
-                    <div class="pdf-cell pdf-arome">${escapeHtml(it.aromeNom || '')}</div>
-                    <div class="pdf-cell pdf-format">${escapeHtml(it.formatNom || '')}</div>
-                </div>
-            `).join('');
+        // v11.12 : génération d'un vrai fichier .pdf via jsPDF. Fonds de page =
+        // scans du template Excel ; données variables dessinées en vectoriel aux
+        // mêmes cotes (mm) que le gabarit d'impression v11.11.
+        Promise.all([
+            loadBLTemplateAsset('page-full.png'),
+            pageCount > 1 ? loadBLTemplateAsset('page-continuation.png') : Promise.resolve(null)
+        ]).then(([fullPageImg, continuationImg]) => {
+            const doc = new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+            doc.setProperties({ title: 'Bulletin de Livraison ' + blNum });
 
-            pagesHtml += `
-                <div class="pdf-page">
-                    <img class="pdf-template-bg" src="${escapeAttr(isLastPage ? fullPageUrl : continuationPageUrl)}" alt="">
-                    <div class="pdf-blnum">${escapeHtml(blNum)}</div>
-                    <div class="pdf-date">${escapeHtml(blDate)}</div>
-                    <div class="pdf-recipient">${recipientLines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>
-                    ${!isLastPage ? `<div class="pdf-suite">Suite — page ${pageNumber}</div>` : ''}
-                    <div class="pdf-table-head pdf-table-arome">Arôme</div>
-                    <div class="pdf-table-head pdf-table-format">Format</div>
-                    <div class="pdf-rows">${rowsHtml}</div>
-                    ${isLastPage ? `
-                        <div class="pdf-ifco pdf-ifco-green">${escapeHtml(String(cVerte || ''))}</div>
-                        <div class="pdf-ifco pdf-ifco-black">${escapeHtml(String(cNoire || ''))}</div>
-                        <div class="pdf-fact-mark pdf-fact-email">${factMark('email')}</div>
-                        <div class="pdf-fact-mark pdf-fact-poste">${factMark('poste')}</div>
-                        <div class="pdf-fact-mark pdf-fact-other">${factMark('autre')}</div>
-                        <div class="pdf-client-bottom">${escapeHtml(clientBottom)}</div>
-                    ` : ''}
-                    ${pageCount > 1 ? `<div class="pdf-page-footer">BL-${escapeHtml(blNum)} · Page ${pageNumber} / ${pageCount}</div>` : ''}
-                </div>
-            `;
-        }
+            const PT_TO_MM = 25.4 / 72;
+            const ROW_H = 5.29; // hauteur d'une ligne du tableau (mm)
+            // Ligne de base PDF depuis un « top » CSS du gabarit : métriques Calibri
+            // (ascent 0.75 em, interligne « normal » ≈ 1.226 em).
+            const baselineFromTop = (topMm, sizePt, lineHeightMm) => {
+                const fontMm = sizePt * PT_TO_MM;
+                const lh = lineHeightMm || 1.226 * fontMm;
+                return topMm + (lh - fontMm) / 2 + 0.75 * fontMm;
+            };
+            // maxWidth : réduit la taille de police pour tenir dans la colonne
+            // (équivalent borné du « nowrap » du gabarit HTML).
+            const drawText = (str, x, baselineY, sizePt, opts = {}) => {
+                const text = String(str === null || str === undefined ? '' : str);
+                if (!text.trim()) return;
+                doc.setFont('helvetica', opts.bold ? 'bold' : 'normal');
+                let size = sizePt;
+                if (opts.maxWidth) {
+                    doc.setFontSize(size);
+                    const w = doc.getTextWidth(text);
+                    if (w > opts.maxWidth) size = Math.max(6, size * opts.maxWidth / w);
+                }
+                doc.setFontSize(size);
+                const g = opts.gray === undefined ? 31 : opts.gray; // #1f1f1f par défaut
+                doc.setTextColor(g, g, g);
+                doc.text(text, x, baselineY, { align: opts.align || 'left' });
+            };
 
-        const css = `
-            * { box-sizing: border-box; }
-            html, body { margin: 0; padding: 0; background: #fff; color: #1f1f1f; font-family: Calibri, Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-            .no-print { position: fixed; top: 12px; right: 12px; z-index: 1000; }
-            .no-print button { background: #1f1f1f; color: #fff; border: none; padding: 10px 18px; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
-            .no-print button:hover { background: #000; }
-            @page { size: A4; margin: 0; }
-            .pdf-page { position: relative; width: 210mm; height: 297mm; margin: 0 auto; padding: 0; overflow: hidden; break-after: page; page-break-after: always; }
-            .pdf-page:last-child { break-after: auto; page-break-after: auto; }
-            .pdf-template-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; z-index: 0; }
-            .pdf-blnum, .pdf-date, .pdf-recipient, .pdf-suite, .pdf-table-head, .pdf-rows, .pdf-ifco, .pdf-fact-mark, .pdf-client-bottom, .pdf-page-footer { position: absolute; z-index: 1; }
-            .pdf-blnum { left: 101.3mm; top: 16mm; width: 10mm; font-size: 14px; font-weight: 700; text-align: center; }
-            .pdf-date { left: 163.5mm; top: 50.8mm; width: 17.7mm; font-family: Calibri, Arial, sans-serif; font-size: 11pt; text-align: right; white-space: nowrap; }
-            .pdf-recipient { left: 144.5mm; top: 61.7mm; width: 36.8mm; max-height: 21.4mm; overflow: visible; font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 5.29mm; text-align: right; white-space: nowrap; }
-            .pdf-suite { left: 121mm; top: 21mm; width: 42mm; color: #666; font-size: 8.5px; text-align: center; }
-            .pdf-table-head { top: 97.3mm; color: #000; font-family: Calibri, Arial, sans-serif; font-size: 11pt; font-weight: 400; line-height: 4mm; }
-            .pdf-table-arome { left: 86.1mm; width: 29mm; }
-            .pdf-table-format { left: 115.7mm; width: 11mm; text-align: left; }
-            .pdf-rows { left: 25.4mm; top: 101mm; width: 101mm; font-family: Calibri, Arial, sans-serif; font-size: 11pt; }
-            .pdf-row { display: grid; grid-template-columns: 13% 47% 29% 11%; width: 100%; height: 5.29mm; font-family: Calibri, Arial, sans-serif; font-size: 11pt; }
-            .pdf-cell { display: flex; align-items: center; min-width: 0; padding: 0 1mm; overflow: hidden; white-space: nowrap; }
-            .pdf-qtt { justify-content: center; font-weight: 600; }
-            .pdf-format { justify-content: flex-end; text-align: right; }
-            .pdf-ifco { left: 25.4mm; width: 13mm; font-size: 10.5px; font-weight: 700; text-align: center; }
-            .pdf-ifco-green { top: 154.7mm; }
-            .pdf-ifco-black { top: 160mm; }
-            .pdf-fact-mark { left: 115.5mm; width: 8mm; font-size: 10.5px; font-weight: 700; text-align: center; }
-            .pdf-fact-email { top: 149mm; }
-            .pdf-fact-poste { top: 154.35mm; }
-            .pdf-fact-other { top: 159.7mm; }
-            .pdf-client-bottom { left: 27mm; top: 192.65mm; width: 75mm; font-family: Calibri, Arial, sans-serif; font-size: 16pt; }
-            .pdf-page-footer { left: 0; bottom: 3mm; width: 100%; color: #777; font-size: 8.5px; text-align: center; }
-            @media print {
-                .no-print { display: none !important; }
-                .pdf-page { margin: 0; }
+            let offset = 0;
+            for (let p = 0; p < pageChunks.length; p++) {
+                const isLastPage = p === pageChunks.length - 1;
+                const pageNumber = p + 1;
+                const chunk = sortedItems.slice(offset, offset + pageChunks[p]);
+                offset += pageChunks[p];
+
+                if (p > 0) doc.addPage();
+                doc.addImage(isLastPage ? fullPageImg : continuationImg, 'PNG', 0, 0, 210, 297);
+
+                drawText(blNum, 106.3, baselineFromTop(16, 10.5), 10.5, { bold: true, align: 'center' });
+                drawText(blDate, 181.2, baselineFromTop(50.8, 11), 11, { align: 'right' });
+                recipientLines.forEach((line, i) => {
+                    drawText(line, 181.3, baselineFromTop(61.7 + i * ROW_H, 11, ROW_H), 11, { align: 'right' });
+                });
+                if (!isLastPage) {
+                    drawText('Suite — page ' + pageNumber, 142, baselineFromTop(21, 6.375), 6.375, { align: 'center', gray: 102 });
+                }
+                drawText('Arôme', 86.1, baselineFromTop(97.3, 11, 4), 11);
+                drawText('Format', 115.7, baselineFromTop(97.3, 11, 4), 11);
+                chunk.forEach((it, i) => {
+                    const y = baselineFromTop(101 + i * ROW_H, 11, ROW_H);
+                    drawText(String(it.quantite), 31.97, y, 11, { bold: true, align: 'center' });
+                    drawText('ThéCol - Thé Froid Artisanal', 39.53, y, 11, { maxWidth: 45.5 });
+                    drawText(it.aromeNom || '', 87, y, 11, { maxWidth: 26 });
+                    drawText(it.formatNom || '', 125.4, y, 11, { align: 'right', maxWidth: 12 });
+                });
+                if (isLastPage) {
+                    drawText(String(cVerte || ''), 31.9, baselineFromTop(154.7, 7.875), 7.875, { bold: true, align: 'center' });
+                    drawText(String(cNoire || ''), 31.9, baselineFromTop(160, 7.875), 7.875, { bold: true, align: 'center' });
+                    drawText(factMark('email'), 119.5, baselineFromTop(149, 7.875), 7.875, { bold: true, align: 'center' });
+                    drawText(factMark('poste'), 119.5, baselineFromTop(154.35, 7.875), 7.875, { bold: true, align: 'center' });
+                    drawText(factMark('autre'), 119.5, baselineFromTop(159.7, 7.875), 7.875, { bold: true, align: 'center' });
+                    drawText(clientBottom, 27, baselineFromTop(192.65, 16), 16);
+                }
+                if (pageCount > 1) {
+                    // Pied de page : boîte de ligne calée à 3 mm du bord inférieur.
+                    drawText('BL-' + blNum + ' · Page ' + pageNumber + ' / ' + pageCount, 105,
+                        baselineFromTop(294 - 1.226 * 6.375 * PT_TO_MM, 6.375), 6.375, { align: 'center', gray: 119 });
+                }
             }
-        `;
 
-        const html = `<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<title>Bulletin de Livraison ${escapeHtml(blNum)}</title>
-<style>${css}</style>
-</head>
-<body>
-<div class="no-print"><button onclick="window.print()">Imprimer / Enregistrer en PDF</button></div>
-${pagesHtml}
-</body>
-</html>`;
-
-        popup = window.open('', '_blank');
-        if (!popup) {
-            showToast('Autorisez les popups pour exporter le PDF', 'warning');
-            return;
-        }
-        popup.document.open();
-        popup.document.write(html);
-        popup.document.close();
-
-        const triggerPrint = () => {
-            try {
-                popup.focus();
-                popup.print();
-            } catch (e) {
-                console.error('exportBLPDF: print failed', e);
-            }
+            const blob = doc.output('blob');
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `BL-${blNum}_${livraison.dateBL}.pdf`;
+            a.click();
+            URL.revokeObjectURL(url);
             recordBLExportDate(livraisonId);
-            if (window.location.hash === '#livraisons') {
-                renderLivraisons();
-            }
-        };
-
-        if (popup.document.readyState === 'complete') {
-            setTimeout(triggerPrint, 250);
-        } else {
-            popup.addEventListener('load', () => setTimeout(triggerPrint, 250), { once: true });
-        }
+            showToast('Bulletin de livraison exporté en PDF');
+            if (window.location.hash === '#livraisons') renderLivraisons();
+        }).catch(e => {
+            console.error('exportBLPDF: échec de génération', e);
+            showToast('Erreur lors de la génération du PDF', 'error');
+        });
     } catch (e) {
         console.error('exportBLPDF: échec de génération', e);
-        if (popup && !popup.closed) {
-            try { popup.close(); } catch (_) { /* ignore */ }
-        }
         showToast('Erreur lors de la génération du PDF', 'error');
     }
 };

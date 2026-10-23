@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v11.11
+**Current Version:** v11.13
 
 ## 1. Build, Lint, and Test Commands
 
@@ -127,8 +127,8 @@ Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync
 #### V11 collaborative path (after migration)
 - **Per-record storage:** `tables/<table>/records/<recordId>` — one Firestore doc per application record
 - **Offline queue:** `v11GetQueue()` / `v11SetQueue()` — localStorage queue at key `thecol_v11_queue`
-- **Differential writes:** `DB.set()` computes diffs with previous state and enqueues per-record upsert/delete operations
-- **Queue flush:** `v11FlushQueue()` — transactional per-record flush with `_version` conflict detection (local wins)
+- **Differential writes:** `DB.set()` computes diffs with previous state and enqueues per-record upsert/delete operations, each carrying a `base` (last known server state) for three-way merge
+- **Queue flush:** `v11FlushQueue()` — transactional per-record flush; `v11MergeRecord(base, local, remote)` merges field by field so a concurrent edit on another device on a *different* field is preserved. Same-field divergence → local kept + entry in `V11._conflicts` (`window.v11Debug.conflicts()`). A local delete is cancelled if the record changed remotely since `base`.
 - **Real-time listeners:** `v11StartAllListeners()` / `v11StopAllListeners()` — `onSnapshot` per table, debounced re-render at 300 ms
 - **Migration:** `v11RunMigration()` — one-shot migration from `data/<table>` to `tables/<table>/records/<recordId>`, guarded by `syncMeta/migrationLock` (30 s expiry)
 - **Config constants:** `V11` object at line 330 of `app.js` — see `V11.TABLES_COLLECTION`, `V11.RECORDS_SUBCOLLECTION`, `V11.SYNC_META_COLLECTION`, etc.
@@ -204,7 +204,7 @@ Delivery note generation and export:
 - **Generation:** `generateBL(commandeId)` — creates BL from delivered order
 - **Arome resolution:** `getAromeBLName()` — resolves any configured aroma (active or inactive) via `DB.get('aromes')` instead of a static mapping
 - **Excel export:** `exportBLExcel(livraisonId)` — fills `templates/bl_template.xlsx` with data
-- **PDF export (v11.11 — pixel-perfect with rasterized A4 backgrounds):** `exportBLPDF(livraisonId)` — opens an A4-format HTML preview in a new window and triggers the browser's native print dialog (no external library). The user saves as PDF or prints on paper via `window.print()`. Since v11.11, the visual design is pixel-perfect: two full-page rasterized backgrounds (`page-full.png` for the last page, `page-continuation.png` for continuation pages) extracted from the Excel template contain all fixed elements (logo, grid, IFCO, signature, mountain). Variable data (BL number, date, recipient, article rows, IFCO quantities, facturation marks) is overlaid in Calibri at exact mm positions matching the template. The article rows use a CSS grid with fixed 5.29 mm row height. Previously (v11.10), the function assembled 6 individual media assets (logo, coordinates, title, À glyph, signature, mountain); those files are preserved but no longer referenced by `exportBLPDF`.
+- **PDF export (v11.12 — real downloaded file via jsPDF):** `exportBLPDF(livraisonId)` — generates a real `.pdf` file (`BL-XXXXX_date.pdf`) and downloads it directly, same flow as the Excel export (no print dialog, no popup). Uses **jsPDF 3.0.3** loaded from cdnjs in `index.html` (SRI integrity, allowed by the CSP). Rendering stays pixel-perfect: two full-page rasterized backgrounds (`page-full.png` for the last page, `page-continuation.png` for continuation pages, cached as dataURL by `loadBLTemplateAsset()`) contain all fixed template elements (logo, grid, IFCO, signature, mountain). Variable data (BL number, date, recipient, article rows, IFCO quantities, facturation marks, client name) is drawn as vector text (Helvetica) at the same mm positions as the v11.11 print layout; `baselineFromTop()` converts the layout's CSS tops into PDF baselines using Calibri metrics, and text too long for its column is auto-shrunk (`maxWidth`) instead of clipped. If jsPDF is not loaded (offline), an explicit error toast is shown and nothing is generated. The 6 individual media assets from v11.10 (logo, coordinates, title, À glyph, signature, mountain) are preserved but no longer referenced by `exportBLPDF`.
 - **Dynamic row filling:** sorts items alphabetically and fills rows starting at line 15; inserts extra rows if needed and shifts the footer (facturation, IFCO, signature) accordingly — no longer relies on a static `ROW_MAP`
 - **Export dispatch (v11.9):** `exportPreparedBL(livraisonId, format)` is called with `'excel'` or `'pdf'` from the Préparer BL modal buttons (`data-click="export-bl-excel"` / `data-click="export-bl-pdf"`). Both save preparation data via `saveBLPreparation()` before exporting.
 - **Transactional delivery (v11.2) :** `deliverCommandeTransaction(commandeId, allocations)` exécute une transaction atomique Firestore multi-documents (commande + lots). Exige : connexion réseau (`navigator.onLine`), Firebase Auth, V11 ready, file d'attente vide pour les documents ciblés. En cas d'échec, aucun document n'est modifié.

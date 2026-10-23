@@ -23,7 +23,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=11.11">
+    <link rel="stylesheet" href="styles.css?v=11.12">
 </head>
 <body class="body--locked">
     <aside class="sidebar">
@@ -85,7 +85,7 @@
                 <div class="global-search-results" id="globalSearchResults" role="listbox"></div>
             </div>
             <div class="header-actions" id="headerActions">
-                <span style="font-size: 11px; color: var(--text-lighter);">v11.11</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v11.13</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -197,6 +197,8 @@
     <!-- JSZip & XLSX : utilisés par exportBLExcel / exportArchivesExcel / importClients -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
+    <!-- jsPDF : utilisé par exportBLPDF (export PDF des bulletins de livraison) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/3.0.3/jspdf.umd.min.js" integrity="sha384-GwHhSt8QjC7J+v0zZ0Flfho/T76YHEcCL9w4rvjTIUHauh6gWJeBSIi3vWXxNhtA" crossorigin="anonymous"></script>
     <!-- Firebase SDK (v12.16.0) — App, Firestore, Auth
          Les clés Firebase côté client sont publiques par conception.
          N'ajoutez PAS de clés serveur ici.
@@ -331,6 +333,6 @@
             if (err) { err.textContent = 'Erreur de connexion au service. Vérifiez votre réseau.'; err.style.display = 'block'; }
         }
     </script>
-    <script src="app.js?v=11.11"></script>
+    <script src="app.js?v=11.13"></script>
 </body>
 </html>

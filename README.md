@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.11**
+**v11.13**
 
 ## Adresse
 
@@ -43,7 +43,7 @@ Application de gestion pour votre entreprise de thé froid.
 ### Livraisons
 - Génération de Bulletins de Livraison (BL) depuis les commandes livrées
 - Export Excel des BL avec template pré-formaté
-- Export PDF des BL — rendu pixel-perfect avec fonds A4 rasterisés (`page-full.png` / `page-continuation.png`) issus du template Excel ; données variables (numéro BL, date, destinataire, lignes articles, IFCO, facturation) superposées en Calibri aux positions exactes du modèle via `window.print()`
+- Export PDF des BL — vrai fichier `.pdf` téléchargé directement (jsPDF) ; rendu pixel-perfect : fonds A4 rasterisés (`page-full.png` / `page-continuation.png`) issus du template Excel + données variables (numéro BL, date, destinataire, lignes articles, IFCO, facturation) dessinées en vectoriel aux positions exactes du modèle
 - Remplissage automatique des lignes par arôme/format, triés alphabétiquement
 - Saisie des caisses IFCO vertes/noires livrées
 
@@ -129,6 +129,23 @@ Application de gestion pour votre entreprise de thé froid.
   - **Pagination automatique** : 18 lignes maximum par page ; la dernière page limite à 11 lignes pour laisser la place aux blocs de total, IFCO, facturation et signatures. Les en-têtes (logo, numéro BL, page X/N) sont répétés sur chaque page.
   - **Notes internes** : non imprimées dans le PDF.
   - **Sans dépendance** : pas de bibliothèque externe — le PDF est généré via `window.print()` depuis une fenêtre ouverte. L'export enregistre uniquement la date locale d'export (`thecol_bl_export_dates`) et ne crée pas d'opération V11.
+  - **L'export Excel reste inchangé** et disponible en parallèle.
+
+### Nouveautés v11.13
+
+- **🔀 Travail à plusieurs sans écrasement** — Les écritures Firestore ne remplacent plus l'enregistrement entier : chaque opération rejoue une **fusion à trois voies** (état serveur de référence / version locale / version distante), **champ par champ**, dans une transaction.
+  - Deux personnes qui modifient des champs différents de la même commande conservent **les deux** modifications.
+  - Un vrai conflit (même champ modifié différemment) est signalé par un toast et journalisé (`window.v11Debug.conflicts()`) — jamais silencieux.
+  - Une suppression locale est annulée si l'enregistrement a été modifié sur un autre appareil entre-temps.
+  - Les champs restés inchangés localement prennent automatiquement la valeur distante.
+
+### Nouveautés v11.12
+
+- **📄 Export PDF des BL : vrai fichier téléchargé** — L'export PDF ne passe plus par la fenêtre d'impression du navigateur : l'app génère et télécharge directement un fichier `BL-XXXXX_date.pdf` (même mécanisme que l'export Excel), via la bibliothèque **jsPDF 3.0.3** (CDN cdnjs avec empreinte SRI, conforme au CSP).
+  - Rendu identique à la v11.11 : fonds A4 rasterisés du template + données variables aux mêmes positions mm, désormais dessinées en **vectoriel** (texte net et sélectionnable dans le PDF).
+  - Les textes trop longs pour leur colonne sont automatiquement réduits au lieu d'être tronqués.
+  - Les fonds de page sont chargés une seule fois puis mis en cache (`loadBLTemplateAsset`).
+  - Hors-ligne : message d'erreur explicite si la bibliothèque n'est pas chargée.
   - **L'export Excel reste inchangé** et disponible en parallèle.
 
 ### Nouveautés v11.11
