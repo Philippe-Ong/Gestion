@@ -57,6 +57,8 @@ The `DB` object wraps localStorage with `get(key)` / `set(key, value)` methods. 
 
 **Livraison transactionnelle (v11.2) :** `deliverCommandeTransaction()` exécute une transaction atomique Firestore multi-documents. L'opération exige : connexion réseau active, Firebase Auth, V11 ready, file d'attente vide pour les documents concernés. En cas d'échec, aucun document n'est modifié.
 
+`DB.set(key, data)` rewrites the whole table: it diffs `data` against the current localStorage, so records missing from `data` are deleted and changed ones overwritten in Firestore, with no conflict raised if a remote snapshot arrived meanwhile. Never hold a table array across an `await` (e.g. `confirmDialog`): re-read it after the wait before writing.
+
 UI filter persistence goes through `DB.getFilter(name)` / `DB.setFilter(name, value)` which prefix keys with `thecol_filter_`.
 
 ### View Pattern
@@ -83,7 +85,7 @@ Defined in `SPEC.md`. Key entities: employees, aromes, formats, recettes (recipe
 - Dates formatted with Swiss French locale (`fr-CH`)
 - Production planner aggregates orders by date range, calculates litres per arome, then applies recipes to compute required ingredients
 - Stock statuses come from `getLotStatus(lot)`, aligned on `isLotSellable`: DLV first (fallback DLC for legacy lots without DLV) — OK, DLV proche (< `DLV_WARN_DAYS`), Invendable (DLV passed, DLC valid), Expiré (DLC passed). A blocked lot (`lot.bloque`) gets an extra « Bloqué » badge. The « Sortie » button is always shown; its modal only offers the « vente » reason when `isLotSellable` is true.
-- Stock available for an order is evaluated at its delivery date: `createStockPool` serves orders by ascending `dateLivraison` and consumes lots by ascending DLV, counting only lots still sellable on that date (dashboard « Bouteilles à produire », auto production planner, « ✓ Stock »)
+- Stock available for an order is evaluated at its delivery date: `createStockPool` serves orders by ascending `dateLivraison` and consumes lots by ascending DLV, counting only lots still sellable on that date (dashboard « Bouteilles à produire », auto production planner, « ✓ Stock »). « ✓ Stock » first reserves the stock of orders already marked « produite » (not yet delivered, so still in the lots), then marks pending orders covered by the remaining stock
 - The Inventaire tab tracks consumables (consommables) and equipment (équipement) with stock alert thresholds
 
 ## Mobile Build (Capacitor)

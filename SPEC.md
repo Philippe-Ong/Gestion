@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.3
+**Version:** v12.4
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -89,7 +89,8 @@ Verrou transactionnel pour éviter les migrations concurrentes. Chaque client g�
 | `thecol_v11_queue` | File d'opérations hors-ligne (tableau JSON) |
 | `thecol_v11_ready` | Flag local `'1'` si migration v11 confirmée |
 | `thecol_dirty_tables` | Flag legacy (pré-v11) des tables modifiées hors-ligne |
-| `thecol_backup_pre_sync` | Backup avant tout pull legacy |
+
+L'ancienne clé `thecol_backup_pre_sync` (copie locale avant un pull legacy) n'est plus créée et est supprimée au démarrage depuis v12.4 : sa restauration repoussait des valeurs périmées vers le cloud.
 
 ### Architecture de synchronisation
 ```
@@ -110,6 +111,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 
 **Écho local supprimé (v11.7) :** le snapshot `onSnapshot` ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique (`JSON.stringify`) au payload de l'opération locale en attente (self-echo). Seuls les vrais conflits concurrents — divergence réelle entre appareils — sont signalés.
 ```
+
+**Écritures de table entière (v12.4) :** `DB.set(key, data)` compare `data` au localStorage courant : tout enregistrement absent de `data` devient une suppression, tout enregistrement différent une réécriture, sans conflit signalé si un instantané distant est arrivé entre-temps (la version connue est déjà à jour). Une fonction qui attend (`await confirmDialog(...)`, `.then(...)`) relit donc ses tables **après** l'attente avant d'écrire : `finaliserProductionFormats`, `restaurerCommande`, `resetClients`.
 
 ### Employés
 ```json
@@ -382,6 +385,7 @@ Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaq
 - Créer nouvelle commande (sélectionner client, articles, date)
 - Voir détails commande
 - Statut modifiable
+- **« ✓ Stock » (v12.4) :** passe en « produite » les commandes en attente couvertes par le stock libre, par date de livraison. Les bouteilles des commandes déjà « produites » (pas encore livrées, donc toujours dans les lots) leur restent réservées et ne comptent pas comme libres.
 
 ### 3.5 Planificateur de Production
 - Sélectionner période (commandes à produire)
@@ -396,7 +400,8 @@ Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaq
 - **Arômes:** CRUD, couleur, activer/désactiver
 - **Formats:** CRUD
 - **Recettes:** CRUD par arôme, liste ingrédients
-- **Clients:** CRUD, activer/désactiver
+- **Clients:** CRUD, activer/désactiver ; « Effacer les clients sans commande » supprime en masse les clients non référencés (les clients liés à une commande sont conservés, comme pour une suppression unitaire)
+- **Sauvegarde & Restauration:** export JSON de toutes les tables ; « Restaurer depuis JSON » affiche un bilan (ajouts, modifications, suppressions par table) à confirmer et télécharge une sauvegarde de l'état actuel avant d'écrire (v12.4)
 
 ## 4. Design
 
@@ -578,7 +583,7 @@ Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaq
   - Avantages : pas de XSS par interpolation d'attributs JS, fonctionne sur le contenu re-rendu (notamment les modales), réduit les fuites mémoire.
 
 - **Validation des IDs V11 :** la fonction `v11ValidateId()` vérifie désormais que les IDs contiennent uniquement des caractères autorisés : lettres, chiffres, `_`, `:`, `-`, `.` (1-128 caractères). Un ID invalide bloque la synchronisation mais les données restent en localStorage.
-- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration. Depuis v11.6, l'import capture un snapshot complet (localStorage + caches mémoire V11) avant la première écriture. Si un `DB.set()` échoue (exception ou valeur de retour inattendue), un rollback synchrone restaure localStorage, `V11._localCache`, `V11._versions`, la file d'attente, la liste des tables protégées et les clés de versions, en écrivant directement dans localStorage (sans repasser par `DB.set`). Le toast d'erreur confirme qu'aucune donnée n'a été modifiée.
+- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration. Depuis v11.6, l'import capture un snapshot complet (localStorage + caches mémoire V11) avant la première écriture. Si un `DB.set()` échoue (exception ou valeur de retour inattendue), un rollback synchrone restaure localStorage, `V11._localCache`, `V11._versions`, la file d'attente, la liste des tables protégées et les clés de versions, en écrivant directement dans localStorage (sans repasser par `DB.set`). Le toast d'erreur confirme qu'aucune donnée n'a été modifiée. Depuis v12.4, rien n'est écrit avant que l'utilisateur ait confirmé le bilan de la restauration (ajouts, modifications, suppressions par table, appliqués sur tous les appareils) ; une sauvegarde JSON de l'état actuel est téléchargée juste avant l'écriture.
 
 - **Capacitor 8** pour emballage mobile Android/iOS
 - **`safeColor()`** — nouvelle fonction utilitaire qui valide les couleurs hexadécimales avant interpolation dans les attributs `style` (prévient l'injection CSS). Fallback sur `#cccccc` si la valeur est invalide.

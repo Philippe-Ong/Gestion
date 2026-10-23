@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.3**
+**v12.4**
 
 ## Adresse
 
@@ -117,6 +117,16 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.4
+
+Correctifs de l'audit du 23.10.2026 (`AUDIT-2026-10-23.md`) :
+
+- **🛡️ Plus d'effacement des changements des autres appareils** — Confirmer une production malgré un avertissement d'inventaire, ou restaurer une commande, relit désormais les données après la boîte de confirmation. Auparavant, une vente ou une livraison faite sur un autre appareil pendant que la boîte était ouverte pouvait être effacée (lot livré ressuscité, vente supprimée de l'historique, commande supprimée). Une restauration de commande est annulée si la commande a changé entre-temps.
+- **✓ Stock** — Les bouteilles des commandes déjà « produites » leur sont réservées : le bouton ne passe plus en « produite » une commande que seul ce stock réservé couvrirait.
+- **📂 Restaurer depuis JSON** — Affiche d'abord un bilan à confirmer (ajouts, modifications, suppressions par table, appliqués sur tous les appareils) et télécharge une sauvegarde de l'état actuel avant d'écrire.
+- **Clients** — « Effacer tout » devient « Effacer les clients sans commande » : les clients liés à une commande sont conservés, comme pour une suppression unitaire.
+- **♻️ Backup pré-synchro retiré** — Le bouton « Restaurer le backup pré-synchro » (synchro legacy) est supprimé et l'ancienne copie locale effacée au démarrage : sa restauration repoussait des valeurs périmées vers le cloud.
 
 ### Nouveautés v12.3
 
@@ -313,6 +323,7 @@ Pour sauvegarder vos données:
 Pour restaurer:
 1. Cliquez sur **"Restaurer depuis JSON"**
 2. Sélectionnez votre fichier de sauvegarde
+3. Vérifiez le bilan affiché (ajouts, modifications, suppressions par table) puis confirmez. La restauration remplace les données sur **tous les appareils** ; une sauvegarde de l'état actuel est téléchargée juste avant.
 
 ## Tests
 

@@ -796,16 +796,6 @@ const DB = {
         if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
         if (V11._isReady === true) return;
         try {
-            // Backup before sync
-            const backup = {};
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (k.startsWith('thecol_') && !k.startsWith('thecol_backup_')) {
-                    backup[k] = localStorage.getItem(k);
-                }
-            }
-            localStorage.setItem('thecol_backup_pre_sync', JSON.stringify(backup));
-
             const { getDocs, collection } = window.firebaseApi;
             const snapshot = await getDocs(collection(window.firebaseDb, 'data'));
             const hasData = !snapshot.empty;
@@ -10126,7 +10116,7 @@ const renderCommandes = () => {
                 </button>
                 ${showArchives
                     ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
-                    : `<button class="btn btn-ghost btn-sm" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock actuel">✓ Stock</button>
+                    : `<button class="btn btn-ghost btn-sm" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock libre (hors bouteilles réservées aux commandes déjà produites)">✓ Stock</button>
                        <button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
             </div>
         </div>
@@ -10493,12 +10483,12 @@ const marquerCommandeProduite = (id) => {
 };
 
 const restaurerCommande = (id) => {
-    const commandes = DB.get('commandes') || [];
-    const cmd = commandes.find(c => c.id === id);
-    if (!cmd) { showToast('Commande non trouvée', 'error'); return; }
+    const cmdAffichee = (DB.get('commandes') || []).find(c => c.id === id);
+    if (!cmdAffichee) { showToast('Commande non trouvée', 'error'); return; }
 
-    const estLivree = cmd.statut === 'livrée';
-    const estAnnulee = cmd.statut === 'annulee';
+    const statutConfirme = cmdAffichee.statut;
+    const estLivree = statutConfirme === 'livrée';
+    const estAnnulee = statutConfirme === 'annulee';
     if (!estLivree && !estAnnulee) { showToast('Cette commande ne peut pas être restaurée', 'error'); return; }
 
     const message = estLivree
@@ -10507,6 +10497,15 @@ const restaurerCommande = (id) => {
 
     confirmDialog(message, { danger: false }).then(ok => {
         if (!ok) return;
+
+        // Relecture APRÈS la confirmation : DB.set réécrit la table entière, et un
+        // autre appareil a pu créer ou modifier des commandes pendant la boîte.
+        const commandes = DB.get('commandes') || [];
+        const cmd = commandes.find(c => c.id === id);
+        if (!cmd || cmd.statut !== statutConfirme) {
+            showToast('La commande a changé entre-temps : restauration annulée. Rouvrez-la pour vérifier son état.', 'warning');
+            return;
+        }
 
         if (estLivree) {
             const lots = DB.get('lots') || [];
@@ -11219,37 +11218,40 @@ const checkStockAndUpdateCommandes = () => {
     const commandesTriees = sortCommandesByDateLivraison(commandes);
     const updatedCommandes = [...commandes];
 
-    commandesTriees.forEach(({ commande: cmd, index }) => {
-        if (cmd.statut !== 'en_attente') return;
-
+    // Bouteilles nécessaires par arôme-format ; null si une quantité est invalide
+    const besoinsDe = (cmd) => {
         const needed = {};
-        let canProduce = getItems(cmd).length > 0;
-        getItems(cmd).forEach(item => {
+        for (const item of getItems(cmd)) {
             const quantite = Number(item.quantite);
-            if (!Number.isInteger(quantite) || quantite <= 0) {
-                canProduce = false;
-                return;
-            }
+            if (!Number.isInteger(quantite) || quantite <= 0) return null;
             const format = formats.find(f => f.id === item.formatId);
             const arome = aromes.find(a => a.id === item.aromeId);
-            const aromeName = arome?.nom || item.aromeId;
-            const formatName = format?.nom || item.formatId;
-            const key = `${aromeName}-${formatName}`;
-            if (!needed[key]) needed[key] = 0;
-            needed[key] += quantite;
-        });
-
-        Object.entries(needed).forEach(([key, qty]) => {
-            if (stockPool.available(key, cmd.dateLivraison) < qty) canProduce = false;
-        });
-
-        if (canProduce) {
-            Object.entries(needed).forEach(([key, qty]) => {
-                stockPool.take(key, qty, cmd.dateLivraison);
-            });
-            updatedCount++;
-            updatedCommandes[index] = { ...cmd, statut: 'produite' };
+            const key = `${arome?.nom || item.aromeId}-${format?.nom || item.formatId}`;
+            needed[key] = (needed[key] || 0) + quantite;
         }
+        return needed;
+    };
+
+    // Les commandes déjà « produites » ne sont pas encore livrées : leurs bouteilles
+    // sont toujours dans les lots et leur sont réservées en priorité.
+    commandesTriees.forEach(({ commande: cmd }) => {
+        if (cmd.statut !== 'produite') return;
+        Object.entries(besoinsDe(cmd) || {}).forEach(([key, qty]) => {
+            stockPool.take(key, qty, cmd.dateLivraison);
+        });
+    });
+
+    commandesTriees.forEach(({ commande: cmd, index }) => {
+        if (cmd.statut !== 'en_attente' || getItems(cmd).length === 0) return;
+        const needed = besoinsDe(cmd);
+        if (!needed) return;
+        const canProduce = Object.entries(needed).every(([key, qty]) => stockPool.available(key, cmd.dateLivraison) >= qty);
+        if (!canProduce) return;
+        Object.entries(needed).forEach(([key, qty]) => {
+            stockPool.take(key, qty, cmd.dateLivraison);
+        });
+        updatedCount++;
+        updatedCommandes[index] = { ...cmd, statut: 'produite' };
     });
 
     if (updatedCount > 0) {
@@ -13536,20 +13538,17 @@ const confirmerProductionArome = (aromeNom) => {
     }
 };
 
-const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProduit, totalBouteilles) => {
+// Déductions d'inventaire d'une production (ingrédients de la recette, bouteilles
+// vides, bouchons) appliquées au tableau `inventaire` fourni. N'écrit rien en base.
+const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, litresProduit) => {
     const aromes = DB.get('aromes') || [];
     const recettes = DB.get('recettes') || [];
-    const inventaire = (DB.get('inventaire') || []).map(item => ({ ...item }));
-    const lots = DB.get('lots') || [];
-    const history = DB.get('history') || [];
     const arome = aromes.find(a => a.nom === aromeNom);
     const recette = recettes.find(r => r.aromeId === arome?.id);
     const warnings = [];
     // Erreurs de conversion incompatibles : bloquantes, distinctes des
     // avertissements métier (stock / ingrédient manquant). Une incohérence
-    // d'unités ne peut jamais être confirmée par l'utilisateur : on annule
-    // AVANT toute persistance (premier DB.set plus bas) et on prévient en
-    // français avec le premier élément + le nombre restant.
+    // d'unités ne peut jamais être confirmée par l'utilisateur.
     const conversionErrors = [];
 
     if (recette && Array.isArray(recette.ingredients)) {
@@ -13582,16 +13581,6 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
         });
     } else {
         warnings.push(`Recette introuvable pour ${aromeNom}`);
-    }
-
-    if (conversionErrors.length > 0) {
-        const first = conversionErrors[0];
-        const remaining = conversionErrors.length - 1;
-        showToast(
-            `Production annulée : ${first}${remaining > 0 ? ` (+${remaining} autre${remaining > 1 ? 's' : ''})` : ''}. Corrigez les unités de la recette.`,
-            'error'
-        );
-        return false;
     }
 
     producedByFormat.forEach(({ format, quantite }) => {
@@ -13633,13 +13622,44 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
         }
     }
 
-    if (warnings.length > 0) {
+    return { warnings, conversionErrors };
+};
+
+// Annule une production pour incohérence d'unités (premier élément + nombre restant)
+const annulerProductionUnites = (conversionErrors) => {
+    const first = conversionErrors[0];
+    const remaining = conversionErrors.length - 1;
+    showToast(
+        `Production annulée : ${first}${remaining > 0 ? ` (+${remaining} autre${remaining > 1 ? 's' : ''})` : ''}. Corrigez les unités de la recette.`,
+        'error'
+    );
+    return false;
+};
+
+const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProduit, totalBouteilles) => {
+    // Contrôle sur une copie, avant toute persistance : une incohérence d'unités
+    // annule, les avertissements (stock, ingrédient manquant) se confirment.
+    const controle = deduireInventaireProduction(
+        (DB.get('inventaire') || []).map(item => ({ ...item })), aromeNom, producedByFormat, litresProduit);
+    if (controle.conversionErrors.length > 0) return annulerProductionUnites(controle.conversionErrors);
+
+    if (controle.warnings.length > 0) {
         const ok = await confirmDialog(
-            `Attention: ${warnings[0]}${warnings.length > 1 ? ` (+${warnings.length - 1})` : ''}. Confirmer quand même la production ?`,
+            `Attention: ${controle.warnings[0]}${controle.warnings.length > 1 ? ` (+${controle.warnings.length - 1})` : ''}. Confirmer quand même la production ?`,
             { danger: true, confirmLabel: 'Confirmer quand même', title: 'Inventaire insuffisant' }
         );
         if (!ok) return false;
     }
+
+    // Relecture APRÈS la confirmation : pendant la boîte, un autre appareil a pu
+    // modifier l'inventaire, les lots ou l'historique (vente, livraison). DB.set
+    // réécrit la table entière : des tableaux lus avant l'attente effaceraient
+    // ces changements sans qu'aucun conflit ne soit détecté.
+    const inventaire = (DB.get('inventaire') || []).map(item => ({ ...item }));
+    const { warnings, conversionErrors } = deduireInventaireProduction(inventaire, aromeNom, producedByFormat, litresProduit);
+    if (conversionErrors.length > 0) return annulerProductionUnites(conversionErrors);
+    const lots = DB.get('lots') || [];
+    const history = DB.get('history') || [];
 
     const dateProduction = getLocalDateISOString();
     const dates = calculateDates(dateProduction);
@@ -14108,22 +14128,6 @@ const deleteInventaireItem = (id) => {
     });
 };
 
-// Restauration du backup pré-synchronisation
-const restorePreSyncBackup = () => {
-    confirmDialog('Restaurer les données telles qu\'elles étaient avant la dernière synchronisation cloud ? Les modifications effectuées depuis seront perdues.', { danger: true, confirmLabel: 'Restaurer' }).then(ok => {
-        if (!ok) return;
-        try {
-            const backup = JSON.parse(localStorage.getItem('thecol_backup_pre_sync') || '{}');
-            Object.entries(backup).forEach(([k, v]) => localStorage.setItem(k, v));
-            showToast('Backup pré-synchro restauré');
-            renderCurrentView();
-        } catch(e) {
-            console.error('restorePreSyncBackup:', e);
-            showToast('Erreur lors de la restauration du backup', 'error');
-        }
-    });
-};
-
 // Settings
 const renderParametres = () => {
     const employes = DB.get('employees') || [];
@@ -14240,7 +14244,7 @@ const renderParametres = () => {
                         <button class="btn btn-sm btn-secondary" data-click="trigger-import-clients">Importer Excel</button>
                         <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" data-change="import-clients-excel">
                         <button class="btn btn-sm btn-primary" data-click="show-client-modal">+ Ajouter</button>
-                        <button class="btn btn-sm btn-danger" data-click="reset-clients">Effacer tout</button>
+                        <button class="btn btn-sm btn-danger" data-click="reset-clients">Effacer les clients sans commande</button>
                     </div>
                 </div>
                 <ul class="settings-list">
@@ -14268,13 +14272,10 @@ const renderParametres = () => {
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; padding: 12px;">
                     <button class="btn btn-primary" onclick="exportAllData()">💾 Sauvegarder tout (JSON)</button>
                     <button class="btn btn-secondary" onclick="document.getElementById('importDataFile').click()">📂 Restaurer depuis JSON</button>
-                    ${localStorage.getItem('thecol_backup_pre_sync') ? `
-                    <button class="btn btn-secondary" onclick="restorePreSyncBackup()">♻️ Restaurer le backup pré-synchro</button>
-                    ` : ''}
                     <input type="file" id="importDataFile" accept=".json" style="display:none" onchange="importAllData(event)">
                 </div>
                 <p class="text-muted" style="font-size: 12px; padding: 0 12px 12px;">
-                    La sauvegarde inclut: employés, aromes, formats, recettes, clients, lots, commandes et pointages.
+                    La sauvegarde inclut toutes les données (commandes, lots, historique, clients, pointages, inventaire…). La restauration remplace ces données sur tous les appareils : elle affiche d'abord un bilan à confirmer et télécharge une sauvegarde de l'état actuel.
                 </p>
             </div>
 
@@ -15079,12 +15080,31 @@ document.querySelectorAll('.nav-item').forEach(item => {
     });
 });
 
-// Reset clients data if corrupted
+// Effacement en masse des clients : seuls les clients sans commande sont
+// supprimés (même règle que deleteClient). Les clients liés à une commande
+// restent : commandes, BL et rappels de lot y font référence.
 const resetClients = () => {
-    confirmDialog('Voulez-vous effacer tous les clients et recommencer ?', { danger: true, confirmLabel: 'Effacer tout' }).then(ok => {
+    const clientsCommandes = new Set((DB.get('commandes') || []).map(c => c.clientId));
+    const clients = DB.get('clients') || [];
+    const aEffacer = new Set(clients.filter(c => !clientsCommandes.has(c.id)).map(c => c.id));
+    if (aEffacer.size === 0) {
+        showToast(clients.length === 0
+            ? 'Aucun client à effacer'
+            : 'Aucun client à effacer : tous ont des commandes associées', 'warning');
+        return;
+    }
+    const conserves = clients.length - aEffacer.size;
+    const message = `Effacer ${aEffacer.size} client(s) sans commande ?`
+        + (conserves > 0 ? ` ${conserves} client(s) lié(s) à des commandes seront conservé(s).` : '');
+    confirmDialog(message, { danger: true, confirmLabel: 'Effacer' }).then(ok => {
         if (!ok) return;
-        DB.set('clients', []);
-        showToast('Clients effacés');
+        // Relecture après la confirmation : seuls les clients listés, et toujours
+        // sans commande, sont effacés (un autre appareil a pu en ajouter entre-temps).
+        const commandesActuelles = new Set((DB.get('commandes') || []).map(c => c.clientId));
+        const actuels = DB.get('clients') || [];
+        const restants = actuels.filter(c => !aEffacer.has(c.id) || commandesActuelles.has(c.id));
+        DB.set('clients', restants);
+        showToast(`${actuels.length - restants.length} client(s) effacé(s)`);
         renderParametres();
     });
 };
@@ -15144,79 +15164,143 @@ const _importCloneLocalCache = () => {
 };
 const _importCloneVersions = () => JSON.parse(JSON.stringify(V11._versions || {}));
 
+// Libellés des tables pour le bilan de restauration
+const IMPORT_TABLE_LABELS = {
+    employees: 'employés', aromes: 'arômes', formats: 'formats', recettes: 'recettes',
+    clients: 'clients', lots: 'lots', commandes: 'commandes', pointages: 'pointages',
+    inventaire: 'articles d\'inventaire', livraisons: 'BL', history: 'mouvements d\'historique', todos: 'tâches'
+};
+
+// Bilan d'une restauration par rapport aux données locales : ce que DB.set
+// enverra au cloud (ajouts, modifications, suppressions par table).
+const _importBilan = (data, tables) => {
+    let ajouts = 0;
+    let modifications = 0;
+    let suppressions = 0;
+    const detail = [];
+    for (const table of tables) {
+        const actuels = new Map(DB.get(table).map(r => [r.id, r]));
+        const idsFichier = new Set();
+        for (const rec of data[table]) {
+            idsFichier.add(rec.id);
+            const actuel = actuels.get(rec.id);
+            if (!actuel) ajouts++;
+            else if (JSON.stringify(actuel) !== JSON.stringify(rec)) modifications++;
+        }
+        const supprimes = [...actuels.keys()].filter(id => !idsFichier.has(id)).length;
+        if (supprimes > 0) detail.push(`${supprimes} ${IMPORT_TABLE_LABELS[table] || table}`);
+        suppressions += supprimes;
+    }
+    return { ajouts, modifications, suppressions, detailSuppressions: detail.join(', ') };
+};
+
+// Écriture des tables restaurées, une fois la restauration confirmée.
+const _importAppliquer = (data, tablesToImport) => {
+    try {
+        // ----- SNAPSHOT pré-écriture : tout ce que DB.set peut modifier -----
+        const dataKeys = tablesToImport.map(t => 'thecol_' + t);
+        const metaKeys = [V11.QUEUE_KEY, V11.VERSIONS_KEY, V11_INVALID_TABLES_KEY];
+        const snap = _importSnapshotLocalStorage([...dataKeys, ...metaKeys]);
+        const cacheSnap = _importCloneLocalCache();
+        const versionsSnap = _importCloneVersions();
+        const memoryProtectedSnap = new Set(V11._memoryProtectedTables);
+
+        let count = 0;
+        let failed = false;
+        // Séquentiel (pas forEach) pour court-circuiter dès qu'un appel
+        // renvoie autre chose que true ou lève.
+        for (const table of tablesToImport) {
+            let result;
+            try {
+                result = DB.set(table, data[table]);
+            } catch (writeErr) {
+                console.error('Import rollback:', writeErr);
+                failed = true;
+                break;
+            }
+            if (result !== true) {
+                console.error('Import rollback: DB.set a retourné une valeur inattendue pour', table, result);
+                failed = true;
+                break;
+            }
+            count++;
+        }
+
+        if (failed) {
+            // -------- ROLLBACK synchrone --------
+            // Restaurer localStorage (tables + métadonnées V11) en écrivant
+            // directement, sans repasser par DB.set (qui enfilerait de
+            // nouvelles opérations V11 et piétinerait le rollback).
+            _importRestoreLocalStorage(snap);
+            // Restaurer les caches mémoire V11 depuis les clones capturés.
+            V11._localCache = cacheSnap;
+            V11._versions = versionsSnap;
+            V11._memoryProtectedTables = memoryProtectedSnap;
+            showToast(
+                `Restauration annulée : une erreur est survenue pendant l'écriture des tables. Aucune modification n'a été appliquée.`,
+                'error'
+            );
+            // Pas de router(), pas de toast de succès.
+            return;
+        }
+
+        showToast(`${count} tables restaurées`);
+        router();
+    } catch (err) {
+        console.error('Import rollback:', err);
+        showToast('Erreur lors de la restauration', 'error');
+    }
+};
+
 const importAllData = (event) => {
     const file = event.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
+        let data;
         try {
-            const data = JSON.parse(e.target.result);
-            const tablesToImport = ALL_TABLES.filter(table => Array.isArray(data[table]));
+            data = JSON.parse(e.target.result);
+        } catch (err) {
+            console.error('Import:', err);
+            showToast('Erreur: fichier invalide', 'error');
+            return;
+        }
+        const tablesToImport = data && typeof data === 'object'
+            ? ALL_TABLES.filter(table => Array.isArray(data[table]))
+            : [];
+        if (tablesToImport.length === 0) {
+            showToast('Aucune table reconnue dans ce fichier : restauration annulée.', 'error');
+            return;
+        }
 
-            for (const table of tablesToImport) {
-                const validation = v11ValidateTable(table, data[table]);
-                if (!validation.valid) {
-                    showToast(
-                        `Restauration annulée : données invalides dans « ${table} » (${validation.reason}).`,
-                        'error'
-                    );
-                    return;
-                }
-            }
-
-            // ----- SNAPSHOT pré-écriture : tout ce que DB.set peut modifier -----
-            const dataKeys = tablesToImport.map(t => 'thecol_' + t);
-            const metaKeys = [V11.QUEUE_KEY, V11.VERSIONS_KEY, V11_INVALID_TABLES_KEY];
-            const snap = _importSnapshotLocalStorage([...dataKeys, ...metaKeys]);
-            const cacheSnap = _importCloneLocalCache();
-            const versionsSnap = _importCloneVersions();
-            const memoryProtectedSnap = new Set(V11._memoryProtectedTables);
-
-            let count = 0;
-            let failed = false;
-            // Séquentiel (pas forEach) pour court-circuiter dès qu'un appel
-            // renvoie autre chose que true ou lève.
-            for (const table of tablesToImport) {
-                let result;
-                try {
-                    result = DB.set(table, data[table]);
-                } catch (writeErr) {
-                    console.error('Import rollback:', writeErr);
-                    failed = true;
-                    break;
-                }
-                if (result !== true) {
-                    console.error('Import rollback: DB.set a retourné une valeur inattendue pour', table, result);
-                    failed = true;
-                    break;
-                }
-                count++;
-            }
-
-            if (failed) {
-                // -------- ROLLBACK synchrone --------
-                // Restaurer localStorage (tables + métadonnées V11) en écrivant
-                // directement, sans repasser par DB.set (qui enfilerait de
-                // nouvelles opérations V11 et piétinerait le rollback).
-                _importRestoreLocalStorage(snap);
-                // Restaurer les caches mémoire V11 depuis les clones capturés.
-                V11._localCache = cacheSnap;
-                V11._versions = versionsSnap;
-                V11._memoryProtectedTables = memoryProtectedSnap;
+        for (const table of tablesToImport) {
+            const validation = v11ValidateTable(table, data[table]);
+            if (!validation.valid) {
                 showToast(
-                    `Restauration annulée : une erreur est survenue pendant l'écriture des tables. Aucune modification n'a été appliquée.`,
+                    `Restauration annulée : données invalides dans « ${table} » (${validation.reason}).`,
                     'error'
                 );
-                // Pas de router(), pas de toast de succès.
                 return;
             }
-
-            showToast(`${count} tables restaurées`);
-            router();
-        } catch(err) {
-            console.error('Import rollback:', err);
-            showToast('Erreur: fichier invalide', 'error');
         }
+
+        // Chaque table du fichier remplace la table actuelle sur tous les appareils :
+        // bilan avant confirmation, puis sauvegarde de l'état actuel avant écriture.
+        const bilan = _importBilan(data, tablesToImport);
+        confirmDialog(
+            `Restaurer « ${file.name} » ? Les données actuelles seront remplacées sur tous les appareils : `
+            + `${bilan.ajouts} ajout(s), ${bilan.modifications} modification(s), ${bilan.suppressions} suppression(s)`
+            + `${bilan.detailSuppressions ? ` (${bilan.detailSuppressions})` : ''}. `
+            + 'Une sauvegarde JSON de l\'état actuel sera d\'abord téléchargée.',
+            { danger: true, confirmLabel: 'Restaurer', title: 'Restaurer une sauvegarde' }
+        ).then(ok => {
+            if (!ok) {
+                showToast('Restauration annulée', 'warning');
+                return;
+            }
+            exportAllData();
+            _importAppliquer(data, tablesToImport);
+        });
     };
     reader.readAsText(file);
     event.target.value = '';
@@ -15495,6 +15579,9 @@ const bootLocal = () => {
     try { migrateClientTarifs(); } catch (e) { console.warn('[migration] initiale', e); }
     // Renumérote les anciens lots « _ab12… » en numéros séquentiels (idempotent)
     try { migrateLotNumeros(); } catch (e) { console.warn('[migration] lots', e); }
+    // Ancien backup pré-synchro (synchro legacy) : sa restauration repoussait des
+    // valeurs périmées vers le cloud ; il n'est plus créé ni restaurable.
+    localStorage.removeItem('thecol_backup_pre_sync');
     // Bottom sheet listeners (idempotent au relogin)
     if (!window._bottomSheetListenersDone) {
         window._bottomSheetListenersDone = true;

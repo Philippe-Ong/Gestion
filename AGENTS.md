@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.3
+**Current Version:** v12.4
 
 ## 1. Build, Lint, and Test Commands
 
@@ -115,6 +115,7 @@ Tous les gestionnaires d'événements dans le HTML rendu utilisent un système d
 The `DB` object wraps `localStorage`. All keys are prefixed `thecol_` (e.g., `thecol_employees`, `thecol_commandes`).
 - **Read:** `DB.get('lots')` — returns parsed array, defaults to `[]` on error.
 - **Write:** `DB.set('lots', data)` — serializes to JSON, auto-syncs to Firebase if connected.
+- **Whole-table writes:** `DB.set` diffs `data` against the current localStorage — every record missing from `data` is deleted and every changed record is overwritten in Firestore, with no conflict raised if a remote snapshot arrived in between. Never keep a table array across an `await` (e.g. `await confirmDialog(...)`): re-read it with `DB.get` after the wait, then write.
 
 ### Firebase (Optional Cloud Sync) — v11.0 (Auth v11.2)
 
