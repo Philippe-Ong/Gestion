@@ -23,7 +23,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=12.4">
+    <link rel="stylesheet" href="styles.css?v=12.6">
 </head>
 <body class="body--locked">
     <aside class="sidebar">
@@ -95,7 +95,7 @@
                     <span class="cmdk-trigger-label">Actions</span>
                     <kbd class="cmdk-trigger-key">Ctrl K</kbd>
                 </button>
-                <span style="font-size: 11px; color: var(--text-lighter);">v12.5</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v12.6</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -211,6 +211,12 @@
             <div class="login-form" id="loginForm" style="display:none">
                 <div class="login-error" id="loginError" role="alert" style="display:none"></div>
                 <div class="form-group">
+                    <label for="loginPseudo">Identifiant</label>
+                    <input type="text" id="loginPseudo" class="login-pseudo-input"
+                           placeholder="Votre identifiant" autocomplete="username"
+                           aria-label="Identifiant" autocapitalize="none" spellcheck="false">
+                </div>
+                <div class="form-group">
                     <label for="loginPassword">Mot de passe</label>
                     <input type="password" id="loginPassword" class="login-password-input"
                            placeholder="Mot de passe" autocomplete="current-password"
@@ -231,10 +237,11 @@
     <!-- Firebase SDK (v12.16.0) — App, Firestore, Auth
          Les clés Firebase côté client sont publiques par conception.
          N'ajoutez PAS de clés serveur ici.
-         L'authentification utilise un compte technique fixe gestion@thecol.ch
-         (Email/Password). Le mot de passe est saisi par l'utilisateur, jamais
-         stocké dans le code. La session est persistée via browserLocalPersistence
-         pour un démarrage hors ligne quand le SDK est déjà chargé. -->
+         Authentification par comptes nominatifs (pseudo + mot de passe) :
+         le pseudo devient <pseudo>@thecol.ch, jamais affiché. Le mot de passe
+         est saisi par l'utilisateur, jamais stocké dans le code. La session est
+         persistée via browserLocalPersistence pour un démarrage hors ligne
+         quand le SDK est déjà chargé. -->
     <script>
         window.firebaseReady = false;
     </script>
@@ -249,7 +256,19 @@
             onAuthStateChanged, setPersistence, browserLocalPersistence
         } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
 
-        const FIREBASE_AUTH_EMAIL = 'gestion@thecol.ch';
+        // Adresses techniques : le pseudo saisi devient <pseudo>@thecol.ch.
+        // Ces adresses n'ont pas besoin d'exister comme boîtes mail — elles ne
+        // servent qu'à Firebase Auth. Aucun email n'est affiché dans l'UI.
+        const AUTH_DOMAIN = 'thecol.ch';
+        const authEmailForPseudo = (pseudo) => {
+            const slug = String(pseudo || '')
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase().trim()
+                .replace(/\s+/g, '.')
+                .replace(/[^a-z0-9._-]/g, '');
+            return slug ? slug + '@' + AUTH_DOMAIN : '';
+        };
+        const authPseudoFromEmail = (email) => (email ? String(email).split('@')[0] : '');
         
         const firebaseConfig = {
             apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
@@ -279,12 +298,21 @@
             };
             window.firebaseDb = db;
 
-            // Exposer Auth de façon minimale : aucune fuite de l'email technique
-            // ni du mot de passe. Seules les fonctions nécessaires sont exposées.
+            // Comptes nominatifs : pseudo + mot de passe. Le pseudo est converti
+            // en adresse technique, jamais affichée. Aucun mot de passe en clair.
             window.firebaseAuth = {
-                signIn: (password) => signInWithEmailAndPassword(auth, FIREBASE_AUTH_EMAIL, password),
+                signIn: (pseudo, password) => {
+                    const email = authEmailForPseudo(pseudo);
+                    if (!email) {
+                        const err = new Error('Identifiant invalide');
+                        err.code = 'auth/invalid-pseudo';
+                        return Promise.reject(err);
+                    }
+                    return signInWithEmailAndPassword(auth, email, password);
+                },
                 signOut: () => signOut(auth),
-                isAuthenticated: () => !!(auth && auth.currentUser)
+                isAuthenticated: () => !!(auth && auth.currentUser),
+                pseudo: () => authPseudoFromEmail(auth && auth.currentUser && auth.currentUser.email)
             };
 
             // Le bouton Sync n'est visible qu'après authentification
@@ -309,6 +337,8 @@
                     // Session active (restaurée depuis la persistance ou
                     // connexion réussie)
                     window.firebaseReady = true;
+                    // Identifiant affiché / inscrit dans les écritures Firestore
+                    window.currentPseudo = authPseudoFromEmail(user.email);
 
                     // Déverrouiller le shell : visible, accessible aux
                     // lecteurs d'écran, masquer l'écran de connexion
@@ -337,6 +367,7 @@
                     console.log('Authentifié — session active');
                 } else {
                     // Aucune session active — transition centralisée
+                    window.currentPseudo = '';
                     if (typeof window.resetAppSession === 'function') {
                         window.resetAppSession();
                     }
@@ -362,6 +393,6 @@
             if (err) { err.textContent = 'Erreur de connexion au service. Vérifiez votre réseau.'; err.style.display = 'block'; }
         }
     </script>
-    <script src="app.js?v=12.5"></script>
+    <script src="app.js?v=12.6"></script>
 </body>
 </html>

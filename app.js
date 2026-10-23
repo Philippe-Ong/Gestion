@@ -601,6 +601,20 @@ const v11ApplyMergedLocal = (table, recordId, localBefore, merged) => {
     }
 };
 
+// Identifiant de la personne connectée, inscrit sur chaque écriture Firestore
+// (champ `updatedBy` au niveau du document, hors `record` : il ne participe pas
+// à la fusion et ne crée donc jamais de conflit).
+const v11Actor = () => {
+    try {
+        if (window.currentPseudo) return window.currentPseudo;
+        if (window.firebaseAuth && typeof window.firebaseAuth.pseudo === 'function') {
+            const p = window.firebaseAuth.pseudo();
+            if (p) return p;
+        }
+    } catch (_) {}
+    return 'inconnu';
+};
+
 const v11EnqueueOp = (table, type, recordId, record, base) => {
     const queue = v11GetQueue();
     // Store the last known remote version for this record (null if never synced)
@@ -1506,19 +1520,19 @@ const v11FlushQueue = async () => {
 
                     if (!snap.exists()) {
                         const record = v11Clone(op.record);
-                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), _version: newVersion });
+                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), updatedBy: v11Actor(), _version: newVersion });
                         return { action: 'created', conflicts: [], merged: record };
                     }
 
                     if (!base) {
                         // Aucune base connue (première synchronisation) : comportement historique.
                         const record = v11Clone(op.record);
-                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), _version: newVersion });
+                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), updatedBy: v11Actor(), _version: newVersion });
                         return { action: 'overwrote', conflicts: [], merged: record };
                     }
 
                     const merge = v11MergeRecord(base, op.record, remoteRecord);
-                    transaction.set(ref, { record: merge.record, updatedAt: new Date().toISOString(), _version: newVersion });
+                    transaction.set(ref, { record: merge.record, updatedAt: new Date().toISOString(), updatedBy: v11Actor(), _version: newVersion });
                     return { action: 'merged', conflicts: merge.conflicts, merged: merge.record };
                 });
 
@@ -2506,10 +2520,29 @@ window.initFirebase = async (maxRetries = 3) => {
 
             // Exposer l'auth si pas déjà fait
             if (!window.firebaseAuth) {
+                // Même convention que le module d'index.html : <pseudo>@thecol.ch
+                const emailForPseudo = (pseudo) => {
+                    const slug = String(pseudo || '')
+                        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                        .toLowerCase().trim()
+                        .replace(/\s+/g, '.')
+                        .replace(/[^a-z0-9._-]/g, '');
+                    return slug ? slug + '@thecol.ch' : '';
+                };
                 window.firebaseAuth = {
-                    signIn: (password) => signInWithEmailAndPassword(auth, 'gestion@thecol.ch', password),
+                    signIn: (pseudo, password) => {
+                        const email = emailForPseudo(pseudo);
+                        if (!email) {
+                            const err = new Error('Identifiant invalide');
+                            err.code = 'auth/invalid-pseudo';
+                            return Promise.reject(err);
+                        }
+                        return signInWithEmailAndPassword(auth, email, password);
+                    },
                     signOut: () => signOut(auth),
-                    isAuthenticated: () => !!(auth && auth.currentUser)
+                    isAuthenticated: () => !!(auth && auth.currentUser),
+                    pseudo: () => (auth && auth.currentUser && auth.currentUser.email
+                        ? String(auth.currentUser.email).split('@')[0] : '')
                 };
             } else if (typeof window.firebaseAuth.isAuthenticated !== 'function') {
                 // Si l'init module a exposé l'objet avant ce fallback, ajouter
@@ -2528,6 +2561,7 @@ window.initFirebase = async (maxRetries = 3) => {
 
                 if (user) {
                     window.firebaseReady = true;
+                    window.currentPseudo = user.email ? String(user.email).split('@')[0] : '';
                     if (loginScreen) { loginScreen.style.display = 'none'; unlockShell(); }
                     const pwdField = document.getElementById('loginPassword');
                     if (pwdField) pwdField.value = '';
@@ -2536,6 +2570,7 @@ window.initFirebase = async (maxRetries = 3) => {
                         window.startApp();
                     }
                 } else {
+                    window.currentPseudo = '';
                     resetAppSession();
                 }
             });
@@ -10950,6 +10985,7 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
         transaction.set(cmdRef, {
             record: updatedCommande,
             updatedAt: now,
+            updatedBy: v11Actor(),
             _version: txVersion
         });
 
@@ -10961,6 +10997,7 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
                 transaction.set(ref, {
                     record: { ...lot, quantite: newQty },
                     updatedAt: now,
+                    updatedBy: v11Actor(),
                     _version: txVersion + 1
                 });
             }
@@ -14395,6 +14432,9 @@ const renderParametres = () => {
                     <h3>Compte</h3>
                 </div>
                 <div style="padding: 12px;">
+                    <p style="font-size: 13px; margin: 0 0 12px;">
+                        Connecté en tant que <strong>${escapeHtml(window.currentPseudo || 'inconnu')}</strong>
+                    </p>
                     <button class="btn btn-secondary" id="logoutBtnSettings" type="button">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                         Déconnexion
@@ -15465,9 +15505,10 @@ if (!window.__v11OnlineListenerRegistered) {
 // =============================================================================
 
 // Connexion : appelée depuis le formulaire de l'écran de verrouillage.
-// Lit le mot de passe saisi, appelle Firebase Auth (email technique fixe),
-// affiche les erreurs en français sans révéler l'adresse email.
+// Lit l'identifiant et le mot de passe, appelle Firebase Auth (compte nominatif),
+// affiche les erreurs en français sans révéler l'adresse technique.
 window.handleLogin = async () => {
+    const pseudoInput = document.getElementById('loginPseudo');
     const passwordInput = document.getElementById('loginPassword');
     const errorEl = document.getElementById('loginError');
     const busyEl = document.getElementById('loginBusy');
@@ -15488,6 +15529,13 @@ window.handleLogin = async () => {
         }
     }
 
+    const pseudo = pseudoInput ? pseudoInput.value.trim() : '';
+    if (!pseudo) {
+        if (errorEl) { errorEl.textContent = 'Veuillez saisir votre identifiant.'; errorEl.style.display = 'block'; }
+        if (pseudoInput) pseudoInput.focus();
+        return;
+    }
+
     const password = passwordInput.value;
     if (!password || !password.trim()) {
         if (errorEl) { errorEl.textContent = 'Veuillez saisir le mot de passe.'; errorEl.style.display = 'block'; }
@@ -15499,33 +15547,37 @@ window.handleLogin = async () => {
     if (errorEl) { errorEl.textContent = ''; errorEl.style.display = 'none'; }
     if (busyEl) busyEl.style.display = 'flex';
     if (btn) btn.style.display = 'none';
+    if (pseudoInput) pseudoInput.disabled = true;
     passwordInput.disabled = true;
 
     try {
-        await window.firebaseAuth.signIn(password);
+        await window.firebaseAuth.signIn(pseudo, password);
         // Le callback onAuthStateChanged dans le module Firebase gère la suite
         // (masquer l'écran, lancer l'app)
     } catch (e) {
         // Restaurer le formulaire
+        if (pseudoInput) pseudoInput.disabled = false;
         passwordInput.disabled = false;
         if (busyEl) busyEl.style.display = 'none';
         if (btn) btn.style.display = 'inline-flex';
         passwordInput.focus();
         passwordInput.select();
 
-        // Traduire les erreurs Firebase en français sans révéler l'email technique
+        // Traduire les erreurs Firebase en français sans révéler l'adresse technique
         const code = e?.code || '';
         let message = 'Erreur de connexion.';
         if (code === 'auth/wrong-password' || code === 'auth/invalid-credential' || code === 'auth/user-not-found') {
-            message = 'Mot de passe incorrect.';
+            message = 'Identifiant ou mot de passe incorrect.';
         } else if (code === 'auth/too-many-requests') {
             message = 'Trop de tentatives. Réessayez plus tard.';
         } else if (code === 'auth/network-request-failed' || code === 'auth/internal-error') {
             message = 'Erreur réseau. Vérifiez votre connexion.';
-        } else if (code === 'auth/invalid-email') {
-            message = 'Identifiant invalide.';
+        } else if (code === 'auth/invalid-email' || code === 'auth/invalid-pseudo') {
+            message = 'Identifiant invalide (lettres, chiffres, point, tiret).';
+        } else if (code === 'auth/user-disabled') {
+            message = 'Ce compte est désactivé. Contactez l\'administrateur.';
         } else {
-            message = 'Erreur de connexion. Vérifiez votre mot de passe et votre réseau.';
+            message = 'Erreur de connexion. Vérifiez votre identifiant, votre mot de passe et votre réseau.';
         }
         if (errorEl) { errorEl.textContent = message; errorEl.style.display = 'block'; }
         console.error('[Login]', code, e?.message);
@@ -15566,6 +15618,16 @@ window.handleLogout = async () => {
 const initLoginListeners = () => {
     const btn = document.getElementById('loginBtn');
     if (btn) btn.addEventListener('click', window.handleLogin);
+
+    const pseudoInput = document.getElementById('loginPseudo');
+    if (pseudoInput) {
+        pseudoInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                window.handleLogin();
+            }
+        });
+    }
 
     const passwordInput = document.getElementById('loginPassword');
     if (passwordInput) {

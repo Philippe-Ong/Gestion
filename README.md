@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.5**
+**v12.6**
 
 ## Adresse
 
@@ -117,6 +117,16 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.6
+
+- **👤 Comptes nominatifs (pseudo + mot de passe)** — L'écran de connexion demande désormais un **identifiant** en plus du mot de passe. Chaque membre a son propre compte Firebase : plus de mot de passe partagé.
+  - Le pseudo est converti en adresse technique `<pseudo>@thecol.ch`, jamais affichée.
+  - L'ancien compte `gestion` reste valide : saisir `gestion` comme identifiant.
+  - Le pseudo connecté apparaît dans **Paramètres → Compte**.
+  - Chaque écriture Firestore porte `updatedBy` (qui a modifié) — hors `record`, donc sans effet sur la fusion.
+  - Les accès sont contrôlés par une allowlist `members/<UID>` : révoquer = `actif: false`.
+  - ⚠️ **Configuration manuelle requise** : créer les comptes et publier les nouvelles règles Firestore **avant** de déployer (voir `SPEC.md` §7).
 
 ### Nouveautés v12.5
 

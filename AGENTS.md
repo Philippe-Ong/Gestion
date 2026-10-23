@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.5
+**Current Version:** v12.6
 
 ## 1. Build, Lint, and Test Commands
 
@@ -138,24 +138,26 @@ Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync
 - **Force sync:** `window.forceFirebaseSync()` — in V11 mode, flushes queue, reloads records, restarts listeners
 - **Debug:** `window.v11Debug` exposes `getQueue()`, `flushQueue()`, `mergeOp()`, `runMigration()`, `status()`
 
-#### Authentification Firebase (v11.2)
+#### Authentification Firebase — comptes nominatifs (v12.6)
 
-L'application utilise Firebase Auth avec la méthode **Email/Password** et un compte technique fixe `gestion@thecol.ch` :
-- L'email est défini comme constante dans `index.html` (`FIREBASE_AUTH_EMAIL`), jamais affiché dans l'UI.
-- Le mot de passe est saisi par l'utilisateur via l'écran de verrouillage — **jamais stocké dans le dépôt**.
+Chaque membre a son propre compte Firebase Auth (Email/Password). L'écran de verrouillage demande un **pseudo** et un mot de passe :
+- Le pseudo est converti en adresse technique `<pseudo>@thecol.ch` (minuscules, accents retirés, espaces → points, `[a-z0-9._-]`). Ces adresses ne sont pas des boîtes mail.
+- L'ancien compte `gestion@thecol.ch` reste valide via le pseudo `gestion`.
+- Le pseudo connecté est exposé par `window.currentPseudo` et inscrit dans `updatedBy` sur chaque document Firestore (hors `record`, donc jamais source de conflit de fusion).
+- Le mot de passe n'est **jamais stocké dans le dépôt**.
 - La session est persistée via `browserLocalPersistence` (IndexedDB).
 - `window.firebaseReady` ne devient `true` qu'après une session active.
 - Le shell est verrouillé par la classe CSS `body--locked` tant que l'utilisateur n'est pas connecté.
-- Fonctions exposées : `window.firebaseAuth.signIn(password)`, `window.firebaseAuth.signOut()`.
-- Bouton Déconnexion : en-tête + Paramètres > Compte.
+- Fonctions exposées : `window.firebaseAuth.signIn(pseudo, password)`, `window.firebaseAuth.signOut()`, `window.firebaseAuth.pseudo()`.
+- Bouton Déconnexion : en-tête + Paramètres > Compte (qui affiche le pseudo connecté).
 
-**Procédure de configuration manuelle** (console Firebase — voir détails complets dans `SPEC.md` §7) :
+**Procédure de configuration manuelle** (console Firebase — détails complets dans `SPEC.md` §7) :
 1. Activer Email/Password dans Authentication > Sign-in method.
-2. Créer l'utilisateur `gestion@thecol.ch` avec un mot de passe fort.
-3. Récupérer l'UID depuis la liste des utilisateurs.
-4. Publier des règles Firestore limitées à cet UID (ne pas inventer l'UID — utiliser le placeholder `UID_DU_COMPTE_TECHNIQUE`).
+2. Créer un utilisateur `<pseudo>@thecol.ch` par membre, avec un mot de passe fort.
+3. Créer un document `members/<UID>` = `{ "pseudo": "<pseudo>", "actif": true }` (UID visible dans la liste des utilisateurs).
+4. Publier les règles Firestore ci-dessous **avant** de déployer le code.
 
-#### Firestore rules — authentification Email/Password
+#### Firestore rules — comptes nominatifs
 
 Les règles Firestore doivent être mises à jour manuellement dans la console Firebase — ce dépôt ne les déploie pas :
 
@@ -163,27 +165,32 @@ Les règles Firestore doivent être mises à jour manuellement dans la console F
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // V11 per-record storage
-    match /tables/{table}/records/{record} {
-      allow read, write: if request.auth != null
-        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+    // Allowlist : indispensable car la création de compte par API reste ouverte côté Auth.
+    function isMember() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/members/$(request.auth.uid))
+        && get(/databases/$(database)/documents/members/$(request.auth.uid)).data.actif == true;
     }
-    // Migration lock + schema status
+    match /tables/{table}/records/{record} {
+      allow read, write: if isMember();
+    }
     match /syncMeta/{document} {
-      allow read, write: if request.auth != null
-        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+      allow read, write: if isMember();
+    }
+    match /members/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false; // gestion depuis la console uniquement
     }
     // Legacy — nécessaire temporairement PENDANT la migration
     // À SUPPRIMER après migration de toutes les tables
     match /data/{table} {
-      allow read, write: if request.auth != null
-        && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+      allow read, write: if isMember();
     }
   }
 }
 ```
 
-⚠️ **Configuration manuelle indispensable** : sans ces étapes, la connexion échouera ou les règles resteront ouvertes.
+⚠️ **Configuration manuelle indispensable** : sans `members/<UID>` actif, un membre authentifié est refusé par Firestore. Révoquer un accès = `actif: false`.
 
 ### Unit System
 Standardized unit handling for ingredients and inventory:

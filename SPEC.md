@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.5
+**Version:** v12.6
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -87,6 +87,7 @@ Un document par enregistrement métier. Chaque document contient :
 {
   "record": { "id": "string", ... /* les champs métier */ },
   "updatedAt": "string (ISO datetime)",
+  "updatedBy": "string (pseudo du membre — hors record, ne participe pas à la fusion)",
   "_version": "number (timestamp, utilisé pour le conflit)"
 }
 ```
@@ -546,52 +547,61 @@ Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaq
 - localStorage pour persistance locale
 - Firebase Firestore v12.16.0 pour synchronisation cloud optionnelle
 - Three.js 0.185.1 (licence MIT) embarqué dans `vendor/three/` pour le jumeau 3D — les modules complémentaires (`OrbitControls.js`, post-traitement `EffectComposer`/`RenderPass`/`GTAOPass`/`OutputPass` et leurs shaders) importent `./three.module.min.js` et leurs voisins en chemins relatifs (imports réécrits, arborescence aplatie, pas d'importmap)
-- **Firebase Auth — Authentification par mot de passe partagé (Email/Password) :**
-  - L'application utilise un compte technique fixe `gestion@thecol.ch` (Email/Password).
-  - L'adresse email n'est jamais affichée dans l'interface utilisateur — elle est définie comme constante `FIREBASE_AUTH_EMAIL` dans le module Firebase d'`index.html`.
-  - Le mot de passe est saisi par l'utilisateur via l'écran de verrouillage (connexion). **Il n'est jamais stocké dans le code ni dans le dépôt.**
-  - La session est persistée via `browserLocalPersistence` (IndexedDB) : l'utilisateur reste connecté entre les visites tant que le SDK Firebase est en cache.
-  - **Limites :** mot de passe partagé, pas d'audit individuel (tous les utilisateurs partagent la même identité Firestore). L'email ne doit pas être changé sans mettre à jour la constante dans `index.html` et les règles Firestore.
-  - Un bouton « Déconnexion » est accessible dans l'en-tête et dans la page Paramètres > Compte.
+- **Firebase Auth — comptes nominatifs (pseudo + mot de passe) depuis v12.6 :**
+  - Chaque membre possède son propre compte Firebase Auth (Email/Password).
+  - L'utilisateur saisit un **pseudo** et un mot de passe ; le pseudo est converti en adresse technique `<pseudo>@thecol.ch` (normalisation : minuscules, accents retirés, espaces → points, caractères `[a-z0-9._-]`). Ces adresses n'ont pas besoin d'exister comme boîtes mail.
+  - Le pseudo est inscrit sur chaque écriture Firestore dans le champ `updatedBy`, au niveau du document (hors `record` : il ne participe pas à la fusion et ne crée donc jamais de conflit).
+  - Le pseudo connecté est affiché dans **Paramètres → Compte**.
+  - **Compatibilité :** l'ancien compte technique `gestion@thecol.ch` reste utilisable en saisissant le pseudo `gestion`. Aucun utilisateur n'est verrouillé par la migration.
+  - La session est persistée via `browserLocalPersistence` (IndexedDB).
+  - Un bouton « Déconnexion » est accessible dans l'en-tête et dans Paramètres → Compte.
 
-- **Procédure manuelle — Configuration Firebase Console (obligatoire avant mise en ligne) :**
-  1. Aller dans **Firebase Console → Authentication → Sign-in method** et activer **Email/Password**.
-  2. Aller dans **Authentication → Users** et cliquer **Ajouter un utilisateur**.
-     - Email : `gestion@thecol.ch`
-     - Mot de passe : choisir un mot de passe fort (jamais commité). Le communiquer séparément aux utilisateurs.
-  3. Après création, récupérer **l'UID** de ce compte (visible dans la liste des utilisateurs).
-  4. Aller dans **Firestore → Rules** et remplacer par les règles ci-dessous :
+- **Procédure manuelle — Configuration Firebase Console (obligatoire AVANT de déployer cette version) :**
+  1. **Authentication → Sign-in method** : activer **Email/Password**.
+  2. **Authentication → Users → Ajouter un utilisateur**, pour chaque membre :
+     - Email : `<pseudo>@thecol.ch` (ex. `julie@thecol.ch`)
+     - Mot de passe : fort, jamais commité, communiqué séparément.
+  3. **Firestore → Data** : créer un document `members/<UID>` par membre (l'UID est visible dans la liste des utilisateurs) :
+     ```json
+     { "pseudo": "julie", "actif": true }
+     ```
+     Sans ce document, l'accès Firestore est refusé (règle `isMember()`).
+  4. **Firestore → Rules** : remplacer par les règles ci-dessous :
      ```firestore
      rules_version = '2';
-     // REMPLACER « UID_DU_COMPTE_TECHNIQUE » par l'UID réel récupéré à l'étape 3.
-     // Exemple : allow read, write: if request.auth.uid == 'abc123def456';
      service cloud.firestore {
        match /databases/{database}/documents {
-         // V11 — accès par enregistrement
+         // Seuls les comptes explicitement listés dans members/ peuvent lire/écrire.
+         // Indispensable : la création de compte par API reste ouverte côté Firebase Auth.
+         function isMember() {
+           return request.auth != null
+             && exists(/databases/$(database)/documents/members/$(request.auth.uid))
+             && get(/databases/$(database)/documents/members/$(request.auth.uid)).data.actif == true;
+         }
          match /tables/{table}/records/{record} {
-           allow read, write: if request.auth != null
-             && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+           allow read, write: if isMember();
          }
-         // Verrou de migration et statut schéma
          match /syncMeta/{document} {
-           allow read, write: if request.auth != null
-             && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+           allow read, write: if isMember();
          }
-         // Legacy — nécessaire temporairement PENDANT la migration
-         // (lecture des données cloud legacy + push dirty avant one-shot migration).
+         match /members/{uid} {
+           allow read: if request.auth != null && request.auth.uid == uid;
+           allow write: if false; // gestion depuis la console uniquement
+         }
+         // Legacy — nécessaire temporairement PENDANT la migration.
          // À SUPPRIMER APRÈS MIGRATION de toutes les tables.
          match /data/{table} {
-           allow read, write: if request.auth != null
-             && request.auth.uid == 'UID_DU_COMPTE_TECHNIQUE';
+           allow read, write: if isMember();
          }
        }
      }
      ```
      ⚠️ **Ces règles ne sont pas déployées automatiquement** — ce dépôt ne contient pas de script de déploiement Firestore. La mise à jour est manuelle dans la console.
-  5. **(Recommandé)** Activer **App Check** dans Firebase Console (reCAPTCHA ou DeviceCheck) pour une défense complémentaire contre les appels non autorisés à Firestore, même avec un UID connu.
+     ⚠️ **Publier les règles AVANT de déployer le code** : tant qu'elles limitent l'accès à un seul UID, les autres membres sont refusés. Et tant que `members/<UID>` n'existe pas pour un membre, il est refusé.
+  5. **(Recommandé)** Activer **App Check** dans Firebase Console (reCAPTCHA ou DeviceCheck) pour une défense complémentaire contre les appels non autorisés à Firestore.
   6. **Après migration** de toutes les tables vers le schéma V11 (`tables/{table}/records/{record}`), retirer la règle `match /data/{table}`.
 
-- **Configuration manuelle indispensable :** si les étapes 1-4 ne sont pas exécutées avant le déploiement, la connexion échouera (Email/Password désactivé) ou les règles resteront ouvertes (risque de sécurité). L'application ne fonctionnera pas sans authentification.
+- **Révoquer un membre :** passer `actif` à `false` dans `members/<UID>` (accès Firestore coupé immédiatement) puis désactiver ou supprimer le compte dans Authentication.
 
 - **Stress-test retiré :** `stress-test.js` a été exclu des fichiers copiés vers `www/` (`scripts/copy-web.js`) et n'est plus chargé même en localhost. Le stress test n'est plus disponible dans l'application.
 
