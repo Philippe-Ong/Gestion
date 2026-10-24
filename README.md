@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.4**
+**v12.5**
 
 ## Adresse
 
@@ -117,6 +117,17 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.5
+
+Jumeau 3D fluide sur téléphone :
+
+- **📱 Économie par défaut sur téléphones et tablettes** — En Auto, tous les téléphones et tablettes démarrent en Économie (rendu direct sans occlusion ambiante) ; Standard et Haute restent disponibles dans le menu ✦. Auparavant, les iPhone et les Android récents recevaient Standard, trop lourd pour eux.
+- **🔋 Plus de rendu en continu** — En Économie, les animations d'ambiance (halos qui pulsent, vapeur, lueur des plaques) sont figées : la scène n'est redessinée que si la caméra bouge ou si les données changent (avant : environ 30 images par seconde en permanence dès qu'une alerte existait). Standard les limite à 15 i/s, Haute à 30 i/s.
+- **🐢 Gestes fluides** — Correction d'un bug qui doublait le nombre de rendus à chaque image tant que la caméra glissait après un geste (jusqu'à 30 rendus dans une même image, l'écran se figeait après chaque balayage). Une mise à jour des données sans changement visible ne relance plus 1 s de rendu continu.
+- **Auto vraiment adaptatif** — La baisse automatique de qualité se déclenche après 1,5 s de mouvements saccadés (cumulées d'un geste à l'autre) au lieu d'exiger près de 4 s de mouvement continu, et l'Économie réduit encore la définition si besoin.
+- **Interface allégée en Économie** — Plus de flou d'arrière-plan sur les boutons, indicateurs et panneaux posés sur la vue 3D (recalculé à chaque image, très coûteux sur mobile).
+- **Ouverture** — Les shaders sont compilés en arrière-plan avant la première image et l'indicateur « Construction de l'atelier 3D… » reste affiché jusqu'à ce que l'atelier apparaisse.
 
 ### Nouveautés v12.4
 

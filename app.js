@@ -3882,6 +3882,7 @@ const Twin = {
     focusZone: 'overview',
     tween: null,
     raf: 0,
+    warming: false,
     needsRender: true,
     pointer: null,
     pointerDirty: false,
@@ -3893,7 +3894,9 @@ const Twin = {
     viewOffsetTarget: { x: 0, y: 0 },
     quality: null,
     autoQuality: null,
-    perf: { last: 0, avg: 0, frames: 0 },
+    dprCap: 0,
+    perf: { last: 0, smooth: false, time: 0, frames: 0, slow: 0 },
+    labelsKey: '',
     geo: {},
     mats: {},
     variants: new Map(),
@@ -3957,10 +3960,12 @@ const twinCssColor = (name, fallback) => {
 };
 
 // --- Qualité du rendu : choisie selon l'appareil (Auto) ou imposée depuis le jumeau ---
+// ambient : cadence max. (i/s) des animations d'ambiance (pulsations, vapeur) ; 0 = figées, la scène
+// n'est redessinée que lorsqu'elle change (caméra, données)
 const TWIN_QUALITY_LEVELS = {
-    low: { label: 'Économie', hint: 'Téléphones modestes : sans occlusion ambiante', dpr: 1.25, shadow: 1024, ao: 0, tex: 256, segments: 12, steam: 8 },
-    medium: { label: 'Standard', hint: 'Occlusion ambiante en demi-résolution', dpr: 1.6, shadow: 2048, ao: 0.5, tex: 512, segments: 20, steam: 14 },
-    high: { label: 'Haute', hint: 'Ordinateurs : tous les effets', dpr: 2, shadow: 4096, ao: 1, tex: 1024, segments: 28, steam: 20 }
+    low: { label: 'Économie', hint: 'Téléphones et tablettes : sans occlusion ambiante ni animations', dpr: 1.25, shadow: 1024, ao: 0, tex: 256, segments: 12, steam: 8, ambient: 0 },
+    medium: { label: 'Standard', hint: 'Occlusion ambiante en demi-résolution', dpr: 1.6, shadow: 2048, ao: 0.5, tex: 512, segments: 20, steam: 14, ambient: 15 },
+    high: { label: 'Haute', hint: 'Ordinateurs : tous les effets', dpr: 2, shadow: 4096, ao: 1, tex: 1024, segments: 28, steam: 20, ambient: 30 }
 };
 const TWIN_QUALITY_ORDER = ['low', 'medium', 'high'];
 
@@ -3973,11 +3978,8 @@ const twinDetectQuality = () => {
     const mq = (q) => !!window.matchMedia?.(q).matches;
     const handheld = (mq('(pointer: coarse)') && !mq('(pointer: fine)')) || mq('(max-width: 768px)');
     const gpu = Twin.gpu || '';
-    if (/swiftshader|llvmpipe|software|basic render/i.test(gpu)) return 'low';
-    if (handheld) {
-        const capable = /apple/i.test(gpu) || ((navigator.deviceMemory || 4) >= 6 && /adreno|mali-g[7-9]|xclipse|immortalis/i.test(gpu));
-        return capable ? 'medium' : 'low';
-    }
+    // Téléphones et tablettes, même récents : l'occlusion ambiante et le rendu continu les saturent
+    if (handheld || /swiftshader|llvmpipe|software|basic render/i.test(gpu)) return 'low';
     if (/intel|uhd|iris|mali|adreno|powervr/i.test(gpu) && !/\barc\b/i.test(gpu)) return 'medium';
     return 'high';
 };
@@ -3988,6 +3990,18 @@ const twinResolveQuality = () => {
     if (!Twin.autoQuality) Twin.autoQuality = twinDetectQuality();
     return Twin.autoQuality;
 };
+
+// Définition du rendu : plafonnée par la qualité, puis à 1 si l'Économie reste saccadée (Auto uniquement)
+const twinPixelRatio = () => Math.min(window.devicePixelRatio || 1, Twin.quality.dpr, (Twin.quality.setting === 'auto' && Twin.dprCap) || Infinity);
+
+const twinRefreshPixelRatio = () => {
+    if (!Twin.renderer || Twin.renderer.getPixelRatio() === twinPixelRatio()) return;
+    Twin.renderer.setPixelRatio(twinPixelRatio());
+    twinResize();
+};
+
+// Économie : pas de flou d'arrière-plan sur le HUD (recalculé à chaque image du canvas, très coûteux sur mobile)
+const twinSyncLiteClass = () => Twin.container?.classList.toggle('twin--lite', Twin.quality?.level === 'low');
 
 // --- Géométries et matériaux partagés (mis en cache, libérés à chaque reconstruction du monde) ---
 const twinGeo = (key, factory) => Twin.geo[key] || (Twin.geo[key] = factory());
@@ -5031,7 +5045,7 @@ const twinBuildWorld = () => {
     const { THREE } = Twin.lib;
     const level = twinResolveQuality();
     Twin.quality = { setting: twinQualitySetting(), level, ...TWIN_QUALITY_LEVELS[level] };
-    Twin.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Twin.quality.dpr));
+    Twin.renderer.setPixelRatio(twinPixelRatio());
     const scene = new THREE.Scene();
     Twin.scene = scene;
     scene.background = twinSkyTexture();
@@ -5084,6 +5098,8 @@ const twinApplyQuality = () => {
     const target = Twin.controls.target.clone();
     twinDisposeWorld();
     twinBuildWorld();
+    twinSyncLiteClass();
+    Object.assign(Twin.perf, { smooth: false, time: 0, frames: 0, slow: 0 });
     twinResize();
     if (Twin.model && Twin.container) {
         twinBuildDynamic(Twin.model);
@@ -5094,7 +5110,7 @@ const twinApplyQuality = () => {
     Twin.controls.target.copy(target);
     Twin.controls.update();
     twinRenderQualityMenu();
-    twinWake();
+    twinWarmUp();
 };
 
 const twinInitEngine = () => {
@@ -5969,10 +5985,12 @@ const twinSetLiquid = (mesh, base, radius, h) => {
 
 const twinAddFill = (id, targets, fill) => {
     const from = Twin.prevFill.has(id) ? Twin.prevFill.get(id) : fill;
+    // Niveau inchangé (re-rendu sans modification) : aucune animation, donc aucun rendu continu
+    const animate = from !== fill && !twinReducedMotion();
     const start = performance.now();
     targets.forEach(t => {
-        Twin.fills.push({ ...t, from, to: fill, start });
-        twinSetLiquid(t.mesh, t.base, t.radius, Math.max(0.002, (twinReducedMotion() ? fill : from) * t.maxH));
+        if (animate) Twin.fills.push({ ...t, from, to: fill, start });
+        twinSetLiquid(t.mesh, t.base, t.radius, Math.max(0.002, (animate ? from : fill) * t.maxH));
     });
     Twin.prevFill.set(id, fill);
 };
@@ -6522,6 +6540,7 @@ const twinBuildLabels = (model) => {
     const { THREE } = Twin.lib;
     Twin.labelsEl.innerHTML = '';
     Twin.labels = [];
+    Twin.labelsKey = '';
     const k = model.kpis;
     const zoneSub = {
         production: k.aProduireL > 0 ? `${twinFmtLitres(k.aProduireL)} · ${k.postesOccupes}/${k.postesTotal} postes${k.enAttente ? ` · +${k.enAttente}` : ''}` : 'Rien à produire',
@@ -6564,6 +6583,10 @@ const twinBuildLabels = (model) => {
 
 const twinUpdateLabels = () => {
     if (!Twin.labelsEl || !Twin.labels.length) return;
+    // Caméra et cadre inchangés (animations d'ambiance seules) : aucune écriture dans le DOM
+    const key = `${Twin.size?.w}x${Twin.size?.h}|${Twin.camera.matrixWorld.elements}|${Twin.camera.projectionMatrix.elements}|${Twin.controls.target.toArray()}`;
+    if (key === Twin.labelsKey) return;
+    Twin.labelsKey = key;
     const w = Twin.labelsEl.clientWidth;
     const h = Twin.labelsEl.clientHeight;
     const v = Twin.tmp;
@@ -6738,12 +6761,40 @@ const twinCycle = (dir) => {
 // --- Boucle de rendu (à la demande : s'arrête quand rien ne bouge) ---
 const twinWake = () => {
     Twin.needsRender = true;
-    if (!Twin.raf && Twin.container?.isConnected && Twin.renderer) {
+    if (!Twin.raf && !Twin.warming && Twin.container?.isConnected && Twin.renderer) {
         Twin.raf = requestAnimationFrame(twinFrame);
     }
 };
 
+// Shaders compilés en arrière-plan (KHR_parallel_shader_compile) avant la première image : sans cela, le
+// premier rendu bloque l'interface le temps de toutes les compilations (plusieurs secondes sur téléphone).
+// Se résout une fois la première image dessinée ; délai de garde de 5 s.
+const twinWarmUp = () => new Promise(resolve => {
+    const r = Twin.renderer;
+    const pending = r.compile(Twin.scene, Twin.camera);
+    const deadline = performance.now() + 5000;
+    const poll = () => {
+        pending.forEach(mat => {
+            const program = r.properties.get(mat).currentProgram;
+            if (!program || program.isReady()) pending.delete(mat);
+        });
+        if (pending.size && performance.now() < deadline) {
+            Twin.warming = true;
+            setTimeout(poll, 16);
+            return;
+        }
+        Twin.warming = false;
+        twinWake();
+        requestAnimationFrame(() => resolve());
+    };
+    poll();
+});
+
 const twinEase = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+
+// Animations d'ambiance (pulsations, lueur des plaques, vapeur, repère de sélection) : figées en Économie
+const twinAmbientActive = () => !!Twin.quality?.ambient && !twinReducedMotion()
+    && (Twin.pulsing || Twin.glowing || Twin.steam.length > 0 || !!Twin.pin?.visible);
 
 const twinAnimate = (now) => {
     let active = false;
@@ -6789,7 +6840,7 @@ const twinAnimate = (now) => {
         twinApplyViewOffset();
         active = true;
     }
-    if (twinReducedMotion()) return active;
+    if (!twinAmbientActive()) return active;
     if (Twin.pulsing) {
         const k = (Math.sin(now / 320) + 1) / 2;
         Twin.pulseMats.forEach(mat => {
@@ -6819,46 +6870,67 @@ const twinFrame = (now) => {
         twinSuspend();
         return;
     }
+    // Compilation en cours : twinWarmUp relancera la boucle
+    if (Twin.warming) return;
     const moved = Twin.tween ? false : Twin.controls.update();
     const smooth = moved || twinViewOffsetPending() || !!(Twin.tween || Twin.fills.length || Twin.flashes.length || Twin.controls.autoRotate);
-    // Animations d'ambiance (pulsations, vapeur) limitées à ~30 i/s pour la batterie
-    if (!smooth && !Twin.needsRender && !Twin.pointerDirty && now - (Twin.lastFrame || 0) < 33) {
-        Twin.raf = requestAnimationFrame(twinFrame);
-        return;
+    twinMonitorPerf(now, smooth);
+    // Image inchangée hors animations d'ambiance : celles-ci sont cadencées par la qualité, sinon la boucle s'arrête
+    if (!smooth && !Twin.needsRender && !Twin.pointerDirty) {
+        if (!twinAmbientActive()) return;
+        if (now - (Twin.lastFrame || 0) < 1000 / Twin.quality.ambient) {
+            if (!Twin.raf) Twin.raf = requestAnimationFrame(twinFrame);
+            return;
+        }
     }
     const active = twinAnimate(now) || smooth;
     if (Twin.pointerDirty) twinUpdateHover();
-    twinMonitorPerf(now, smooth);
     Twin.lastFrame = now;
     twinUpdateCutaways();
     twinRender();
     twinUpdateLabels();
     Twin.needsRender = false;
-    if (active) Twin.raf = requestAnimationFrame(twinFrame);
+    // controls.update() a pu déjà replanifier l'image suivante (événement « change » → twinWake) :
+    // en demander une seconde doublerait les rendus à chaque image tant que la caméra glisse
+    if (active && !Twin.raf) Twin.raf = requestAnimationFrame(twinFrame);
 };
 
-// Qualité Auto : si les mouvements de caméra restent saccadés (moins de ~24 i/s), on descend d'un niveau
+// Qualité Auto : si les mouvements de caméra restent saccadés (plus de 60 % des images sous ~24 i/s sur 1,5 s
+// de mouvement, cumulées d'un geste à l'autre), on descend d'un niveau, puis on réduit la définition en Économie.
+// Les à-coups isolés (compilation des shaders, ombres recalculées) ne suffisent pas à déclencher la baisse.
 const twinMonitorPerf = (now, smooth) => {
     const perf = Twin.perf;
     const dt = now - perf.last;
+    const chained = smooth && perf.smooth;
     perf.last = now;
-    if (!smooth || dt > 120 || Twin.quality?.setting !== 'auto' || Twin.quality.level === 'low') {
-        if (!smooth) perf.frames = 0;
-        return;
-    }
-    perf.avg = perf.frames ? perf.avg * 0.92 + dt * 0.08 : dt;
+    perf.smooth = smooth;
+    if (!chained || dt > 1000 || Twin.quality?.setting !== 'auto') return;
+    perf.time += dt;
     perf.frames++;
-    if (perf.frames > 90 && perf.avg > 42) {
-        perf.frames = 0;
-        Twin.autoQuality = TWIN_QUALITY_ORDER[TWIN_QUALITY_ORDER.indexOf(Twin.quality.level) - 1];
-        showToast(`Qualité 3D réduite (${TWIN_QUALITY_LEVELS[Twin.autoQuality].label}) pour rester fluide`, 'warning');
+    if (dt > 42) perf.slow++;
+    if (perf.time < 1500 || perf.frames < 8) return;
+    const choppy = perf.slow / perf.frames > 0.6;
+    Object.assign(perf, { time: 0, frames: 0, slow: 0 });
+    if (choppy) twinStepDown();
+};
+
+const twinStepDown = () => {
+    const lower = TWIN_QUALITY_ORDER[TWIN_QUALITY_ORDER.indexOf(Twin.quality.level) - 1];
+    if (lower) {
+        Twin.autoQuality = lower;
+        showToast(`Qualité 3D réduite (${TWIN_QUALITY_LEVELS[lower].label}) pour rester fluide`, 'warning');
         setTimeout(twinApplyQuality, 0);
+    } else if (Twin.renderer.getPixelRatio() > 1) {
+        Twin.dprCap = 1;
+        twinRefreshPixelRatio();
+        showToast('Définition 3D réduite pour rester fluide', 'warning');
     }
 };
 
 const twinSuspend = () => {
     if (Twin.raf) cancelAnimationFrame(Twin.raf);
     Twin.raf = 0;
+    Twin.perf.smooth = false;
     Twin.resizeObserver?.disconnect();
     Twin.container = null;
     Twin.labelsEl = null;
@@ -6928,6 +7000,7 @@ const twinRefreshViewOffset = ({ instant = false } = {}) => {
 const twinMount = (root) => {
     if (!Twin.renderer) twinInitEngine();
     Twin.container = root;
+    twinSyncLiteClass();
     Twin.labelsEl = root.querySelector('.twin-labels');
     Twin.tooltipEl = root.querySelector('.twin-tooltip');
     root.querySelector('.twin-stage').appendChild(Twin.renderer.domElement);
@@ -7241,7 +7314,7 @@ const twinRenderInspector = ({ focus = false } = {}) => {
 
 const twinShowFallback = (root, reason) => {
     root.classList.add('twin--fallback', 'is-panel-open');
-    root.classList.remove('is-panel-closed');
+    root.classList.remove('is-panel-closed', 'is-loading');
     const stage = root.querySelector('.twin-stage');
     if (stage) {
         stage.innerHTML = `<div class="twin-fallback">
@@ -7279,13 +7352,17 @@ const renderJumeau = () => {
     }
     root.classList.add('is-loading');
     twinLoadLibrary().then(() => {
-        if (!root.isConnected) return;
-        root.classList.remove('is-loading');
-        document.getElementById('twinLoading')?.remove();
+        if (!root.isConnected) return null;
         twinMount(root);
         twinApplyModel(Twin.model);
         if (Twin.selectedId) twinFlyTo(twinViewForObject(Twin.selectedId), 0);
         twinRenderInspector();
+        // Le chargement reste affiché jusqu'à la première image
+        return twinWarmUp();
+    }).then(() => {
+        if (!root.isConnected) return;
+        root.classList.remove('is-loading');
+        document.getElementById('twinLoading')?.remove();
     }).catch(err => {
         console.error('Jumeau 3D : chargement impossible', err);
         if (root.isConnected) twinShowFallback(root, 'load');
@@ -7418,7 +7495,10 @@ CLICK_HANDLERS['twin-quality'] = (el) => {
     DB.setFilter('twin_quality', value === 'auto' ? '' : value);
     twinCloseQualityMenu();
     if (Twin.renderer && Twin.quality && Twin.quality.level !== twinResolveQuality()) twinApplyQuality();
-    else if (Twin.quality) Twin.quality.setting = twinQualitySetting();
+    else if (Twin.quality) {
+        Twin.quality.setting = twinQualitySetting();
+        twinRefreshPixelRatio();
+    }
     showToast(`Qualité 3D : ${value === 'auto' ? `Auto (${TWIN_QUALITY_LEVELS[twinResolveQuality()].label})` : TWIN_QUALITY_LEVELS[value].label}`);
 };
 document.addEventListener('pointerdown', (e) => {

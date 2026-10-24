@@ -4023,6 +4023,13 @@ input[type="checkbox"] {
     --twin-kpi-h: 82px;
 }
 
+/* Qualité Économie (téléphones) : le flou d'arrière-plan serait recalculé à chaque image du canvas */
+.twin--lite {
+    --twin-glass: rgba(255, 255, 255, 0.94);
+    --twin-glass-strong: rgba(255, 255, 255, 0.985);
+    --twin-blur: none;
+}
+
 /* ── Transitions de page ─────────────────────────────────── */
 @keyframes contentEnter {
     from { opacity: 0; transform: translateY(6px); }
@@ -4311,6 +4318,9 @@ input[type="checkbox"] {
     background-size: 220% 100%;
     animation: twinShimmer 1.6s linear infinite;
 }
+
+/* Étiquettes positionnées à la première image seulement */
+.twin.is-loading .twin-labels { visibility: hidden; }
 
 @keyframes twinShimmer {
     to { background-position: -220% 0; }
