@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.6
+**Version:** v12.7
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -374,7 +374,12 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - **Mise en page** : requêtes de conteneur (`container: dash`) — 5 tuiles et cartes sur 2 colonnes quand la largeur le permet, 1 colonne sur téléphone.
 
 ### 3.2 Gestion du Stock
-- Tableau des lots avec filtres (arôme, format, statut)
+- Page organisée en quatre zones (v12.7) :
+  - **À traiter** : bandeau affiché seulement s'il y a une action (lots à écouler d'abord, bouteilles à produire, lots hors vente, lots dont l'arôme ou le format est absent des Paramètres)
+  - **Disponible à la vente** : tableau arôme × format (`buildStockOverview`, noms comparés par `normalizeName`) — bouteilles libres (vendables − réservées), réservées, à produire, signal « DLV proche » ; une case filtre les lots (filtre `stockCell`)
+  - **Lots vendables** : groupés par arôme × format, triés par DLV (FEFO), avec les commandes qui réservent ce stock ; actions « Sortie » et menu ⋯ (Tracer, Modifier, Supprimer)
+  - **Hors vente** : lots expirés, invendables, bloqués ou à quantité invalide, avec l'action adaptée (Sortir, Rappel, Modifier)
+- Réservation : les commandes ouvertes réservent le stock par date de livraison, les « produite » d'abord puis les « en attente » (même règle que « ✓ Stock ») ; c'est une prévision, la livraison choisit toujours ses lots. La modale « Sortie » affiche le stock libre et demande une confirmation si la sortie entame des bouteilles réservées (relecture des lots après la confirmation)
 - Ajouter nouveau lot
 - Statut par lot (DLV d'abord, repli DLC pour les lots sans DLV) : OK, DLV proche (< 7 j), Invendable (DLV dépassée, DLC valide), Expiré (DLC dépassée)
 - Durée de vie (`lotShelfLifeHtml`, aussi dans l'inspecteur du jumeau) : phrase « Vendable encore N j » / « DLV dépassée de N j » / « DLC dépassée de N j » et frise Prod. → DLV → DLC (vert : vente, jaune : DLV proche, gris puis rouge après la DLV) avec un repère « aujourd'hui »
@@ -477,8 +482,8 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 1. Nouveau lot: arôme, format, quantité, dates
 2. Mise à jour statut automatique (invendable si DLV passée, expiré si DLC passée)
 3. Historique de production
-4. Recherche par n° de lot (« 42 » ou « 000042 »), arôme ou format ; les lots épuisés sont retrouvés via les commandes, les BL et l'historique
-5. Filtre « Bloqué » (affiché dès qu'un lot est bloqué)
+4. Recherche par n° de lot (« 42 » ou « 000042 »), arôme ou format, sans tenir compte des accents ; la saisie est conservée telle quelle et la liste n'est re-rendue qu'après une pause, jamais pendant une composition (clavier prédictif) — même comportement dans l'Historique (`data-live-search`). Les lots épuisés sont retrouvés via les commandes, les BL et l'historique
+5. Lots bloqués rangés dans « Hors vente » (v12.7)
 
 ### Traçabilité des bouteilles (v11.12)
 

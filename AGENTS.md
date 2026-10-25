@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.6
+**Current Version:** v12.7
 
 ## 1. Build, Lint, and Test Commands
 
@@ -56,7 +56,7 @@ The `navigateTo(page)` function looks up the page name in a views map and calls 
 **Page Descriptions:**
 - `jumeau` - Jumeau numérique 3D de l'atelier (accueil depuis v12.0), rendu « maquette » des vraies pièces depuis v12.3 : labo (cuves, plaques), stock, expédition, réserve et chambre froide (consommables), vestiaire (équipe) ; inspecteur avec actions directes, menu de qualité du rendu
 - `dashboard` - Cockpit du jour (v12.6) : tuiles cliquables, priorités, livraisons sur 7 jours, production à lancer sur les postes de l'atelier, équipe, tâches ; puis « Chiffres & tendances » (CA ou bouteilles livrés sur 12 semaines / 12 mois, meilleurs clients, ventes par arôme). Lecture seule, réutilise `buildTwinModel()`
-- `stock` - Gestion des lots, historique de production, statuts DLV/DLC
+- `stock` - Stock (v12.7) : bandeau « À traiter », tableau arôme × format des bouteilles libres / réservées / à produire (`buildStockOverview`), lots groupés par arôme × format triés par DLV, lots hors vente à part ; historique de production, statuts DLV/DLC
 - `pointage` - Saisie des heures employés avec tabs: pointage, historique, stats, employés
 - `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée)
 - `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF (design fidèle au template depuis v11.10)

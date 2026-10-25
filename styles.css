@@ -4368,6 +4368,300 @@ input[type="checkbox"] {
 }
 .lot-card-actions .btn { font-size: 10px; padding: 0 12px; min-height: 30px; }
 
+/* --- Stock (v12.7) : à traiter, tableau arôme × format, lots groupés --- */
+.stock-section { margin-bottom: 22px; }
+.stock-section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+    margin-bottom: 10px;
+}
+.stock-section-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    scroll-margin-top: calc(var(--header-height, 64px) + 16px);
+}
+.stock-section-meta {
+    font-size: 12px;
+    color: var(--text-light);
+    font-variant-numeric: tabular-nums;
+}
+.stock-hint {
+    margin: 8px 2px 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-light);
+}
+.stock-hint--top { margin: -2px 2px 10px; }
+.stock-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-neutral);
+    color: var(--text-light);
+    font-size: 10.5px;
+    font-weight: 600;
+    vertical-align: 1px;
+}
+
+.stock-matrix-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 -6px;
+}
+.stock-matrix {
+    width: 100%;
+    min-width: calc(120px + var(--stock-cols, 3) * 72px);
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 6px;
+}
+.stock-matrix-label { width: 30%; }
+/* Annule les styles globaux des tableaux */
+.stock-matrix th,
+.stock-matrix td {
+    padding: 0;
+    border: 0;
+    background: none;
+    vertical-align: middle;
+}
+.stock-matrix th { position: static; text-transform: none; letter-spacing: normal; }
+.stock-matrix tbody tr,
+.stock-matrix tbody tr:nth-child(even),
+.stock-matrix tbody tr:hover { background: none; }
+.stock-matrix thead th {
+    padding: 0 2px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-light);
+    text-align: center;
+}
+.stock-matrix tbody th {
+    padding: 0 2px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    text-align: left;
+}
+.stock-row-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.stock-row-label {
+    min-width: 0;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.stock-matrix tbody th .stock-tag { margin: 2px 0 0 20px; }
+.stock-cell {
+    width: 100%;
+    min-height: 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    padding: 6px 4px;
+    background: var(--white);
+    border: 1.5px solid var(--border-light);
+    border-radius: var(--radius-md);
+    font-family: inherit;
+    color: inherit;
+    text-align: center;
+    cursor: pointer;
+    transition: var(--transition);
+    -webkit-tap-highlight-color: transparent;
+}
+.stock-cell:hover { border-color: var(--border-strong); }
+.stock-cell:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.stock-cell.is-selected { border-color: var(--primary); background: var(--primary-tint); }
+.stock-cell.is-empty {
+    background: transparent;
+    border-style: dashed;
+    color: var(--text-lighter);
+    font-size: 16px;
+    cursor: default;
+}
+.stock-cell-value {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.1;
+    color: var(--primary);
+    font-variant-numeric: tabular-nums;
+}
+.stock-cell.is-short .stock-cell-value { color: var(--danger); }
+.stock-cell-sub {
+    font-size: 11px;
+    line-height: 1.25;
+    color: var(--text-light);
+}
+.stock-cell-sub.is-danger { color: var(--danger); font-weight: 600; }
+.stock-cell-sub.is-warning { color: var(--warning-dark); font-weight: 600; }
+
+.stock-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.stock-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 10px 0 12px;
+    border: 1px solid var(--primary);
+    border-radius: var(--radius-pill);
+    background: var(--primary-tint);
+    color: var(--primary-darker);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.stock-chip svg { width: 14px; height: 14px; }
+
+.stock-group {
+    background: var(--white);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    margin-bottom: 12px;
+}
+.stock-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px 8px;
+}
+.stock-group-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+}
+.stock-group-format { font-weight: 400; color: var(--text-light); }
+.stock-group-meta {
+    font-size: 12px;
+    color: var(--text-light);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.stock-resas { padding: 0 0 6px; }
+.stock-resa {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    width: 100%;
+    padding: 6px 14px;
+    background: none;
+    border: 0;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--text-light);
+    text-align: left;
+    cursor: pointer;
+}
+.stock-resa:hover { background: var(--bg-secondary); }
+.stock-resa:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.stock-resa-main { flex: 1; min-width: 160px; }
+.stock-resa-qty { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.stock-resa-qty.is-danger { color: var(--danger); }
+
+.stock-lot-list { list-style: none; margin: 0; padding: 0; }
+.stock-lot {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px 14px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-light);
+}
+.stock-group > .stock-lot-list:first-child > .stock-lot:first-child { border-top: none; }
+.stock-lot-id { display: flex; flex-direction: column; min-width: 0; }
+.stock-lot-num {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+.stock-lot-qty { font-size: 12px; color: var(--text-light); font-variant-numeric: tabular-nums; }
+.stock-lot-life { min-width: 0; }
+.stock-lot .shelf-life { margin: 0; }
+.stock-lot .shelf-life-text { font-size: 12.5px; margin-bottom: 5px; }
+.stock-lot-dates {
+    margin-top: 5px;
+    font-size: 11.5px;
+    color: var(--text-light);
+}
+.stock-lot-dates .badge { margin-left: 6px; vertical-align: 1px; }
+.stock-lot-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+}
+.stock-lot-reason { margin-top: 2px; font-size: 12.5px; font-weight: 600; color: var(--text-light); }
+.stock-lot-reason.is-danger { color: var(--danger); }
+.stock-lot-actions { display: flex; align-items: center; gap: 6px; }
+.stock-lot-actions .btn { min-height: 32px; padding: 0 12px; font-size: 12px; }
+.stock-lot-empty {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-light);
+    font-size: 13px;
+    color: var(--text-light);
+}
+.stock-lot.is-hors-vente .stock-lot-num { color: var(--text-light); }
+
+/* Menu « ⋯ » des lots */
+.lot-menu { position: relative; }
+.lot-menu > summary { list-style: none; cursor: pointer; }
+.lot-menu > summary::-webkit-details-marker { display: none; }
+.stock-lot-actions .lot-menu-btn { padding: 0 8px; }
+.lot-menu-btn svg { width: 16px; height: 16px; }
+.lot-menu-list {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    min-width: 160px;
+    padding: 4px;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+}
+.lot-menu.is-up .lot-menu-list { top: auto; bottom: calc(100% + 4px); }
+.lot-menu-list button {
+    padding: 9px 12px;
+    background: none;
+    border: 0;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+.lot-menu-list button:hover,
+.lot-menu-list button:focus-visible { background: var(--bg-secondary); outline: none; }
+.lot-menu-list button.is-danger { color: var(--danger); }
+
+@media (max-width: 480px) {
+    .stock-lot { grid-template-columns: minmax(0, 1fr) auto; }
+    .stock-lot-id { flex-direction: row; align-items: baseline; gap: 8px; }
+    .stock-lot-actions { grid-column: 2; grid-row: 1; }
+    .stock-lot-life { grid-column: 1 / -1; grid-row: 2; }
+    .stock-group-head { flex-wrap: wrap; }
+    .stock-group-meta { width: 100%; padding-left: 20px; }
+}
+
 /* --- Inventaire : ligne avec stepper (mobile) --- */
 .inv-section {
     background: var(--white);

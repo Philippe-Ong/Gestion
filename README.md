@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.6**
+**v12.7**
 
 ## Adresse
 
@@ -23,7 +23,8 @@ Application de gestion pour votre entreprise de thé froid.
 - Statut automatique: OK, DLV proche, Invendable (DLV dépassée), Expiré (DLC dépassée)
 - Vente de bouteilles (déstockage)
 - Historique de production
-- Résumé du stock vendable par arôme/format
+- Tableau arôme × format : bouteilles libres, réservées aux commandes et à produire
+- Lots groupés par arôme × format, triés par DLV ; lots hors vente à part
 
 ### Pointage
 - Saisie des heures de travail
@@ -117,6 +118,18 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.7
+
+Refonte de la page Stock : ce qui est libre, ce qui est promis, ce qui doit partir vite.
+
+- **🚨 À traiter** — Un bandeau qui n'apparaît que s'il y a quelque chose à faire : lots à écouler d'abord (DLV dans 7 jours ou moins), bouteilles à produire pour les commandes, lots hors vente, lots dont l'arôme ou le format est absent des Paramètres.
+- **📊 Disponible à la vente** — Un tableau arôme × format : les bouteilles libres en grand, puis les réservées, les « à produire » et un signal « DLV proche ». Les commandes ouvertes réservent le stock par date de livraison, les « produite » d'abord (même règle que « ✓ Stock ») ; cette réservation est une prévision, on choisit toujours les lots à la livraison. Une case filtre les lots.
+- **📦 Lots vendables** — Groupés par arôme × format et triés par DLV (le premier à sortir est signalé), avec les commandes qui réservent ce stock et ce qui manque. « Sortie » reste à portée de main ; Tracer, Modifier et Supprimer passent dans le menu « ⋯ ».
+- **🚫 Hors vente** — Les lots expirés, invendables, bloqués ou à quantité invalide sont rangés à part, avec l'action qui convient (Sortir, Rappel, Modifier).
+- **⚠️ Sortie de stock** — La fenêtre indique les bouteilles libres de l'arôme × format et prévient quand une sortie entame le stock réservé aux commandes ; l'enregistrement demande alors une confirmation.
+- **🔎 Recherche** — Stock et Historique : on peut de nouveau taper des espaces et des majuscules, la recherche ignore les accents et ne perturbe plus le clavier prédictif du téléphone.
+- **🔤 Noms d'arôme** — Le stock compare les noms sans tenir compte de la casse ni des accents : un lot « hibiscus » compte dans « Hibiscus ».
 
 ### Nouveautés v12.6
 
