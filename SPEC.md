@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.14
+**Version:** v13.1
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -39,7 +39,7 @@ Tableau JSON d'opérations en attente de synchronisation Firestore. Chaque opér
   "timestamp": "number (Date.now())",
   "knownVersion": "number|null (_version distant au moment du queuing)",
   "base": "object|null (état de référence capturé avant la modification locale — fusion à trois voies)",
-  "baseCaptured": "boolean (optionnel, true pour les opérations créées depuis v11.14)",
+  "baseCaptured": "boolean (optionnel, true pour les opérations créées depuis v13.1)",
   "blockedReason": "string (optionnel : remote-deleted|base-unknown|id-collision)",
   "blockedAt": "string (optionnel, date ISO du blocage)"
 }
@@ -75,7 +75,7 @@ Conséquences :
 - Un conflit réel (même champ modifié différemment) est signalé, jamais silencieux.
 - Une suppression locale n'est pas appliquée si le document a été modifié à distance
   depuis la `base` : l'enregistrement est rétabli et l'utilisateur averti.
-- Depuis v11.14, la base est capturée avant la modification locale, y compris avant
+- Depuis v13.1, la base est capturée avant la modification locale, y compris avant
   le premier chargement cloud. Elle n'est jamais remplacée par un état distant plus récent.
 - Une création porte explicitement `base: null` et `baseCaptured: true`. Une ancienne
   opération sans base fiable est bloquée ; elle ne remplace pas un document distant.
@@ -134,7 +134,8 @@ Verrou transactionnel pour éviter les migrations concurrentes. Chaque client g�
 | `thecol_v11_queue` | File d'opérations hors-ligne (tableau JSON) |
 | `thecol_v11_ready` | Flag local `'1'` si migration v11 confirmée |
 | `thecol_dirty_tables` | Flag legacy (pré-v11) des tables modifiées hors-ligne |
-| `thecol_backup_pre_sync` | Backup avant tout pull legacy |
+
+L'ancienne clé `thecol_backup_pre_sync` (copie locale avant un pull legacy) n'est plus créée et est supprimée au démarrage depuis v12.4 : sa restauration repoussait des valeurs périmées vers le cloud.
 
 ### Architecture de synchronisation
 ```
@@ -155,6 +156,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 
 **Écho local supprimé (v11.7) :** le snapshot `onSnapshot` ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique (`JSON.stringify`) au payload de l'opération locale en attente (self-echo). Seuls les vrais conflits concurrents — divergence réelle entre appareils — sont signalés.
 ```
+
+**Écritures de table entière (v12.4) :** `DB.set(key, data)` compare `data` au localStorage courant : tout enregistrement absent de `data` devient une suppression, tout enregistrement différent une réécriture, sans conflit signalé si un instantané distant est arrivé entre-temps (la version connue est déjà à jour). Une fonction qui attend (`await confirmDialog(...)`, `.then(...)`) relit donc ses tables **après** l'attente avant d'écrire : `finaliserProductionFormats`, `restaurerCommande`, `resetClients`.
 
 ### Employés
 ```json
@@ -210,6 +213,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 }
 ```
 
+Champ client facultatif (v13.0) : `dureeVieMinJours` — durée de vie minimale exigée à la livraison, en jours avant la limite de vente du lot (`clientDureeVieMin`).
+
 ### Lots de production (Stock)
 ```json
 {
@@ -220,11 +225,16 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   "quantite": "number",
   "dateProduction": "date",
   "dlv": "date (date limite de vente)",
-  "dlc": "date (date limite de consommation)"
+  "dlc": "date (date limite de consommation)",
+  "bloque": "boolean (optionnel, v11.12 — lot bloqué : invendable et non livrable)",
+  "motifBlocage": "string (optionnel, v11.12 — obligatoire à la saisie du blocage)",
+  "dateBlocage": "datetime ISO (optionnel, v11.12)"
 }
 ```
 
-**Règles d'attribution du `numLot` (v11.8) :** À l'ajout manuel d'un lot, le système attribue un `numLot` commun à tous les lots partageant le même `arome` et la même `dateProduction`, indépendamment du `format`. Chaque format reste un enregistrement de stock distinct (un `id` unique par lot). Si un lot existe déjà avec le même `arome`, `format` et `dateProduction`, sa `quantite` est incrémentée plutôt qu'un nouveau lot créé. Lorsqu'un nouveau format est ajouté sous un `numLot` existant, la DLV et la DLC du lot de référence sont toujours appliquées au nouveau lot ; si les dates saisies divergent, un avertissement en français est affiché.
+**Règles d'attribution du `numLot` (v11.8) :** À l'ajout manuel d'un lot, le système attribue un `numLot` commun à tous les lots partageant le même `arome` et la même `dateProduction`, indépendamment du `format`. Chaque format reste un enregistrement de stock distinct (un `id` unique par lot). Si un lot existe déjà avec le même `arome`, `format` et `dateProduction`, sa `quantite` est incrémentée plutôt qu'un nouveau lot créé. Lorsqu'un nouveau format est ajouté sous un `numLot` existant, la DLV et la DLC du lot de référence sont toujours appliquées au nouveau lot ; si les dates saisies divergent, un avertissement en français est affiché (corrigé en v11.12 : ce cas provoquait auparavant une erreur « Erreur lors de la création du lot »).
+
+**Numérotation sans réutilisation (v11.12) :** `nextLotNumero` prend le plus grand `numLot` numérique trouvé dans `lots`, `history`, `commandes[].lotsUtilises` et `livraisons[].lotsTraces` (`maxLotNumero`), puis ajoute 1. Un lot épuisé dont l'entrée `PROD-` a été supprimée ne voit donc jamais son numéro réattribué. Le `numLot` est celui imprimé sur les bouteilles : il ne change jamais lors d'une modification du lot. Affichage via `formatLotNumero` (6 chiffres, ou 6 derniers caractères d'un ancien id opaque) ; comparaison via `normLotNumero` (« 42 » = « 000042 »).
 
 ### Commandes
 ```json
@@ -237,26 +247,50 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   "statut": "en_attente|produite|livrée|annulee",
   "items": [
     { "aromeId": "uuid", "formatId": "uuid", "quantite": "number }
-  ]
+  ],
+  "lotsUtilises": [
+    {
+      "lotId": "string (id du lot)",
+      "numLot": "string",
+      "arome": "string",
+      "format": "string",
+      "dateProduction": "date",
+      "dlv": "date",
+      "dlc": "date",
+      "quantite": "number (agrégée par lot)"
+    }
+  ],
+  "dateLivraisonEffective": "datetime ISO (optionnel, v11.12 — horodatage de la transaction de livraison)",
+  "clientLivraison": "object (optionnel, v11.12 — instantané { societe, nom, adresse, npa, coord } du client au moment de la livraison)",
+  "numeroBL": "string (optionnel, v11.12 — n° du BL généré pour cette livraison)",
+  "blGenerationId": "string (optionnel, v13.1 — nouveau cycle BL après restauration d'une livraison)"
 }
 ```
 
-**Numérotation des commandes et BL (v11.14) :** toute nouvelle commande, duplication ou
+**Numérotation des commandes et BL (v13.1) :** toute nouvelle commande, duplication ou
 création de BL nécessite une connexion, une session authentifiée et la synchronisation V11
 prête. Une transaction Firestore écrit ensemble le document métier, le compteur
 `syncMeta/numbering-commandes` ou `syncMeta/numbering-livraisons` (`lastNumber`) et une
 réservation `syncMeta/number-{table}-{clé}` (`recordId`, `numero`). La clé est l'ID de la
-commande pour une commande et la commande d'origine pour un BL. Les réessais réutilisent
+commande pour une commande ; pour un BL, elle combine la commande d'origine et son
+`dateLivraisonEffective` (sinon `blGenerationId` après restauration, ou `initial` pour les données anciennes). Les réessais réutilisent
 le même document et le même numéro ; deux appareils créant le BL d'une même commande
-retrouvent le même BL. Les compteurs sont initialisés au-dessus des numéros historiques
-distants et locaux. Les opérations locales en attente sur le document ciblé doivent être
+retrouvent le même BL. Le `numeroBL` est mémorisé sur la commande dans la même transaction.
+La régénération d'une même livraison reprend ce numéro ; une nouvelle livraison après
+restauration obtient un nouveau numéro. Les compteurs sont initialisés au-dessus des numéros
+historiques distants et locaux (BL existants, commandes et historique pour les numéros BL).
+Les opérations locales en attente sur le document ciblé ou sa commande doivent être
 synchronisées avant création ou réutilisation distante.
 
 Les numéros existants sont conservés. L'édition des documents existants reste possible hors
 ligne. Les règles `syncMeta/{document}` déjà décrites couvrent les compteurs et réservations.
-Tous les appareils doivent recharger la v11.14 pour participer à cette attribution atomique ;
+Tous les appareils doivent recharger la v13.1 pour participer à cette attribution atomique ;
 les anciens clients ne mettent pas ces compteurs à jour. Aucun doublon historique n'est
 renuméroté automatiquement.
+
+`lotsUtilises`, `dateLivraisonEffective` et `clientLivraison` sont écrits par `deliverCommandeTransaction` (transaction Firestore). `dateLivraison` reste la date **prévue**. `numeroBL` est mémorisé par `generateBL` / `getOrCreateBL` : un BL supprimé puis régénéré pour la même livraison reprend son numéro. La restauration d'une commande livrée vide `lotsUtilises` et retire `dateLivraisonEffective`, `clientLivraison` et `numeroBL` (ces informations sont conservées dans les entrées `RESTAURE-`).
+
+**Champs v13.0.** Une ligne `items[]` livrée en plus de la commande porte `enPlus: true` (et `offert: true` si elle est gratuite : exclue du montant par `diagnoseCommandeMontant`, mais tracée). Une livraison partielle écrit `reliquatId` sur la commande livrée et crée le reliquat (`reliquatDe`, numéro `<n°>-2`, `-3`…, statut `en_attente`, mêmes client et date). Les lignes `enPlus` sont ignorées par la règle d'attribution, retirées à la restauration et non reprises par « Dupliquer ».
 
 ### Livraisons / Bulletins de livraison
 ```json
@@ -274,10 +308,12 @@ renuméroté automatiquement.
   "notes": "string (optionnel, interne)",
   "dateDernierExport": "datetime (optionnel, legacy — v11.7: remplacé par la clé locale non synchronisée thecol_bl_export_dates)",
   "lotsTraces": [
-    { "lotId": "uuid", "arome": "string", "format": "string", "dlc": "date", "quantite": "number" }
+    { "lotId": "uuid", "numLot": "string", "arome": "string", "format": "string", "dlv": "date (v11.12)", "dlc": "date", "quantite": "number", "forceStockInsuffisant": "boolean (legacy, plus écrit)" }
   ]
 }
 ```
+
+`lotsTraces` est une copie de `commande.lotsUtilises` (`buildLotsTracesForCommande`), resynchronisée par `syncBLTraceFromCommande` à chaque préparation/export du BL. Les n° de lot ne sont pas imprimés sur le BL client (traçabilité interne). Depuis v13.1, les compteurs transactionnels tiennent compte des `numeroBL` des BL existants, des commandes et de l'historique (entrées `RESTAURE-`) : un numéro supprimé n'est jamais attribué à une autre livraison.
 
 **Export PDF des BL (`exportBLPDF`, v11.12 — vrai fichier PDF via jsPDF) :**
 Génère et télécharge directement un fichier `.pdf` nommé `BL-XXXXX_YYYY-MM-DD.pdf` (même mécanisme de téléchargement que l'export Excel), sans fenêtre d'impression ni popup. La bibliothèque **jsPDF 3.0.3** est chargée via CDN dans `index.html` (cdnjs, empreinte SRI, hôte déjà autorisé par le CSP). Le rendu reste **pixel-perfect** : les données variables sont dessinées en vectoriel (texte net, sélectionnable) par-dessus deux fonds A4 rasterisés extraits du template Excel lui-même.
@@ -326,12 +362,12 @@ Génère et télécharge directement un fichier `.pdf` nommé `BL-XXXXX_YYYY-MM-
 
 **Pointages de nuit :** Les pointages où `heureFin < heureDebut` (ex. 22:00 → 02:00) sont supportés. La durée est calculée par le helper `computePointageMinutes` qui ajoute 24h (1440 min) à l'heure de fin si elle est antérieure à l'heure de début, avant de soustraire la pause.
 
-Depuis v11.14, une session ouverte la veille reste visible et peut être terminée après minuit ;
+Depuis v13.1, une session ouverte la veille reste visible et peut être terminée après minuit ;
 elle empêche une deuxième arrivée. La pause saisie doit être un nombre entier positif ou nul
 qui ne dépasse pas la durée du pointage. Les exports d'archives reprennent les filtres année,
 client et statut de la vue Archives ; l'export depuis Commandes conserve toutes ses archives.
 
-**Restauration JSON (v11.14) :** les tables, objets, tableaux imbriqués et champs numériques
+**Restauration JSON (v13.1) :** les tables, objets, tableaux imbriqués et champs numériques
 sont validés avant toute écriture. Un champ numérique contenant du HTML est refusé. Les
 prix clients restent des chaînes et les propriétés optionnelles absentes restent acceptées.
 Les contenances, seuils, unités et quantités affichés sont échappés indépendamment de cette
@@ -340,20 +376,33 @@ validation, y compris pour les anciennes données locales.
 ### Historique de production
 ```json
 {
-  "id": "string (PROD-{timestamp}-{random} | VENTE-{timestamp}-{random} | RESTAURE-{timestamp}-{random})",
+  "id": "string ({PROD|VENTE|SORTIE|AJUST|RESTAURE}-{timestamp}-{random})",
   "lotId": "string (uuid or numeric)",
+  "numLot": "string",
   "arome": "string",
   "format": "string",
-  "quantity": "number",
+  "quantity": "number (positif ; signé pour AJUST-)",
   "productionDate": "date",
-  "dateAdded": "datetime (ISO string)"
+  "dlv": "date (optionnel, v11.12)",
+  "dlc": "date (optionnel, v11.12)",
+  "dateAdded": "datetime (ISO string)",
+  "motif": "string (optionnel, v11.12 — vente | echantillon | casse | destruction | correction)",
+  "clientId": "string (optionnel, v11.12 — VENTE-/SORTIE-/RESTAURE-)",
+  "clientNom": "string (optionnel, v11.12 — instantané du nom du client)",
+  "note": "string (optionnel, v11.12)",
+  "commandeId": "string (RESTAURE- uniquement, v11.12)",
+  "commandeNumero": "string (RESTAURE- uniquement, v11.12)",
+  "numeroBL": "string (RESTAURE- uniquement, v11.12 — n° du BL supprimé, jamais réattribué)",
+  "dateLivraison": "datetime ou date (RESTAURE- uniquement, v11.12 — date de la livraison annulée)"
 }
 ```
 
-Les entrées d'historique utilisent trois préfixes d'ID :
-- **`PROD-`** : créées lors de la production d'un lot (ajout de stock).
-- **`VENTE-`** : créées lors de la vente/livraison d'une commande (déduction de stock).
-- **`RESTAURE-`** : créées lors de la restauration d'une commande livrée (re-crédit des quantités aux lots). Ces entrées sont filtrées par `renderHistorique` et ne sont pas affichées dans la vue historique de production.
+Les entrées d'historique sont créées par `buildLotHistoryEntry(prefixe, lot, quantite, extra)`, qui copie `numLot`, `productionDate`, `dlv` et `dlc` du lot : ces données survivent à la suppression du lot épuisé. Le type est lu par `getHistoryType(entry)` et l'effet sur le stock par `getHistoryDelta(entry)`. Préfixes d'ID :
+- **`PROD-`** : production d'un lot (ajout de stock). Les anciennes entrées sans préfixe connu sont traitées comme des productions.
+- **`VENTE-`** : vente directe depuis le stock (`motif: vente`, client facultatif). Les livraisons de commandes ne créent **pas** d'entrée d'historique : elles sont tracées par `commande.lotsUtilises`.
+- **`SORTIE-`** (v11.12) : autre sortie motivée — dégustation/échantillon, casse/perte, destruction/péremption — depuis la modale « Sortie de stock » ou lors de la suppression d'un lot.
+- **`AJUST-`** (v11.12) : correction de quantité, `quantity` signée (modification de la quantité d'un lot, ou suppression d'un lot créé par erreur, `motif: correction`).
+- **`RESTAURE-`** : restauration d'une commande livrée (re-crédit des quantités aux lots). Depuis v11.12, l'entrée porte la commande, le client, le n° de BL et la date de la livraison annulée. Ces entrées restent masquées dans la timeline Historique (les livraisons n'y figurent pas non plus) mais apparaissent dans la traçabilité du lot et la fiche Rappel.
 
 ### Tâches du dashboard
 ```json
@@ -368,23 +417,55 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 ## 3. Pages/Vues
 
 ### Navigation principale
-- Dashboard (accueil)
+- Jumeau 3D (accueil, `#jumeau`)
+- Tableau de bord (`#dashboard`)
 - Stock
 - Pointage (heures)
 - Commandes
 - Production (planificateur)
 - Paramètres (employés, aromes, recettes, clients)
 
-### 3.1 Dashboard
-- Résumé du stock (total bouteilles, expiré, < 1 mois)
-- Commandes en attente
-- Heures aujourd'hui
-- Raccourcis rapides
+### 3.0 Jumeau numérique 3D (v12.0)
+Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaque rendu de `renderJumeau()`. Les re-rendus (snapshots V11, actions) mettent à jour la scène sur place sans recréer le contexte WebGL.
+- **Zones** (`TWIN_ZONES`) : Production (labo : cuves et plaques), Entrepôt (piles de casiers arôme × format), Expédition (commandes `en_attente`/`produite`), Consommables (réserve et chambre froide, articles d'inventaire `consommable`), Équipe (employés actifs, présents = pointage du jour sans `heureFin`).
+- **Équipement réel (v12.1)** : `CONSTANTS.ATELIER_CUVES` cuves de `CUVE_MAX_L` (4 × 25 L) et une casserole par plaque à induction (`CONSTANTS.ATELIER_CASSEROLES_L` = [9, 4] → plaque 1 : 9 L, plaque 2 : 4 L). Les litres à produire par arôme (Σ max(0, demande des commandes actives − stock vendable à leur date de livraison, cf. `createStockPool`) × contenance) sont découpés par `getProductionRecipients()` (même logique que le planificateur), puis affectés aux postes libres par échéance du manque — la première livraison dont une ligne n'est pas couverte par le stock (v12.6 ; auparavant la première commande contenant l'arôme, même couverte) ; le surplus forme la « prochaine fournée ». Items : `equip:cuve-N` / `equip:casserole-N` (statut `planned` ou `idle`), détail dans `model.production`.
+- **Plan de l'étage (v12.3)** : 1 unité = 1 m ; étage d'environ 24 × 16 m (`TWIN_PLAN`) posé sur un rez-de-chaussée vitré, d'après les photos de l'atelier : labo de production, laverie et stock côté fenêtres, couloir central, réserve avec chambre froide, vestiaire-bureau et expédition (monte-charge). Les cloisons (`TWIN_PARTITIONS`) sont coupées à 1,10 m avec un chapeau sombre ; la partie haute fenêtrée de chaque façade (`TWIN_FACADES`) est masquée quand la caméra est du côté extérieur de ce mur (`twinUpdateCutaways`).
+- **Modèles 3D (v12.3)** : paillasse de labo (caissons blancs, lisse vert-de-gris à clips rouges, plan en résine sauge, évier et robinetterie de labo), îlot d'embouteillage, armoires hautes avec cartons d'Einkochautomat ; cuves 25 L inox à robinet et thermostat posées sur la paillasse (Ø 38 cm, `TWIN_CUVE`, couvercle relevé et thé visible si planifiée), casseroles 9 L / 4 L (`TWIN_POTS`) sur plaques à induction avec vapeur ; stock en piles de casiers noirs (8 par couche, ~1,9 m au plus), bouteilles en verre au thé ambré, étiquette ThéCol par arôme et bouchon noir (`twinBottleSpec()`) ; commandes en caisses vertes ajourées sur chariots bleus avec bon de livraison (bouteilles visibles si produite) ; consommables rangés par nature (`twinBinKind`) sur étagères inox (ingrédients, chambre froide) ou rayonnages noirs (emballages) : boîtes hermétiques dont le niveau suit le stock, sacs kraft, packs de bouteilles sous film, cartons de bouchons, rouleaux d'étiquettes, bidons ; mannequins en blouse, charlotte, gants et tablier à la couleur de l'employé ; absent = blouse suspendue au portant du vestiaire. Les pièces répétées sont instanciées (`InstancedMesh`) et la sélection passe par des volumes invisibles hors scène.
+- **Statuts** (`getLotStatus`) : lot expiré (DLC) ou invendable (DLV dépassée) → halo rouge pulsé ; DLV proche → halo orange pâle ; stock < demande → halo orange, emplacement vide hachuré si plus rien ; commande en retard (date passée) ou urgente (`en_attente`, ≤ 3 j) → gyrophare ; consommable ≤ seuil → critique, ≤ 2 × seuil → bas (bande d'état et voyant sur l'étiquette de rayon).
+- **Inspecteur** : actions réutilisant les gestionnaires existants (`sell-lot`, `edit-lot`, `show-lot-trace`, `marquer-commande-produite`, `livrer-commande`, `update-inventaire-qty`, `show-inventaire-modal`) et `clockInEmployee` / `clockOutEmployee`.
+- **Préférences locales** (non synchronisées) : `thecol_filter_twin_zone`, `thecol_filter_twin_tab`, `thecol_filter_twin_panel`, `thecol_filter_twin_quality` (vide = Auto).
+- **Moteur** : Three.js 0.185.1 embarqué (`vendor/three/`), importé dynamiquement ; rendu à la demande (boucle arrêtée quand rien ne bouge, une seule image planifiée à la fois, animations d'ambiance cadencées par la qualité — `ambient` : 30 i/s en Haute, 15 i/s en Standard, figées en Économie —, respect de `prefers-reduced-motion`). Les étiquettes HTML ne sont repositionnées que si la caméra ou le cadre change ; un re-rendu sans changement de niveau de cuve ne relance aucune animation. À l'ouverture et à chaque changement de qualité, les shaders sont compilés en arrière-plan (`twinWarmUp`, extension `KHR_parallel_shader_compile`, garde de 5 s) et l'indicateur de chargement reste affiché jusqu'à la première image. Sans WebGL 2 : repli sur la liste des objets et l'inspecteur.
+- **Rendu (v12.3)** : lumière « jour + plafonniers » (soleil à ~55°, ombres douces PCF recalculées seulement quand la scène change), carte de reflets d'atelier générée (`twinEnvironmentMap`), rendu des couleurs neutre (`NeutralToneMapping`), ciel, terrain et arbres d'automne. Toutes les textures sont procédurales (`twinNoise`, linoléum, mosaïque, faïence, crépi, inox brossé, chêne, pelouse, pavés…) et plaquées en coordonnées monde ; les boîtes reçoivent des arêtes adoucies par shader (`twinPatchMaterial`).
+- **Qualité** (`TWIN_QUALITY_LEVELS`, bouton ✦ du jumeau) : Haute (occlusion ambiante GTAO pleine résolution, ombres 4096, textures 1024), Standard (GTAO en demi-résolution, 2048, 512), Économie (rendu direct sans post-traitement, 1024, 256, bouteilles simplifiées, animations d'ambiance figées, HUD sans flou d'arrière-plan via la classe `twin--lite`). Auto choisit selon l'appareil (`twinDetectQuality` : Économie sur téléphones et tablettes — pointeur tactile ou écran ≤ 768 px — et rendu logiciel, sinon selon le GPU) et descend d'un niveau quand plus de 60 % des images d'un mouvement de caméra passent sous ~24 i/s sur 1,5 s de mouvement cumulé (`twinMonitorPerf`, `twinStepDown`) ; en Économie, le rapport de pixels du rendu est alors ramené à 1 (`Twin.dprCap`, Auto uniquement, le temps de la session). Un changement reconstruit le monde sans recréer le contexte WebGL (`twinApplyQuality`).
+
+### 3.0bis Palette de commandes et raccourcis (v12.0)
+- `Ctrl/⌘ + K` : palette (pages, actions, pointage par employé, zones du jumeau, objets de l'atelier, résultats de la recherche globale).
+- `?` aide · `/` recherche · `G` puis `J/D/C/P/S/L/H/I/A/R` navigation · jumeau : `0–5` zones, `←/→` objet suivant, `R` vue d'ensemble, `F` plein écran, `Échap` fermer l'inspecteur.
+- Les actions d'enregistrement (lots, commandes, inventaire, clients) re-rendent la vue courante (`renderCurrentView()`), ce qui permet de les déclencher depuis n'importe quelle page.
+
+### 3.1 Tableau de bord (v12.6)
+Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `renderDashboard()` à partir de `buildDashboardModel()`, qui réutilise `buildTwinModel()` (mêmes règles que le jumeau 3D) ; le jumeau reste la page d'accueil.
+- **En-tête** : salutation, date, résumé (priorités critiques, commandes à livrer sous 7 jours, litres à produire) ; actions « + Commande » (`showCommandeModal`), « + Lot » (`showNouveauLotModal`), « Pointage ».
+- **Tuiles** (liens vers la page concernée) : À produire (litres, bouteilles, postes occupés) ; Livraisons · 7 j (commandes `en_attente` / `produite` en retard ou dues dans les 7 jours ; retards, sinon prêtes / total) ; Stock vendable (lots expirés, invendables ou à DLV proche, sinon bouteilles produites sur 7 jours d'après les entrées `PROD-`) ; Équipe (sur place / effectif actif, heures pointées du jour) ; Livré ce mois (CA des commandes livrées depuis le 1er, comparé aux mêmes jours du mois précédent ; en bouteilles quand aucun tarif n'est connu).
+- **Priorités** : alertes du jumeau (commandes en retard ou urgentes, lots expirés / invendables / DLV proche, consommables sous le seuil ou bas) et pointages restés ouverts les jours précédents, triés critique → attention → à surveiller (icône + libellé, jamais la couleur seule) ; 6 visibles puis « Voir N autres ». Chaque ligne ouvre l'action existante : `show-commande-details`, `twin-goto-stock` (stock filtré), `show-inventaire-modal`, `cloturer-pointage`. Les besoins de production ont leur propre carte.
+- **Livraisons · 7 jours** : bande des 7 jours (commandes et bouteilles par jour ; un jour ouvre Commandes filtrée sur ce jour via `weekCalendarSelectedDate`) puis les 6 prochaines commandes, retards en tête.
+- **Production à lancer** : les postes de l'atelier (4 cuves, 2 casseroles) remplis à la couleur de l'arôme selon le plan du jumeau, puis par arôme : litres, bouteilles, postes (ou « En attente »), recette manquante, échéance du manque et détail par format ; « Planifier » ouvre le planificateur.
+- **Équipe** : pointer l'arrivée ou le départ (`clockInEmployee` / `clockOutEmployee`).
+- **À faire** : tâches (`todos`) ; « Effacer les terminées » demande confirmation et relit la table après l'attente. La saisie en cours et le focus clavier survivent aux re-rendus temps réel.
+- **Chiffres & tendances** : commandes livrées, datées par `dateLivraisonEffective` (repli sur `dateLivraison`) ; période 12 semaines (lundi → dimanche) ou 12 mois et mesure CA ou bouteilles (CA désactivé sans tarif), préférences locales `thecol_filter_dash_periode` / `thecol_filter_dash_mesure`. Chiffres de la fenêtre : CA (livraisons sans tarif signalées), bouteilles livrées (+ ventes directes `VENTE-`), livraisons, panier moyen, bouteilles produites (`PROD-`). Histogramme à une série (période en cours plus claire ; infobulle au survol, au toucher ou au clavier avec ← → ; tableau « Voir les données »), meilleurs clients (5) et ventes par arôme (6, part en %).
+- **Mise en page** : requêtes de conteneur (`container: dash`) — 5 tuiles et cartes sur 2 colonnes quand la largeur le permet, 1 colonne sur téléphone.
 
 ### 3.2 Gestion du Stock
-- Tableau des lots avec filtres (arôme, format, statut)
+- Page organisée en quatre zones (v12.7) :
+  - **À traiter** : bandeau affiché seulement s'il y a une action (lots à écouler d'abord, bouteilles à produire, lots hors vente, lots dont l'arôme ou le format est absent des Paramètres)
+  - **Disponible à la vente** : tableau arôme × format (`buildStockOverview`, noms comparés par `normalizeName`) — bouteilles libres (vendables − réservées), réservées, à produire, signal « DLV proche » ; une case filtre les lots (filtre `stockCell`)
+  - **Lots vendables** : groupés par arôme × format, triés par DLV (FEFO), avec les commandes qui réservent ce stock ; actions « Sortie » et menu ⋯ (Tracer, Modifier, Supprimer)
+  - **Hors vente** : lots expirés, invendables, bloqués ou à quantité invalide, avec l'action adaptée (Sortir, Rappel, Modifier)
+- Réservation : les commandes ouvertes réservent le stock par date de livraison, les « produite » d'abord puis les « en attente » (même règle que « ✓ Stock ») ; c'est une prévision, la livraison choisit toujours ses lots. La modale « Sortie » affiche le stock libre et demande une confirmation si la sortie entame des bouteilles réservées (relecture des lots après la confirmation)
 - Ajouter nouveau lot
-- Statistiques: total, expirés, < 1 mois
+- Statut par lot (DLV d'abord, repli DLC pour les lots sans DLV) : OK, DLV proche (< 7 j), Invendable (DLV dépassée, DLC valide), Expiré (DLC dépassée)
+- Durée de vie (`lotShelfLifeHtml`, aussi dans l'inspecteur du jumeau) : phrase « Vendable encore N j » / « DLV dépassée de N j » / « DLC dépassée de N j » et frise Prod. → DLV → DLC (vert : vente, jaune : DLV proche, gris puis rouge après la DLV) avec un repère « aujourd'hui »
+- Bouton « Sortie » : le motif « vente » n'est proposé que si le lot est vendable (ni bloqué, ni DLV/DLC dépassée)
 
 ### 3.3 Pointage (Heures)
 - Vue calendrier/semaine
@@ -397,6 +478,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - Créer nouvelle commande (sélectionner client, articles, date)
 - Voir détails commande
 - Statut modifiable
+- **« ✓ Stock » (v12.4) :** passe en « produite » les commandes en attente couvertes par le stock libre, par date de livraison. Les bouteilles des commandes déjà « produites » (pas encore livrées, donc toujours dans les lots) leur restent réservées et ne comptent pas comme libres.
 
 ### 3.5 Planificateur de Production
 - Sélectionner période (commandes à produire)
@@ -411,7 +493,8 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - **Arômes:** CRUD, couleur, activer/désactiver
 - **Formats:** CRUD
 - **Recettes:** CRUD par arôme, liste ingrédients
-- **Clients:** CRUD, activer/désactiver
+- **Clients:** CRUD, activer/désactiver ; « Effacer les clients sans commande » supprime en masse les clients non référencés (les clients liés à une commande sont conservés, comme pour une suppression unitaire)
+- **Sauvegarde & Restauration:** export JSON de toutes les tables ; « Restaurer depuis JSON » affiche un bilan (ajouts, modifications, suppressions par table) à confirmer et télécharge une sauvegarde de l'état actuel avant d'écrire (v12.4)
 
 ## 4. Design
 
@@ -439,6 +522,9 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - Tables responsives
 
 ### Composants
+- En-tête de page (v12.8) : le titre est celui de la barre du haut ; la page n'affiche qu'une barre d'outils (`pageToolbar`) — onglets ou sélecteur de mode à gauche, actions à droite, l'action principale en dernier
+- Actions secondaires d'une ligne dans un menu « ⋯ » (`rowMenuHtml`) ; les suppressions y sont rangées. Le rouge est réservé aux boîtes de confirmation
+- Textes ≥ 11 px, pas de libellés en majuscules (sauf logo, badge « LIVE » et jumeau 3D) ; cibles tactiles ≥ 40 px sur téléphone et écrans tactiles
 - Boutons: vert olive, border-radius 8px
 - Inputs: border gris, focus vert
 - Cards: fond blanc, shadow léger
@@ -479,8 +565,57 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 
 ### Stock
 1. Nouveau lot: arôme, format, quantité, dates
-2. Mise à jour statut automatique (expiré si DLC passée)
+2. Mise à jour statut automatique (invendable si DLV passée, expiré si DLC passée)
 3. Historique de production
+4. Recherche par n° de lot (« 42 » ou « 000042 »), arôme ou format, sans tenir compte des accents ; la saisie est conservée telle quelle et la liste n'est re-rendue qu'après une pause, jamais pendant une composition (clavier prédictif) — même comportement dans l'Historique (`data-live-search`). Les lots épuisés sont retrouvés via les commandes, les BL et l'historique
+5. Lots bloqués rangés dans « Hors vente » (v12.7)
+
+### Traçabilité des bouteilles (v11.12)
+
+**Parcours lot → client.** Production (`PROD-`) → stock (`lots`) → livraison (`commande.lotsUtilises`, avec `dateLivraisonEffective` et instantané `clientLivraison`) → BL (`livraison.lotsTraces`). Les sorties hors commande sont journalisées : vente directe (`VENTE-`), autres sorties motivées (`SORTIE-`), corrections (`AJUST-`), livraisons annulées (`RESTAURE-`).
+
+**Parcours client/BL → lots.** Détail d'une commande livrée (« Lots utilisés ») et détail d'un BL (« Traçabilité interne ») : chaque n° de lot ouvre sa traçabilité. La recherche des Livraisons et la recherche globale trouvent un BL par n° de lot.
+
+**Modale Tracer** (`data-click="show-lot-trace"`, `data-id` = id du lot — contrat inchangé) : `getLotTraceData(lotId)` assemble arôme, format, dates (DLV/DLC retrouvées même pour un lot épuisé), statut de blocage, livraisons clients (date effective, ou date prévue signalée « (prévue) »), ventes/sorties/ajustements avec client et note, livraisons annulées. Bilan : produit + ajustements − livré − ventes − sorties − stock = « Écart non expliqué » (affiché seulement s'il est non nul ; les retours n'entrent pas dans le bilan car la livraison annulée a déjà été retirée et le stock re-crédité).
+
+**Fiche Rappel de lot** (`data-click="show-lot-rappel"`, `data-num` = numLot), ouverte depuis la modale Tracer : regroupe tous les enregistrements portant le même `numLot` (tous formats, y compris épuisés) via `getLotRappelData(numLot)` :
+- synthèse (produit, livré, ventes et sorties, stock, nombre de destinataires connus) ;
+- tableau par format avec accès au détail ;
+- clients livrés avec adresse et coordonnées (client actuel, sinon instantané de livraison), commande, BL, format, quantité ;
+- ventes directes, sorties et ajustements (motif, client, note) ;
+- livraisons annulées ;
+- avertissement si le numéro est partagé par plusieurs arômes ou dates ;
+- **Exporter Excel** (`exportLotRappelExcel`) : classeur `rappel_lot_<n°>_<date>.xlsx` (feuilles Synthèse, Par format, Clients livrés, Sorties, Annulations).
+
+**Blocage d'un lot.** « Bloquer le stock restant » (motif obligatoire) pose `bloque`, `motifBlocage` et `dateBlocage` sur tous les enregistrements en stock du numéro. Un lot bloqué est exclu par `isLotSellable` (stock vendable, planificateur, modale de livraison, vente directe) et refusé par `deliverCommandeTransaction` (vérification sur la donnée distante). Seules les sorties hors vente (casse, destruction…) restent possibles. « Débloquer le stock » retire ces champs après confirmation.
+
+**Sortie de stock** (bouton « Sortie » sur une carte de lot, actions `sell-lot` / `vendre-lot`) : motif (vente directe, dégustation/échantillon, casse/perte, destruction/péremption), quantité, client facultatif, note. La vente n'est proposée que si le lot est vendable.
+
+**Suppression d'un lot** : la modale demande ce que deviennent les bouteilles restantes — destruction/péremption ou casse/perte (`SORTIE-`), ou lot créé par erreur (`AJUST-` négatif) — avant de supprimer l'enregistrement.
+
+**Modification d'un lot** : un changement de quantité crée un `AJUST-` signé (note facultative) ; un changement d'arôme, de format ou de dates est répercuté sur les entrées d'historique du lot. Le `numLot` ne change pas et les livraisons déjà effectuées gardent leurs informations d'origine.
+
+### Attribution des bouteilles aux commandes (v13.0)
+
+**Règle unique** (`planAttributionCommandes`) : commandes ouvertes, « produite » d'abord puis « en attente », par date de livraison ; chaque ligne prend les lots vendables à sa date de livraison dont la limite de vente laisse au moins `dureeVieMinJours` jours au client (`createStockPool(…).takeLots(key, qty, date, minJours)`), DLV la plus proche d'abord. Rien n'est réservé en base : c'est une prévision. Elle alimente la page Stock (réservé, à produire, « Prévu pour » sur chaque lot), la fenêtre de livraison et le contrôle avant « Marquer produite » ; « ✓ Stock », le planificateur et le jumeau appliquent la même durée de vie minimale et les mêmes noms normalisés.
+
+**Fenêtre « Livrer »** (`showLivraisonBouteillesModal`, `confirmerLivraison`) : lots pré-remplis, DLV la plus proche d'abord, parmi les lots vendables aujourd'hui, assez longs pour le client et non prévus pour d'autres commandes ; les lots trop courts sont affichés sans saisie, ceux prévus pour une autre commande sont signalés. Une ligne ne peut pas dépasser la commande, sauf via ⋯ « Ajouter des bouteilles en plus » (avec « offertes ») ; ⋯ en pied de fenêtre « Ajouter un article hors commande ». Moins que commandé : livraison partielle, le reste devient un reliquat.
+
+**Transaction** (`deliverCommandeTransaction(commandeId, allocations, { extras, partielle, reliquatId, reliquatNumero })`) : revalide côté serveur la part commandée (alloué − en plus ≤ commandé ; égal sauf livraison partielle), les bouteilles en plus déclarées, et comme avant lots, blocage, DLV/DLC et stock ; écrit la commande livrée (lignes livrées puis lignes `enPlus`), les lots et, le cas échéant, le reliquat, dans la même transaction. Renvoie `{ lotsUtilises, reliquat }`.
+
+**« Marquer produite »** : si le plan (commande traitée comme produite) laisse un manque, une confirmation détaille les bouteilles manquantes.
+
+### Traçabilité amont : lots d'ingrédients (v12.9)
+
+**Articles suivis.** Les ingrédients de l'inventaire (`isLotSuiviArticle` : consommables qui ne sont pas des contenants — bouteilles, bouchons, étiquettes… — ni de l'eau) portent `lots: [{ id, numLot, quantite, quantiteRecue, dateReception, fournisseur?, dateLimite?, dateRetrait? }]`. `quantite` de l'article reste le total ; la part non couverte par les lots est le stock « sans n° de lot » (`invSansLot`), antérieur au suivi.
+
+**Réception** (`showReceptionModal` / `saveReception`) : quantité, n° de lot du fournisseur (obligatoire pour un ingrédient), fournisseur et date limite facultatifs. Un n° déjà connu complète le lot existant.
+
+**Consommation** (`consommerLotsIngredient`) : d'abord le stock sans n° de lot, puis les lots par date limite croissante (repli : date de réception). Appelée par `deduireInventaireProduction` (production confirmée), qui renvoie `ingredients: [{ article, unite, numLot, fournisseur, quantite }]`, et par le ± du jumeau (`updateInventaireQty`). Chaque entrée `PROD-` d'une production porte `productionId` et ces `ingredients` (quantités pour toute la production, tous formats).
+
+**Lecture.** Tracer et Rappel du lot affichent « Ingrédients utilisés » (dédoublonnés par `productionId`) ; l'export Excel ajoute la feuille Ingrédients. Côté inventaire, la fenêtre d'un ingrédient liste les lots en stock dans l'ordre d'utilisation, le stock sans n° de lot, les lots épuisés ou retirés, et pour chacun les lots de bouteilles produits avec (`getUsagesLotIngredient`) ; « Rappel fournisseur » ouvre la liste de ces lots de bouteilles avec l'accès à leur rappel. Chaque lot se corrige (recomptage) ou se retire (périmé, perdu : `dateRetrait`).
+
+**Limites.** Les lots de bouteilles créés avec « + Lot » ne déduisent pas l'inventaire et n'ont donc pas d'ingrédients rattachés ; les productions antérieures à v12.9 non plus.
 
 ## 6. Déploiement GitHub Pages
 
@@ -496,6 +631,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
 - Pas de framework (simplicité)
 - localStorage pour persistance locale
 - Firebase Firestore v12.16.0 pour synchronisation cloud optionnelle
+- Three.js 0.185.1 (licence MIT) embarqué dans `vendor/three/` pour le jumeau 3D — les modules complémentaires (`OrbitControls.js`, post-traitement `EffectComposer`/`RenderPass`/`GTAOPass`/`OutputPass` et leurs shaders) importent `./three.module.min.js` et leurs voisins en chemins relatifs (imports réécrits, arborescence aplatie, pas d'importmap)
 - **Firebase Auth — Authentification par mot de passe partagé (Email/Password) :**
   - L'application utilise un compte technique fixe `gestion@thecol.ch` (Email/Password).
   - L'adresse email n'est jamais affichée dans l'interface utilisateur — elle est définie comme constante `FIREBASE_AUTH_EMAIL` dans le module Firebase d'`index.html`.
@@ -565,7 +701,7 @@ Les entrées d'historique utilisent trois préfixes d'ID :
   - Avantages : pas de XSS par interpolation d'attributs JS, fonctionne sur le contenu re-rendu (notamment les modales), réduit les fuites mémoire.
 
 - **Validation des IDs V11 :** la fonction `v11ValidateId()` vérifie désormais que les IDs contiennent uniquement des caractères autorisés : lettres, chiffres, `_`, `:`, `-`, `.` (1-128 caractères). Un ID invalide bloque la synchronisation mais les données restent en localStorage.
-- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration. Depuis v11.6, l'import capture un snapshot complet (localStorage + caches mémoire V11) avant la première écriture. Si un `DB.set()` échoue (exception ou valeur de retour inattendue), un rollback synchrone restaure localStorage, `V11._localCache`, `V11._versions`, la file d'attente, la liste des tables protégées et les clés de versions, en écrivant directement dans localStorage (sans repasser par `DB.set`). Le toast d'erreur confirme qu'aucune donnée n'a été modifiée.
+- **Restauration JSON atomique :** le fichier est validé intégralement avant toute écriture. Une table contenant un ID invalide annule toute la restauration. Depuis v11.6, l'import capture un snapshot complet (localStorage + caches mémoire V11) avant la première écriture. Si un `DB.set()` échoue (exception ou valeur de retour inattendue), un rollback synchrone restaure localStorage, `V11._localCache`, `V11._versions`, la file d'attente, la liste des tables protégées et les clés de versions, en écrivant directement dans localStorage (sans repasser par `DB.set`). Le toast d'erreur confirme qu'aucune donnée n'a été modifiée. Depuis v12.4, rien n'est écrit avant que l'utilisateur ait confirmé le bilan de la restauration (ajouts, modifications, suppressions par table, appliqués sur tous les appareils) ; une sauvegarde JSON de l'état actuel est téléchargée juste avant l'écriture.
 
 - **Capacitor 8** pour emballage mobile Android/iOS
 - **`safeColor()`** — nouvelle fonction utilitaire qui valide les couleurs hexadécimales avant interpolation dans les attributs `style` (prévient l'injection CSS). Fallback sur `#cccccc` si la valeur est invalide.

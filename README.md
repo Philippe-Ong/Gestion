@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v11.13**
+**v13.1**
 
 ## Adresse
 
@@ -20,10 +20,11 @@ Application de gestion pour votre entreprise de thé froid.
 ### Stock
 - Gestion des lots de production (arôme, format, quantité)
 - Suivi des dates (production, DLV, DLC)
-- Statut automatique: OK, < 1 mois, Expiré
+- Statut automatique: OK, DLV proche, Invendable (DLV dépassée), Expiré (DLC dépassée)
 - Vente de bouteilles (déstockage)
 - Historique de production
-- Résumé du stock vendable par arôme/format
+- Tableau arôme × format : bouteilles libres, réservées aux commandes et à produire
+- Lots groupés par arôme × format, triés par DLV ; lots hors vente à part
 
 ### Pointage
 - Saisie des heures de travail
@@ -61,7 +62,7 @@ Application de gestion pour votre entreprise de thé froid.
   - Ingrédients de recette: **+1.5%** (perte de production)
   - Eau: **ignorée** (pas de déduction)
   - Bouteilles vides: **1 pour 1** selon le format
-  - Capsules/Bouchons: **+7.5%** (arrondi supérieur)
+  - Capsules/Bouchons: **+5%** (arrondi supérieur)
 - Si stock inventaire insuffisant: warning affiché, la production continue
 - Matching intelligent des bouteilles vides (alias 25cl ↔ 0.25l ↔ 250ml)
 
@@ -117,6 +118,127 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v13.1
+
+- Synchronisation : les modifications sur des champs distincts sont fusionnées ; un appareil ancien ne recrée plus automatiquement un lot supprimé à distance. Les conflits ambigus sont conservés dans la sauvegarde JSON pour vérification.
+- Numéros de commandes et de BL attribués par transaction cloud, avec réessais idempotents et conservation des numéros historiques. Une connexion est nécessaire pour créer ces documents ; tous les appareils doivent recharger cette version.
+- Import JSON validé avant confirmation et écriture ; contenances, unités et quantités affichées comme texte.
+- Pointage de nuit, validation des pauses et export des archives selon les filtres affichés corrigés, en conservant les évolutions v13.0.
+
+### Nouveautés v13.0
+
+Attribution des bouteilles aux commandes.
+
+- **🎯 Une seule règle** — Les commandes « produite » d'abord, puis « en attente », par date de livraison ; chacune prend les lots vendables à sa date, assez longs pour le client, la DLV la plus proche d'abord. La page Stock (réservé, « Prévu pour » sur chaque lot), la livraison, « ✓ Stock », le planificateur et le jumeau suivent tous cette règle.
+- **🚚 Livraison pré-remplie** — La fenêtre « Livrer » propose déjà les lots, avec leur DLV et les jours restants, sans toucher aux bouteilles prévues pour d'autres commandes (signalées si on les prend). Tout reste modifiable.
+- **⏳ Durée de vie minimale par client** — Nouveau champ de la fiche client : les lots dont la DLV arrive trop tôt ne lui sont pas proposés.
+- **✂️ Livraison partielle** — S'il manque des bouteilles, on livre ce qui est prêt et le reste devient un reliquat (#00048-2, « en attente »), créé dans la même transaction.
+- **🎁 Bouteilles en plus** — Dans les menus ⋯ : ajouter des bouteilles sur une ligne ou un article hors commande, facturées ou offertes (les offertes sont tracées mais hors montant).
+- **✅ Contrôle avant « produite »** — « Marquer produite » prévient s'il manque des bouteilles libres pour la commande.
+- **🛡️ Fiche client** — L'enregistrement ne perd plus les champs que le formulaire n'affiche pas (client ponctuel, e-mail…).
+
+### Nouveautés v12.9
+
+Nouvelle page Inventaire et suivi des lots d'ingrédients.
+
+- **🛒 À commander** — La liste de courses : chaque article qui, après la production prévue par les commandes, passe sous son seuil (ou manque), avec la quantité à commander arrondie au-dessus. Elle signale aussi ce qui fausse le calcul (arôme sans recette, ingrédient absent). « Copier la liste » pour l'envoyer à un fournisseur.
+- **🌿 Ingrédients suivis par lot** — À la réception, on saisit le n° de lot du fournisseur (obligatoire), et si on veut le fournisseur et la date limite. La production consomme d'abord le stock sans n° de lot (antérieur au suivi), puis le lot dont la date limite arrive en premier, et note quels lots ont servi.
+- **🔗 Traçabilité dans les deux sens** — Tracer et Rappel du lot (et leur export Excel) montrent les lots d'ingrédients utilisés ; la fenêtre d'un ingrédient montre, pour chaque lot, les lots de bouteilles produits avec, et « Rappel fournisseur » retrouve où ils sont partis.
+- **📋 Listes claires** — Ingrédients, contenants (bouteilles, bouchons, étiquettes) et équipement (replié) en listes séparées : stock, seuil, consommation prévue et reste après production, avec une barre par rapport au seuil. Les tuiles de comptage et les boutons ±1 disparaissent.
+- **✏️ Ajuster** — Réception, recomptage ou sortie avec aperçu du résultat ; un ingrédient se corrige lot par lot, et un lot périmé ou perdu se retire. La modification d'un article ne touche plus à sa quantité ni à ses lots.
+- **🛡️ Plus de doublons** — Un inventaire vide n'est plus rempli automatiquement à l'affichage (cela créait des doublons sur un appareil neuf) : un bouton « Créer les articles de base » le fait sur demande. Un nom déjà utilisé est refusé.
+
+### Nouveautés v12.8
+
+Fondations communes à toutes les pages : une interface plus calme et plus lisible, surtout sur téléphone.
+
+- **🧭 Un seul titre par page** — Le titre est celui de la barre du haut (Stock, Production, Historique…) ; les pages n'affichent plus de grand titre ni de carte qui le répète, seulement une barre d'outils : onglets ou mode à gauche, actions à droite.
+- **⋯ Suppressions rangées** — Paramètres (employés, arômes, formats, recettes, clients), Inventaire, Livraisons et pointages non clôturés : « Supprimer » passe dans le menu ⋯ de la ligne, comme sur la page Stock. Les exports et l'effacement des clients sans commande sont dans le menu ⋯ des clients. Le rouge est réservé aux confirmations.
+- **🏷️ Moins de bruit** — L'étiquette « Actif » n'apparaît plus ; seuls les éléments inactifs (ou ponctuels) sont signalés.
+- **👆 Cibles tactiles** — Sur téléphone et écran tactile, boutons, onglets, filtres et champs font au moins 40 px.
+- **🔤 Lisibilité** — Plus aucun texte sous 11 px ni libellé en majuscules (sauf le logo, le badge « LIVE » et le jumeau 3D).
+- **📦 Inventaire** — L'alerte de seuil s'affiche dans la carte de l'article (elle occupait une case vide de la grille) ; Modifier et Supprimer passent dans le menu ⋯ ; la section Équipement dépliée garde sa grille.
+- **🔎 Recherche** — Livraisons et Inventaire : même recherche que Stock et Historique (pas d'interruption du clavier prédictif, curseur conservé).
+
+### Nouveautés v12.7
+
+Refonte de la page Stock : ce qui est libre, ce qui est promis, ce qui doit partir vite.
+
+- **🚨 À traiter** — Un bandeau qui n'apparaît que s'il y a quelque chose à faire : lots à écouler d'abord (DLV dans 7 jours ou moins), bouteilles à produire pour les commandes, lots hors vente, lots dont l'arôme ou le format est absent des Paramètres.
+- **📊 Disponible à la vente** — Un tableau arôme × format : les bouteilles libres en grand, puis les réservées, les « à produire » et un signal « DLV proche ». Les commandes ouvertes réservent le stock par date de livraison, les « produite » d'abord (même règle que « ✓ Stock ») ; cette réservation est une prévision, on choisit toujours les lots à la livraison. Une case filtre les lots.
+- **📦 Lots vendables** — Groupés par arôme × format et triés par DLV (le premier à sortir est signalé), avec les commandes qui réservent ce stock et ce qui manque. « Sortie » reste à portée de main ; Tracer, Modifier et Supprimer passent dans le menu « ⋯ ».
+- **🚫 Hors vente** — Les lots expirés, invendables, bloqués ou à quantité invalide sont rangés à part, avec l'action qui convient (Sortir, Rappel, Modifier).
+- **⚠️ Sortie de stock** — La fenêtre indique les bouteilles libres de l'arôme × format et prévient quand une sortie entame le stock réservé aux commandes ; l'enregistrement demande alors une confirmation.
+- **🔎 Recherche** — Stock et Historique : on peut de nouveau taper des espaces et des majuscules, la recherche ignore les accents et ne perturbe plus le clavier prédictif du téléphone.
+- **🔤 Noms d'arôme** — Le stock compare les noms sans tenir compte de la casse ni des accents : un lot « hibiscus » compte dans « Hibiscus ».
+
+### Nouveautés v12.6
+
+Refonte du tableau de bord : un cockpit du jour, puis les chiffres et tendances.
+
+- **🎯 Cockpit du jour** — Un en-tête qui résume la journée, des raccourcis (+ Commande, + Lot, Pointage) et cinq tuiles cliquables : à produire, livraisons sous 7 jours, stock vendable, équipe sur place, livré ce mois (comparé aux mêmes jours du mois précédent).
+- **🚨 Priorités** — Commandes en retard ou urgentes, lots expirés, invendables ou à DLV proche, consommables sous le seuil et pointages restés ouverts, du plus critique au moins critique ; un clic ouvre directement la commande, le stock filtré, l'article ou la clôture du pointage.
+- **🚚 Livraisons · 7 jours** — Les 7 prochains jours d'un coup d'œil (un jour ouvre les commandes de ce jour) et les prochaines livraisons, retards en tête.
+- **🧪 Production à lancer** — Les 4 cuves et 2 casseroles de l'atelier remplies selon le plan, puis par arôme : litres, bouteilles, postes, échéance et recette manquante.
+- **👥 Équipe et À faire** — Pointer l'arrivée ou le départ sans quitter le tableau de bord ; tâches avec « Effacer les terminées ».
+- **📈 Chiffres & tendances** — CA ou bouteilles livrés sur 12 semaines ou 12 mois, panier moyen, bouteilles produites, meilleurs clients et ventes par arôme ; détail au survol, au toucher ou au clavier, et tableau des données.
+- **🛠️ Plan de production plus juste** (aussi dans le jumeau 3D) — Les cuves vont d'abord aux arômes dont le manque est le plus proche (première livraison non couverte par le stock), et non plus à ceux de la commande la plus proche même quand elle est déjà couverte.
+
+### Nouveautés v12.5
+
+Jumeau 3D fluide sur téléphone :
+
+- **📱 Économie par défaut sur téléphones et tablettes** — En Auto, tous les téléphones et tablettes démarrent en Économie (rendu direct sans occlusion ambiante) ; Standard et Haute restent disponibles dans le menu ✦. Auparavant, les iPhone et les Android récents recevaient Standard, trop lourd pour eux.
+- **🔋 Plus de rendu en continu** — En Économie, les animations d'ambiance (halos qui pulsent, vapeur, lueur des plaques) sont figées : la scène n'est redessinée que si la caméra bouge ou si les données changent (avant : environ 30 images par seconde en permanence dès qu'une alerte existait). Standard les limite à 15 i/s, Haute à 30 i/s.
+- **🐢 Gestes fluides** — Correction d'un bug qui doublait le nombre de rendus à chaque image tant que la caméra glissait après un geste (jusqu'à 30 rendus dans une même image, l'écran se figeait après chaque balayage). Une mise à jour des données sans changement visible ne relance plus 1 s de rendu continu.
+- **Auto vraiment adaptatif** — La baisse automatique de qualité se déclenche après 1,5 s de mouvements saccadés (cumulées d'un geste à l'autre) au lieu d'exiger près de 4 s de mouvement continu, et l'Économie réduit encore la définition si besoin.
+- **Interface allégée en Économie** — Plus de flou d'arrière-plan sur les boutons, indicateurs et panneaux posés sur la vue 3D (recalculé à chaque image, très coûteux sur mobile).
+- **Ouverture** — Les shaders sont compilés en arrière-plan avant la première image et l'indicateur « Construction de l'atelier 3D… » reste affiché jusqu'à ce que l'atelier apparaisse.
+
+### Nouveautés v12.4
+
+Correctifs de l'audit du 23.10.2026 (`AUDIT-2026-10-23.md`) :
+
+- **🛡️ Plus d'effacement des changements des autres appareils** — Confirmer une production malgré un avertissement d'inventaire, ou restaurer une commande, relit désormais les données après la boîte de confirmation. Auparavant, une vente ou une livraison faite sur un autre appareil pendant que la boîte était ouverte pouvait être effacée (lot livré ressuscité, vente supprimée de l'historique, commande supprimée). Une restauration de commande est annulée si la commande a changé entre-temps.
+- **✓ Stock** — Les bouteilles des commandes déjà « produites » leur sont réservées : le bouton ne passe plus en « produite » une commande que seul ce stock réservé couvrirait.
+- **📂 Restaurer depuis JSON** — Affiche d'abord un bilan à confirmer (ajouts, modifications, suppressions par table, appliqués sur tous les appareils) et télécharge une sauvegarde de l'état actuel avant d'écrire.
+- **Clients** — « Effacer tout » devient « Effacer les clients sans commande » : les clients liés à une commande sont conservés, comme pour une suppression unitaire.
+- **♻️ Backup pré-synchro retiré** — Le bouton « Restaurer le backup pré-synchro » (synchro legacy) est supprimé et l'ancienne copie locale effacée au démarrage : sa restauration repoussait des valeurs périmées vers le cloud.
+
+### Nouveautés v12.3
+
+- **🎨 Jumeau 3D « maquette premium », calqué sur les photos de l'atelier** — L'étage est reconstruit pièce par pièce comme une maquette d'architecte : labo de production (meubles de labo blancs à lisses vert-de-gris et clips rouges, plans en résine vert sauge, évier et robinetterie de labo, armoires hautes avec les cartons d'Einkochautomat, réfrigérateur, prises industrielles), laverie, stock, couloir, réserve avec chambre froide (évaporateur, étagères inox à clayettes, boîtes hermétiques de fruits séchés, rayonnage noir à tablettes), vestiaire-bureau et expédition avec monte-charge. Les cloisons sont coupées à hauteur d'appui ; les façades côté caméra s'abaissent automatiquement, les autres gardent leurs fenêtres à cadres bronze avec les arbres d'automne dehors. Le quai et le camion disparaissent.
+- **Rendu** : ombres douces, occlusion ambiante (GTAO), arêtes adoucies, couleurs neutres, reflets de l'inox sur un environnement d'atelier (réglettes LED, baies vitrées), ciel et terrain. Toutes les matières sont générées par code (linoléum, mosaïque, faïence, crépi, inox brossé, chêne, pelouse, pavés) : aucun fichier image ajouté.
+- **Objets fidèles** : cuves 25 L inox à robinet et thermostat sur la paillasse (couvercle relevé quand une production est planifiée), casseroles sur plaques à induction avec **vapeur**, bouteilles en verre au thé ambré avec étiquette ThéCol et bouchon noir dans des casiers noirs, commandes en **caisses vertes ajourées sur chariots bleus** avec bon de livraison (bouteilles visibles une fois produites), consommables rangés selon leur nature (boîtes dont le niveau suit le stock, sacs kraft, packs de bouteilles sous film, cartons de bouchons, rouleaux d'étiquettes, bidons).
+- **Équipe** : mannequins en blouse, charlotte, gants bleus et tablier à la couleur de l'employé, à leur poste ; un absent est représenté par sa blouse suspendue au portant du vestiaire.
+- **Indicateurs intégrés au décor** : halos d'état au sol, vrais gyrophares sur les commandes en retard ou urgentes, marquage hachuré d'un emplacement vide, étiquettes de rayon à bande d'état et voyant clignotant.
+- **✦ Qualité du rendu** — Nouveau menu dans la barre du jumeau : Auto (choisie selon l'appareil), Haute, Standard ou Économie, mémorisée sur l'appareil. En Auto, la qualité baisse d'un cran si les mouvements de caméra deviennent saccadés. Les ombres ne sont recalculées que lorsque la scène change.
+
+### Nouveautés v12.2
+
+- **📏 Jumeau 3D à l'échelle réelle (1 unité = 1 m)** — Corrige les incohérences de proportions : une cuve de 25 L mesure maintenant Ø 34 cm (rebord à 90 cm, à hauteur du plan de travail) au lieu de 1,24 m, les casseroles de 9 L et 4 L ont leur vraie taille, les employés mesurent 1,75 m. Palettes Europe 1,20 × 0,80 m chargées de 8 casiers ou cartons par couche, bouteilles de 20 à 31 cm selon le format, bacs de 60 × 40 cm sur des rayonnages de 2 m, atelier d'environ 24 × 16 m.
+- **Pièces corrigées** : les pieds des cuves touchent le fond conique (trépied), le film étirable épouse les cartons réellement présents, les gyrophares et fiches palette sont posés sur un carton ou casier existant, plus d'enseigne ni d'enrouleur encastrés dans un pilier, plus d'extincteur devant une fenêtre, essieu arrière du camion à sa place, étiquettes des plaques fixées au bandeau du plan de travail.
+- **Lisibilité** : en vue rapprochée, les étiquettes des objets lointains sont masquées ; la caméra de zoom sur un objet passe au-dessus des employés postés devant.
+
+### Nouveautés v12.1
+
+- **🏭 Jumeau 3D fidèle à l'atelier** — La zone Production montre l'équipement réel : **4 cuves inox de 25 L** et **2 plaques à induction** avec une **casserole de 9 L** (plaque 1) et une **de 4 L** (plaque 2). La production à faire est répartie sur ces postes comme dans le planificateur (cuves de 25 L, casserole pour le reste), par ordre d'urgence ; ce qui ne rentre pas apparaît en « prochaine fournée ». Cuve planifiée = couvercle ouvert, liquide à la couleur de l'arôme et tube de niveau ; plaque planifiée = zone de chauffe allumée.
+- **Modèles plus détaillés** partout : plan de travail inox (évier, balance, bocaux, planche), poste d'embouteillage, palettes Europe, casiers avec bouteilles visibles, cartons étiquetés et filmés, rayonnage avec sacs/bidons/boîtes, employés en tablier et charlotte à leur poste, vestiaire avec casiers, quais et camion détaillés, reflets réalistes de l'inox.
+
+### Nouveautés v12.0
+
+- **🏭 Jumeau numérique 3D (`#jumeau`, nouvelle page d'accueil)** — L'atelier est reconstruit en 3D à partir des données synchronisées, et se met à jour en temps réel (flash sur les objets modifiés depuis un autre appareil) :
+  - **Production** : une cuve par arôme, remplie des litres restant à produire (commandes actives − stock vendable).
+  - **Entrepôt** : une palette par arôme × format, hauteur selon le stock ; anneau rouge pulsé si lots expirés, orange si stock insuffisant, palette fantôme en cas de rupture.
+  - **Expédition** : une palette par commande active (carton = en attente, film vert = produite), gyrophare sur les commandes urgentes (≤ 3 j) ou en retard.
+  - **Consommables** : bacs sur étagères, niveau et couleur selon le seuil d'alerte.
+  - **Équipe** : personnages présents (pointage ouvert) ou absents.
+- **Interactions** : survol = info-bulle, clic = inspecteur avec actions directes (vendre/modifier un lot, marquer produite, livrer, ±1/±10 sur un consommable, pointer arrivée/départ), double-clic = zoom sur l'objet, puces de zones et indicateurs cliquables, panneau « Alertes / Objets » navigable au clavier, rotation automatique et plein écran (affichage mural).
+- **⚡ Palette de commandes (Ctrl/⌘ + K)** — navigation, actions (nouvelle commande, nouveau lot, pointage…), recherche dans l'atelier 3D et dans les données.
+- **⌨️ Raccourcis clavier** — `?` aide, `/` recherche, `G` puis une lettre pour changer de page, `0–5` / `←` `→` / `R` / `F` / `Échap` dans le jumeau.
+- **Transitions de page** discrètes (désactivées si « réduire les animations » est actif).
+- **Three.js 0.185.1** embarqué dans `vendor/three/` (chargé à la demande, fonctionne hors ligne dans l'APK) ; repli automatique sur la liste des objets si WebGL est indisponible.
 
 ### Nouveautés v11.8
 
@@ -296,6 +418,7 @@ Pour sauvegarder vos données:
 Pour restaurer:
 1. Cliquez sur **"Restaurer depuis JSON"**
 2. Sélectionnez votre fichier de sauvegarde
+3. Vérifiez le bilan affiché (ajouts, modifications, suppressions par table) puis confirmez. La restauration remplace les données sur **tous les appareils** ; une sauvegarde de l'état actuel est téléchargée juste avant.
 
 ## Tests
 

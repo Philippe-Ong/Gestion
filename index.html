@@ -23,7 +23,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=11.12">
+    <link rel="stylesheet" href="styles.css?v=13.0">
 </head>
 <body class="body--locked">
     <aside class="sidebar">
@@ -37,9 +37,14 @@
             </button>
         </div>
         <nav aria-label="Navigation principale">
-            <a href="#dashboard" class="nav-item active" data-page="dashboard">
+            <a href="#jumeau" class="nav-item active" data-page="jumeau">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M17 18h1"/><path d="M12 18h1"/><path d="M7 18h1"/></svg>
+                Jumeau 3D
+                <span class="nav-badge">Live</span>
+            </a>
+            <a href="#dashboard" class="nav-item" data-page="dashboard">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                Dashboard
+                Tableau de bord
             </a>
             <a href="#stock" class="nav-item" data-page="stock">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
@@ -85,7 +90,12 @@
                 <div class="global-search-results" id="globalSearchResults" role="listbox"></div>
             </div>
             <div class="header-actions" id="headerActions">
-                <span style="font-size: 11px; color: var(--text-lighter);">v11.14</span>
+                <button type="button" class="cmdk-trigger" id="cmdkTrigger" aria-label="Ouvrir la palette de commandes" aria-keyshortcuts="Control+K Meta+K">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                    <span class="cmdk-trigger-label">Actions</span>
+                    <kbd class="cmdk-trigger-key">Ctrl K</kbd>
+                </button>
+                <span style="font-size: 11px; color: var(--text-lighter);">v13.1</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -103,9 +113,9 @@
 
     <!-- Bottom Navigation (mobile only, shown via @media) -->
     <nav class="bottom-nav" aria-label="Navigation mobile">
-        <a href="#dashboard" class="bottom-nav-item" data-page="dashboard">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-            <span>Accueil</span>
+        <a href="#jumeau" class="bottom-nav-item" data-page="jumeau">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M17 18h1"/><path d="M12 18h1"/><path d="M7 18h1"/></svg>
+            <span>Atelier</span>
         </a>
         <a href="#commandes" class="bottom-nav-item" data-page="commandes">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
@@ -142,10 +152,31 @@
     <!-- Toast Container -->
     <div class="toast-container" id="toastContainer" role="status" aria-live="polite" aria-atomic="true"></div>
 
+    <!-- Palette de commandes (Ctrl/⌘ + K) -->
+    <div class="cmdk-overlay" id="cmdkOverlay" hidden>
+        <div class="cmdk" role="dialog" aria-modal="true" aria-label="Palette de commandes">
+            <div class="cmdk-input-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" id="cmdkInput" role="combobox" aria-expanded="true" aria-controls="cmdkList" aria-autocomplete="list" placeholder="Page, action, commande, client, lot…" autocomplete="off" spellcheck="false">
+                <kbd>Esc</kbd>
+            </div>
+            <div class="cmdk-list" id="cmdkList" role="listbox" aria-label="Résultats"></div>
+            <div class="cmdk-footer" aria-hidden="true">
+                <span><kbd>↑</kbd><kbd>↓</kbd> naviguer</span>
+                <span><kbd>↵</kbd> ouvrir</span>
+                <span><kbd>?</kbd> raccourcis</span>
+            </div>
+        </div>
+    </div>
+
     <!-- Bottom sheet (mobile) -->
     <div class="bottom-sheet-overlay" id="bottomSheetOverlay"></div>
     <div class="bottom-sheet" id="bottomSheet" role="dialog" aria-modal="true" aria-label="Plus d'options">
         <div class="bottom-sheet-handle"></div>
+        <a href="#dashboard" class="bottom-sheet-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            <span>Tableau de bord</span>
+        </a>
         <a href="#pointage" class="bottom-sheet-item">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
             <span>Pointage</span>
@@ -333,6 +364,6 @@
             if (err) { err.textContent = 'Erreur de connexion au service. Vérifiez votre réseau.'; err.style.display = 'block'; }
         }
     </script>
-    <script src="app.js?v=11.14"></script>
+    <script src="app.js?v=13.1"></script>
 </body>
 </html>
