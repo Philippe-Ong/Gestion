@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.6**
+**v13.0**
 
 ## Adresse
 
@@ -23,7 +23,8 @@ Application de gestion pour votre entreprise de thé froid.
 - Statut automatique: OK, DLV proche, Invendable (DLV dépassée), Expiré (DLC dépassée)
 - Vente de bouteilles (déstockage)
 - Historique de production
-- Résumé du stock vendable par arôme/format
+- Tableau arôme × format : bouteilles libres, réservées aux commandes et à produire
+- Lots groupés par arôme × format, triés par DLV ; lots hors vente à part
 
 ### Pointage
 - Saisie des heures de travail
@@ -117,6 +118,53 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v13.0
+
+Attribution des bouteilles aux commandes.
+
+- **🎯 Une seule règle** — Les commandes « produite » d'abord, puis « en attente », par date de livraison ; chacune prend les lots vendables à sa date, assez longs pour le client, la DLV la plus proche d'abord. La page Stock (réservé, « Prévu pour » sur chaque lot), la livraison, « ✓ Stock », le planificateur et le jumeau suivent tous cette règle.
+- **🚚 Livraison pré-remplie** — La fenêtre « Livrer » propose déjà les lots, avec leur DLV et les jours restants, sans toucher aux bouteilles prévues pour d'autres commandes (signalées si on les prend). Tout reste modifiable.
+- **⏳ Durée de vie minimale par client** — Nouveau champ de la fiche client : les lots dont la DLV arrive trop tôt ne lui sont pas proposés.
+- **✂️ Livraison partielle** — S'il manque des bouteilles, on livre ce qui est prêt et le reste devient un reliquat (#00048-2, « en attente »), créé dans la même transaction.
+- **🎁 Bouteilles en plus** — Dans les menus ⋯ : ajouter des bouteilles sur une ligne ou un article hors commande, facturées ou offertes (les offertes sont tracées mais hors montant).
+- **✅ Contrôle avant « produite »** — « Marquer produite » prévient s'il manque des bouteilles libres pour la commande.
+- **🛡️ Fiche client** — L'enregistrement ne perd plus les champs que le formulaire n'affiche pas (client ponctuel, e-mail…).
+
+### Nouveautés v12.9
+
+Nouvelle page Inventaire et suivi des lots d'ingrédients.
+
+- **🛒 À commander** — La liste de courses : chaque article qui, après la production prévue par les commandes, passe sous son seuil (ou manque), avec la quantité à commander arrondie au-dessus. Elle signale aussi ce qui fausse le calcul (arôme sans recette, ingrédient absent). « Copier la liste » pour l'envoyer à un fournisseur.
+- **🌿 Ingrédients suivis par lot** — À la réception, on saisit le n° de lot du fournisseur (obligatoire), et si on veut le fournisseur et la date limite. La production consomme d'abord le stock sans n° de lot (antérieur au suivi), puis le lot dont la date limite arrive en premier, et note quels lots ont servi.
+- **🔗 Traçabilité dans les deux sens** — Tracer et Rappel du lot (et leur export Excel) montrent les lots d'ingrédients utilisés ; la fenêtre d'un ingrédient montre, pour chaque lot, les lots de bouteilles produits avec, et « Rappel fournisseur » retrouve où ils sont partis.
+- **📋 Listes claires** — Ingrédients, contenants (bouteilles, bouchons, étiquettes) et équipement (replié) en listes séparées : stock, seuil, consommation prévue et reste après production, avec une barre par rapport au seuil. Les tuiles de comptage et les boutons ±1 disparaissent.
+- **✏️ Ajuster** — Réception, recomptage ou sortie avec aperçu du résultat ; un ingrédient se corrige lot par lot, et un lot périmé ou perdu se retire. La modification d'un article ne touche plus à sa quantité ni à ses lots.
+- **🛡️ Plus de doublons** — Un inventaire vide n'est plus rempli automatiquement à l'affichage (cela créait des doublons sur un appareil neuf) : un bouton « Créer les articles de base » le fait sur demande. Un nom déjà utilisé est refusé.
+
+### Nouveautés v12.8
+
+Fondations communes à toutes les pages : une interface plus calme et plus lisible, surtout sur téléphone.
+
+- **🧭 Un seul titre par page** — Le titre est celui de la barre du haut (Stock, Production, Historique…) ; les pages n'affichent plus de grand titre ni de carte qui le répète, seulement une barre d'outils : onglets ou mode à gauche, actions à droite.
+- **⋯ Suppressions rangées** — Paramètres (employés, arômes, formats, recettes, clients), Inventaire, Livraisons et pointages non clôturés : « Supprimer » passe dans le menu ⋯ de la ligne, comme sur la page Stock. Les exports et l'effacement des clients sans commande sont dans le menu ⋯ des clients. Le rouge est réservé aux confirmations.
+- **🏷️ Moins de bruit** — L'étiquette « Actif » n'apparaît plus ; seuls les éléments inactifs (ou ponctuels) sont signalés.
+- **👆 Cibles tactiles** — Sur téléphone et écran tactile, boutons, onglets, filtres et champs font au moins 40 px.
+- **🔤 Lisibilité** — Plus aucun texte sous 11 px ni libellé en majuscules (sauf le logo, le badge « LIVE » et le jumeau 3D).
+- **📦 Inventaire** — L'alerte de seuil s'affiche dans la carte de l'article (elle occupait une case vide de la grille) ; Modifier et Supprimer passent dans le menu ⋯ ; la section Équipement dépliée garde sa grille.
+- **🔎 Recherche** — Livraisons et Inventaire : même recherche que Stock et Historique (pas d'interruption du clavier prédictif, curseur conservé).
+
+### Nouveautés v12.7
+
+Refonte de la page Stock : ce qui est libre, ce qui est promis, ce qui doit partir vite.
+
+- **🚨 À traiter** — Un bandeau qui n'apparaît que s'il y a quelque chose à faire : lots à écouler d'abord (DLV dans 7 jours ou moins), bouteilles à produire pour les commandes, lots hors vente, lots dont l'arôme ou le format est absent des Paramètres.
+- **📊 Disponible à la vente** — Un tableau arôme × format : les bouteilles libres en grand, puis les réservées, les « à produire » et un signal « DLV proche ». Les commandes ouvertes réservent le stock par date de livraison, les « produite » d'abord (même règle que « ✓ Stock ») ; cette réservation est une prévision, on choisit toujours les lots à la livraison. Une case filtre les lots.
+- **📦 Lots vendables** — Groupés par arôme × format et triés par DLV (le premier à sortir est signalé), avec les commandes qui réservent ce stock et ce qui manque. « Sortie » reste à portée de main ; Tracer, Modifier et Supprimer passent dans le menu « ⋯ ».
+- **🚫 Hors vente** — Les lots expirés, invendables, bloqués ou à quantité invalide sont rangés à part, avec l'action qui convient (Sortir, Rappel, Modifier).
+- **⚠️ Sortie de stock** — La fenêtre indique les bouteilles libres de l'arôme × format et prévient quand une sortie entame le stock réservé aux commandes ; l'enregistrement demande alors une confirmation.
+- **🔎 Recherche** — Stock et Historique : on peut de nouveau taper des espaces et des majuscules, la recherche ignore les accents et ne perturbe plus le clavier prédictif du téléphone.
+- **🔤 Noms d'arôme** — Le stock compare les noms sans tenir compte de la casse ni des accents : un lot « hibiscus » compte dans « Hibiscus ».
 
 ### Nouveautés v12.6
 

@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.6
+**Version:** v13.0
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -168,6 +168,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 }
 ```
 
+Champ client facultatif (v13.0) : `dureeVieMinJours` — durée de vie minimale exigée à la livraison, en jours avant la limite de vente du lot (`clientDureeVieMin`).
+
 ### Lots de production (Stock)
 ```json
 {
@@ -219,6 +221,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 ```
 
 `lotsUtilises`, `dateLivraisonEffective` et `clientLivraison` sont écrits par `deliverCommandeTransaction` (transaction Firestore). `dateLivraison` reste la date **prévue**. `numeroBL` est mémorisé par `generateBL` / `getOrCreateBL` : un BL supprimé puis régénéré pour la même livraison reprend son numéro. La restauration d'une commande livrée vide `lotsUtilises` et retire `dateLivraisonEffective`, `clientLivraison` et `numeroBL` (ces informations sont conservées dans les entrées `RESTAURE-`).
+
+**Champs v13.0.** Une ligne `items[]` livrée en plus de la commande porte `enPlus: true` (et `offert: true` si elle est gratuite : exclue du montant par `diagnoseCommandeMontant`, mais tracée). Une livraison partielle écrit `reliquatId` sur la commande livrée et crée le reliquat (`reliquatDe`, numéro `<n°>-2`, `-3`…, statut `en_attente`, mêmes client et date). Les lignes `enPlus` sont ignorées par la règle d'attribution, retirées à la restauration et non reprises par « Dupliquer ».
 
 ### Livraisons / Bulletins de livraison
 ```json
@@ -374,7 +378,12 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - **Mise en page** : requêtes de conteneur (`container: dash`) — 5 tuiles et cartes sur 2 colonnes quand la largeur le permet, 1 colonne sur téléphone.
 
 ### 3.2 Gestion du Stock
-- Tableau des lots avec filtres (arôme, format, statut)
+- Page organisée en quatre zones (v12.7) :
+  - **À traiter** : bandeau affiché seulement s'il y a une action (lots à écouler d'abord, bouteilles à produire, lots hors vente, lots dont l'arôme ou le format est absent des Paramètres)
+  - **Disponible à la vente** : tableau arôme × format (`buildStockOverview`, noms comparés par `normalizeName`) — bouteilles libres (vendables − réservées), réservées, à produire, signal « DLV proche » ; une case filtre les lots (filtre `stockCell`)
+  - **Lots vendables** : groupés par arôme × format, triés par DLV (FEFO), avec les commandes qui réservent ce stock ; actions « Sortie » et menu ⋯ (Tracer, Modifier, Supprimer)
+  - **Hors vente** : lots expirés, invendables, bloqués ou à quantité invalide, avec l'action adaptée (Sortir, Rappel, Modifier)
+- Réservation : les commandes ouvertes réservent le stock par date de livraison, les « produite » d'abord puis les « en attente » (même règle que « ✓ Stock ») ; c'est une prévision, la livraison choisit toujours ses lots. La modale « Sortie » affiche le stock libre et demande une confirmation si la sortie entame des bouteilles réservées (relecture des lots après la confirmation)
 - Ajouter nouveau lot
 - Statut par lot (DLV d'abord, repli DLC pour les lots sans DLV) : OK, DLV proche (< 7 j), Invendable (DLV dépassée, DLC valide), Expiré (DLC dépassée)
 - Durée de vie (`lotShelfLifeHtml`, aussi dans l'inspecteur du jumeau) : phrase « Vendable encore N j » / « DLV dépassée de N j » / « DLC dépassée de N j » et frise Prod. → DLV → DLC (vert : vente, jaune : DLV proche, gris puis rouge après la DLV) avec un repère « aujourd'hui »
@@ -435,6 +444,9 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - Tables responsives
 
 ### Composants
+- En-tête de page (v12.8) : le titre est celui de la barre du haut ; la page n'affiche qu'une barre d'outils (`pageToolbar`) — onglets ou sélecteur de mode à gauche, actions à droite, l'action principale en dernier
+- Actions secondaires d'une ligne dans un menu « ⋯ » (`rowMenuHtml`) ; les suppressions y sont rangées. Le rouge est réservé aux boîtes de confirmation
+- Textes ≥ 11 px, pas de libellés en majuscules (sauf logo, badge « LIVE » et jumeau 3D) ; cibles tactiles ≥ 40 px sur téléphone et écrans tactiles
 - Boutons: vert olive, border-radius 8px
 - Inputs: border gris, focus vert
 - Cards: fond blanc, shadow léger
@@ -477,8 +489,8 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 1. Nouveau lot: arôme, format, quantité, dates
 2. Mise à jour statut automatique (invendable si DLV passée, expiré si DLC passée)
 3. Historique de production
-4. Recherche par n° de lot (« 42 » ou « 000042 »), arôme ou format ; les lots épuisés sont retrouvés via les commandes, les BL et l'historique
-5. Filtre « Bloqué » (affiché dès qu'un lot est bloqué)
+4. Recherche par n° de lot (« 42 » ou « 000042 »), arôme ou format, sans tenir compte des accents ; la saisie est conservée telle quelle et la liste n'est re-rendue qu'après une pause, jamais pendant une composition (clavier prédictif) — même comportement dans l'Historique (`data-live-search`). Les lots épuisés sont retrouvés via les commandes, les BL et l'historique
+5. Lots bloqués rangés dans « Hors vente » (v12.7)
 
 ### Traçabilité des bouteilles (v11.12)
 
@@ -504,6 +516,28 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 **Suppression d'un lot** : la modale demande ce que deviennent les bouteilles restantes — destruction/péremption ou casse/perte (`SORTIE-`), ou lot créé par erreur (`AJUST-` négatif) — avant de supprimer l'enregistrement.
 
 **Modification d'un lot** : un changement de quantité crée un `AJUST-` signé (note facultative) ; un changement d'arôme, de format ou de dates est répercuté sur les entrées d'historique du lot. Le `numLot` ne change pas et les livraisons déjà effectuées gardent leurs informations d'origine.
+
+### Attribution des bouteilles aux commandes (v13.0)
+
+**Règle unique** (`planAttributionCommandes`) : commandes ouvertes, « produite » d'abord puis « en attente », par date de livraison ; chaque ligne prend les lots vendables à sa date de livraison dont la limite de vente laisse au moins `dureeVieMinJours` jours au client (`createStockPool(…).takeLots(key, qty, date, minJours)`), DLV la plus proche d'abord. Rien n'est réservé en base : c'est une prévision. Elle alimente la page Stock (réservé, à produire, « Prévu pour » sur chaque lot), la fenêtre de livraison et le contrôle avant « Marquer produite » ; « ✓ Stock », le planificateur et le jumeau appliquent la même durée de vie minimale et les mêmes noms normalisés.
+
+**Fenêtre « Livrer »** (`showLivraisonBouteillesModal`, `confirmerLivraison`) : lots pré-remplis, DLV la plus proche d'abord, parmi les lots vendables aujourd'hui, assez longs pour le client et non prévus pour d'autres commandes ; les lots trop courts sont affichés sans saisie, ceux prévus pour une autre commande sont signalés. Une ligne ne peut pas dépasser la commande, sauf via ⋯ « Ajouter des bouteilles en plus » (avec « offertes ») ; ⋯ en pied de fenêtre « Ajouter un article hors commande ». Moins que commandé : livraison partielle, le reste devient un reliquat.
+
+**Transaction** (`deliverCommandeTransaction(commandeId, allocations, { extras, partielle, reliquatId, reliquatNumero })`) : revalide côté serveur la part commandée (alloué − en plus ≤ commandé ; égal sauf livraison partielle), les bouteilles en plus déclarées, et comme avant lots, blocage, DLV/DLC et stock ; écrit la commande livrée (lignes livrées puis lignes `enPlus`), les lots et, le cas échéant, le reliquat, dans la même transaction. Renvoie `{ lotsUtilises, reliquat }`.
+
+**« Marquer produite »** : si le plan (commande traitée comme produite) laisse un manque, une confirmation détaille les bouteilles manquantes.
+
+### Traçabilité amont : lots d'ingrédients (v12.9)
+
+**Articles suivis.** Les ingrédients de l'inventaire (`isLotSuiviArticle` : consommables qui ne sont pas des contenants — bouteilles, bouchons, étiquettes… — ni de l'eau) portent `lots: [{ id, numLot, quantite, quantiteRecue, dateReception, fournisseur?, dateLimite?, dateRetrait? }]`. `quantite` de l'article reste le total ; la part non couverte par les lots est le stock « sans n° de lot » (`invSansLot`), antérieur au suivi.
+
+**Réception** (`showReceptionModal` / `saveReception`) : quantité, n° de lot du fournisseur (obligatoire pour un ingrédient), fournisseur et date limite facultatifs. Un n° déjà connu complète le lot existant.
+
+**Consommation** (`consommerLotsIngredient`) : d'abord le stock sans n° de lot, puis les lots par date limite croissante (repli : date de réception). Appelée par `deduireInventaireProduction` (production confirmée), qui renvoie `ingredients: [{ article, unite, numLot, fournisseur, quantite }]`, et par le ± du jumeau (`updateInventaireQty`). Chaque entrée `PROD-` d'une production porte `productionId` et ces `ingredients` (quantités pour toute la production, tous formats).
+
+**Lecture.** Tracer et Rappel du lot affichent « Ingrédients utilisés » (dédoublonnés par `productionId`) ; l'export Excel ajoute la feuille Ingrédients. Côté inventaire, la fenêtre d'un ingrédient liste les lots en stock dans l'ordre d'utilisation, le stock sans n° de lot, les lots épuisés ou retirés, et pour chacun les lots de bouteilles produits avec (`getUsagesLotIngredient`) ; « Rappel fournisseur » ouvre la liste de ces lots de bouteilles avec l'accès à leur rappel. Chaque lot se corrige (recomptage) ou se retire (périmé, perdu : `dateRetrait`).
+
+**Limites.** Les lots de bouteilles créés avec « + Lot » ne déduisent pas l'inventaire et n'ont donc pas d'ingrédients rattachés ; les productions antérieures à v12.9 non plus.
 
 ## 6. Déploiement GitHub Pages
 

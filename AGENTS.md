@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.6
+**Current Version:** v13.0
 
 ## 1. Build, Lint, and Test Commands
 
@@ -56,12 +56,12 @@ The `navigateTo(page)` function looks up the page name in a views map and calls 
 **Page Descriptions:**
 - `jumeau` - Jumeau numérique 3D de l'atelier (accueil depuis v12.0), rendu « maquette » des vraies pièces depuis v12.3 : labo (cuves, plaques), stock, expédition, réserve et chambre froide (consommables), vestiaire (équipe) ; inspecteur avec actions directes, menu de qualité du rendu
 - `dashboard` - Cockpit du jour (v12.6) : tuiles cliquables, priorités, livraisons sur 7 jours, production à lancer sur les postes de l'atelier, équipe, tâches ; puis « Chiffres & tendances » (CA ou bouteilles livrés sur 12 semaines / 12 mois, meilleurs clients, ventes par arôme). Lecture seule, réutilise `buildTwinModel()`
-- `stock` - Gestion des lots, historique de production, statuts DLV/DLC
+- `stock` - Stock (v12.7) : bandeau « À traiter », tableau arôme × format des bouteilles libres / réservées / à produire (`buildStockOverview`), lots groupés par arôme × format triés par DLV, lots hors vente à part ; historique de production, statuts DLV/DLC
 - `pointage` - Saisie des heures employés avec tabs: pointage, historique, stats, employés
-- `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée)
+- `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée) ; livraison v13.0 : lots pré-remplis par la règle d'attribution commune (`planAttributionCommandes`, durée de vie minimale par client), livraison partielle avec reliquat, bouteilles en plus (⋯) facturées ou offertes, contrôle du stock avant « Marquer produite »
 - `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF (design fidèle au template depuis v11.10)
 - `production` - Planificateur de production avec calcul automatique des ingrédients et gestion des cuves
-- `inventaire` - Gestion des consommables et équipements avec seuils d'alerte
+- `inventaire` - Inventaire (v12.9) : « À commander » d'après les commandes à produire et les seuils, ingrédients suivis par lot fournisseur (réception, ordre d'utilisation, rappel fournisseur), contenants, équipement
 - `parametres` - Configuration employés, arômes, formats, recettes, clients
 - `archives` - Historique des commandes livrées avec filtres
 
@@ -198,8 +198,9 @@ Standardized unit handling for ingredients and inventory:
 Dual-category inventory system:
 - **Consommables:** Raw materials, ingredients, packaging (bottles, capsules, labels)
 - **Équipement:** Tools and devices with tracking
-- **Alert thresholds:** `seuilAlerte` triggers visual warning when `quantite <= seuilAlerte`
-- **Quick controls:** +/- buttons for rapid quantity adjustments
+- **To order (v12.9):** `computeInventairePrevu()` simulates the consumption of the orders still to produce (`buildStockOverview` + `deduireInventaireProduction` on a copy); an item is « à commander » when its stock after that production falls under `seuilAlerte` (`invACommander`, rounded up)
+- **Ingredient lots (v12.9):** ingredients (not containers, not water) carry `lots[]` with the supplier lot number; production consumes them oldest-expiry first and records them on its `PROD-` entries (`ingredients`, `productionId`) — see SPEC « Traçabilité amont »
+- **Adjust:** Réception / Recomptage / Sortie dialog for containers and equipment; ingredients are adjusted lot by lot. Rendering never writes (empty inventory → explicit « Créer les articles de base » button)
 - **Recipe sync:** `syncRecettesInventaire()` auto-adds missing ingredients from recipes
 
 ### Bulletins de Livraison (BL) (`#livraisons`)

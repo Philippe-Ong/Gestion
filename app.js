@@ -50,6 +50,9 @@ const computePointageMinutes = (debutMin, finMin, pause = 0) => {
 // Null-safe accessor for command/order line items.
 const getItems = (cmd) => (cmd && Array.isArray(cmd.items)) ? cmd.items : [];
 
+// Mention des bouteilles livrées en plus de la commande (v13.0)
+const libelleEnPlus = (item) => (item?.enPlus ? (item.offert ? ' (en plus, offert)' : ' (en plus)') : '');
+
 // Returns active rows from a DB table (rows where actif !== false).
 const getActive = (tableName) => DB.get(tableName).filter(r => r.actif !== false);
 
@@ -879,6 +882,8 @@ const initEventDelegation = () => {
     window.__delegationReady = true;
     document.addEventListener('click', _onClick);
     document.addEventListener('change', _onChange);
+    initRowMenus();
+    initLiveSearch();
 };
 
 // ---------------------------------------------------------------------------
@@ -932,9 +937,10 @@ CLICK_HANDLERS['dash-goto-day'] = (el) => {
 // ---------------------------------------------------------------------------
 // Stock / Historique
 // ---------------------------------------------------------------------------
-CLICK_HANDLERS['toggle-stock-arome-filter'] = (el) => toggleStockAromeFilter(el.getAttribute('data-value'));
-CLICK_HANDLERS['toggle-stock-format-filter'] = (el) => toggleStockFormatFilter(el.getAttribute('data-value'));
-CLICK_HANDLERS['toggle-stock-statut-filter'] = (el) => toggleStockStatutFilter(el.getAttribute('data-value'));
+CLICK_HANDLERS['stock-select-cell'] = (el) => selectStockCell(el.getAttribute('data-key') || '', el.hasAttribute('data-force'));
+CLICK_HANDLERS['stock-focus'] = (el) => toggleStockFocus(el.getAttribute('data-value') || '');
+CLICK_HANDLERS['stock-goto-production'] = () => { window.location.hash = '#production'; };
+CLICK_HANDLERS['stock-goto-hors-vente'] = () => showStockHorsVente();
 CLICK_HANDLERS['show-lot-trace'] = (el) => showLotTraceModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['sell-lot'] = (el) => showVendreModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['edit-lot'] = (el) => showEditLotModal(el.getAttribute('data-id'));
@@ -974,6 +980,11 @@ CLICK_HANDLERS['duplicate-commande'] = (el) => duplicateCommande(el.getAttribute
 CLICK_HANDLERS['marquer-commande-produite'] = (el) => marquerCommandeProduite(el.getAttribute('data-id'));
 CLICK_HANDLERS['confirm-annuler-commande'] = (el) => confirmAnnulerCommande(el.getAttribute('data-id'));
 CLICK_HANDLERS['livrer-commande'] = (el) => showLivraisonBouteillesModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['livraison-en-plus'] = (el) => ouvrirEnPlusLivraison(el.getAttribute('data-ligne'));
+CLICK_HANDLERS['livraison-hors-commande'] = () => montrerHorsCommandeLivraison();
+CLICK_HANDLERS['livraison-hors-commande-ajouter'] = () => ajouterHorsCommandeLivraison();
+CLICK_HANDLERS['livraison-retirer-ligne'] = (el) => retirerLigneLivraison(el.getAttribute('data-ligne'));
+CLICK_HANDLERS['livraison-confirmer'] = () => confirmerLivraison();
 CLICK_HANDLERS['restaurer-commande'] = (el) => restaurerCommande(el.getAttribute('data-id'));
 CLICK_HANDLERS['commande-bl'] = (el) => prepareCommandeBLExport(el.getAttribute('data-id'));
 
@@ -1003,7 +1014,18 @@ CLICK_HANDLERS['show-inventaire-modal'] = (el) => showInventaireModal(el.getAttr
 CLICK_HANDLERS['delete-inventaire-item'] = (el) => deleteInventaireItem(el.getAttribute('data-id'));
 CLICK_HANDLERS['save-inventaire-item'] = (el, e) => saveInventaireItem(e, el.getAttribute('data-id') || '');
 
-CHANGE_HANDLERS['set-inventaire-qty'] = (el) => setInventaireQty(el.getAttribute('data-id'), el.value);
+CLICK_HANDLERS['inventaire-ajuster'] = (el) => ouvrirAjusterInventaire(el.getAttribute('data-id'));
+CLICK_HANDLERS['inventaire-ajuster-mode'] = (el) => choisirModeAjusterInventaire(el.getAttribute('data-mode'));
+CLICK_HANDLERS['inventaire-ajuster-save'] = (el) => saveAjusterInventaire(el.getAttribute('data-id'));
+CLICK_HANDLERS['inventaire-lots'] = (el) => showInventaireLotsModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['inventaire-reception'] = (el) => showReceptionModal(el.getAttribute('data-id') || '', el.getAttribute('data-retour') || '');
+CLICK_HANDLERS['inventaire-reception-save'] = (el) => saveReception(el.hasAttribute('data-suite'));
+CLICK_HANDLERS['inventaire-lot-corriger'] = (el) => showCorrigerLotModal(el.getAttribute('data-id'), el.getAttribute('data-lot') || '');
+CLICK_HANDLERS['inventaire-lot-corriger-save'] = (el) => saveCorrigerLot(el.getAttribute('data-id'), el.getAttribute('data-lot') || '');
+CLICK_HANDLERS['inventaire-lot-retirer'] = (el) => retirerLotIngredient(el.getAttribute('data-id'), el.getAttribute('data-lot'));
+CLICK_HANDLERS['inventaire-rappel-fournisseur'] = (el) => showRappelFournisseurModal(el.getAttribute('data-id'), el.getAttribute('data-lot'));
+CLICK_HANDLERS['inventaire-copier-commande'] = () => copierListeACommander();
+CLICK_HANDLERS['inventaire-seed'] = () => seedInventaireParDefaut();
 CHANGE_HANDLERS['import-clients-excel'] = (el, e) => importClientsExcel(e);
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1067,8 @@ const sortCommandesByDateLivraison = (commandes) => (commandes || [])
 // Chaque commande ne reçoit que des lots encore vendables à SA date de livraison
 // (une date passée ou invalide vaut aujourd'hui) : traiter les commandes par date
 // de livraison croissante évite de compter un lot qui expirera avant la livraison.
+// `minJours` (v13.0) : durée de vie minimale exigée par le client — la limite de
+// vente du lot doit tomber au moins ce nombre de jours après la livraison.
 const createStockPool = (lots, referenceDate = new Date(), keyOf = (lot) => `${lot.arome}-${lot.format}`) => {
     const today = dateOnly(referenceDate);
     const saleLimit = (lot) => {
@@ -1055,26 +1079,37 @@ const createStockPool = (lots, referenceDate = new Date(), keyOf = (lot) => `${l
         .filter(lot => isLotSellable(lot, today) && (lot.quantite || 0) > 0)
         .map(lot => ({ lot, key: keyOf(lot), reste: lot.quantite || 0 }))
         .sort((a, b) => saleLimit(a.lot) - saleLimit(b.lot));
-    const eligible = (key, dateLivraison) => {
+    const eligible = (key, dateLivraison, minJours = 0) => {
         const d = dateOnly(dateLivraison);
         const ref = Number.isNaN(d.getTime()) || d < today ? today : d;
-        return entries.filter(e => e.key === key && e.reste > 0 && isLotSellable(e.lot, ref));
+        const limiteMin = ref.getTime() + Math.max(0, minJours) * 86400000;
+        return entries.filter(e => e.key === key && e.reste > 0 && isLotSellable(e.lot, ref)
+            && (!minJours || saleLimit(e.lot) >= limiteMin));
+    };
+    // Consomme jusqu'à `qty` bouteilles ; renvoie les lots pris [{ lot, quantite }]
+    const takeLots = (key, qty, dateLivraison, minJours = 0) => {
+        const pris = [];
+        let reste = qty;
+        for (const e of eligible(key, dateLivraison, minJours)) {
+            if (reste <= 0) break;
+            const used = Math.min(e.reste, reste);
+            e.reste -= used;
+            reste -= used;
+            pris.push({ lot: e.lot, quantite: used });
+        }
+        return pris;
     };
     return {
-        available: (key, dateLivraison) => eligible(key, dateLivraison).reduce((sum, e) => sum + e.reste, 0),
+        available: (key, dateLivraison, minJours = 0) => eligible(key, dateLivraison, minJours).reduce((sum, e) => sum + e.reste, 0),
         // Consomme jusqu'à `qty` bouteilles ; renvoie la quantité effectivement couverte.
-        take: (key, qty, dateLivraison) => {
-            let reste = qty;
-            for (const e of eligible(key, dateLivraison)) {
-                if (reste <= 0) break;
-                const used = Math.min(e.reste, reste);
-                e.reste -= used;
-                reste -= used;
-            }
-            return qty - reste;
-        }
+        take: (key, qty, dateLivraison, minJours = 0) => takeLots(key, qty, dateLivraison, minJours).reduce((s, p) => s + p.quantite, 0),
+        takeLots
     };
 };
+
+// Durée de vie minimale exigée par un client à la livraison, en jours avant la
+// limite de vente du lot (fiche client, v13.0) ; 0 = aucune exigence
+const clientDureeVieMin = (client) => Math.max(0, parseInt(client?.dureeVieMinJours, 10) || 0);
 
 const getLotNumero = (lot) => String(lot?.numLot || lot?.id || '');
 
@@ -2738,7 +2773,8 @@ const getLotShelfLife = (lot, referenceDate = new Date()) => {
     const DAY = 86400000;
     const status = getLotStatus(lot, referenceDate);
     const now = dateOnly(referenceDate).getTime();
-    const dlc = dateOnly(lot?.dlc).getTime();
+    // dateOnly(null) donnerait le 01.01.1970 : une DLC absente reste absente
+    const dlc = lot?.dlc ? dateOnly(lot.dlc).getTime() : NaN;
     const saleLimit = lot?.dlv ? dateOnly(lot.dlv).getTime() : dlc;
     const daysTo = (t) => Math.round((t - now) / DAY);
 
@@ -2750,7 +2786,7 @@ const getLotShelfLife = (lot, referenceDate = new Date()) => {
         text = d === 0 ? 'Dernier jour de vente' : `Vendable encore ${d} j`;
     }
 
-    const prod = dateOnly(lot?.dateProduction).getTime();
+    const prod = lot?.dateProduction ? dateOnly(lot.dateProduction).getTime() : NaN;
     let bar = null;
     if (![prod, dlc, saleLimit].some(Number.isNaN) && prod < dlc && prod <= saleLimit && saleLimit <= dlc) {
         const pct = (t) => Math.round(Math.min(100, Math.max(0, (t - prod) / (dlc - prod) * 100)) * 10) / 10;
@@ -2817,6 +2853,57 @@ const renderEmptyState = (message, actionHtml = '') => `
     </div>
 `;
 
+// En-tête de page (v12.8) : le titre est celui de la barre du haut (#pageTitle) ;
+// la page n'affiche qu'une barre d'outils — à gauche des onglets ou un sélecteur
+// de mode, à droite ses actions (l'action principale en dernier).
+const pageToolbar = (actionsHtml = '', leadHtml = '') => (actionsHtml || leadHtml) ? `
+    <div class="page-toolbar">
+        ${leadHtml ? `<div class="page-toolbar-lead">${leadHtml}</div>` : ''}
+        ${actionsHtml ? `<div class="page-toolbar-actions">${actionsHtml}</div>` : ''}
+    </div>` : '';
+
+const ROW_MENU_ICON ='<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+
+// Menu « ⋯ » d'une ligne : actions secondaires, dont les suppressions (v12.8).
+// `label` (texte brut) nomme la ligne pour les lecteurs d'écran.
+const rowMenuHtml = (label, itemsHtml) => `
+    <details class="row-menu">
+        <summary class="btn btn-sm btn-secondary row-menu-btn" aria-label="${escapeHtml(`Autres actions : ${label}`)}">${ROW_MENU_ICON}</summary>
+        <div class="row-menu-list">${itemsHtml}</div>
+    </details>`;
+
+// Menus « ⋯ » : un seul ouvert à la fois, fermé par un clic ailleurs, par Échap
+// ou après le choix d'une action.
+const initRowMenus = () => {
+    if (window.__rowMenusReady) return;
+    window.__rowMenusReady = true;
+    document.addEventListener('click', (e) => {
+        const inside = e.target.closest?.('.row-menu');
+        const choix = e.target.closest?.('.row-menu-list button');
+        document.querySelectorAll('.row-menu[open]').forEach(menu => {
+            if (menu !== inside || choix) menu.removeAttribute('open');
+        });
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        const open = document.querySelector('.row-menu[open]');
+        if (!open) return;
+        open.removeAttribute('open');
+        open.querySelector('summary')?.focus();
+    });
+    // Ouvrir vers le haut quand le bas de l'écran (barre d'onglets mobile) masquerait
+    // le menu ; « toggle » ne remonte pas, d'où la capture.
+    document.addEventListener('toggle', (e) => {
+        const menu = e.target;
+        if (!menu.classList?.contains('row-menu') || !menu.open) return;
+        menu.classList.remove('is-up');
+        const list = menu.querySelector('.row-menu-list');
+        const rect = menu.getBoundingClientRect();
+        const marge = list ? list.offsetHeight + 90 : 0;
+        if (list && window.innerHeight - rect.bottom < marge && rect.top > marge) menu.classList.add('is-up');
+    }, true);
+};
+
 const formatChf = (n) => {
     if (n === null || n === undefined || isNaN(n)) return 'CHF \u2014';
     if (n === 0) return 'CHF 0.\u2013';
@@ -2859,7 +2946,8 @@ const diagnoseCommandeMontant = (commande, clients, formats) => {
         const priceUsed = (priceClient && priceClient > 0)
             ? priceClient
             : (pricePreset && pricePreset > 0 ? pricePreset : null);
-        const ligneTotal = (priceUsed != null) ? priceUsed * (item.quantite || 0) : 0;
+        // Bouteilles offertes (en plus de la commande) : tracées, jamais facturées
+        const ligneTotal = (priceUsed != null && !item.offert) ? priceUsed * (item.quantite || 0) : 0;
         report.items.push({
             idx,
             aromeId: item.aromeId,
@@ -3121,8 +3209,7 @@ const openGlobalSearchResult = (type, id) => {
     }
     if (type === 'lot') {
         DB.setFilter('stockQuery', id);
-        DB.setFilter('stockArome', '');
-        DB.setFilter('stockFormat', '');
+        DB.setFilter('stockCell', '');
         DB.setFilter('stockStatut', '');
         if (window.location.hash === '#stock') renderStock();
         else window.location.hash = '#stock';
@@ -3274,13 +3361,13 @@ const navigateTo = (page) => {
     const titles = {
         jumeau: 'Jumeau numérique',
         dashboard: 'Tableau de bord',
-        stock: 'Gestion du stock',
+        stock: 'Stock',
         pointage: 'Pointage',
         commandes: 'Commandes',
         livraisons: 'Livraisons',
         archives: 'Archives',
-        production: 'Planificateur de production',
-        historique: 'Historique de production',
+        production: 'Production',
+        historique: 'Historique',
         inventaire: 'Inventaire',
         parametres: 'Paramètres'
     };
@@ -3539,7 +3626,7 @@ const buildDashboardModel = () => {
         let attrs = null;
         if (item?.kind === 'order') attrs = { 'data-click': 'show-commande-details', 'data-id': item.commandeId };
         else if (item?.kind === 'stack') attrs = { 'data-click': 'twin-goto-stock', 'data-arome': item.arome, 'data-format': item.format };
-        else if (item?.kind === 'bin') attrs = { 'data-click': 'show-inventaire-modal', 'data-type': 'consommable', 'data-id': item.itemId };
+        else if (item?.kind === 'bin') attrs = { 'data-click': 'inventaire-ajuster', 'data-id': item.itemId };
         if (attrs) priorites.push({ level: alert.level, title: alert.title, text: alert.text, attrs });
     });
     pointages
@@ -4249,6 +4336,7 @@ const buildTwinModel = () => {
     // n'est PAS couverte par le stock (une commande couverte n'est pas urgente)
     const urgency = new Map();
     sortCommandesByDateLivraison(activeCommandes).forEach(({ commande: cmd }) => getItems(cmd).forEach(item => {
+        if (item.enPlus) return;
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = resolveCommandeFormat(item, formats)?.format;
         const qty = Number(item.quantite) || 0;
@@ -4256,7 +4344,7 @@ const buildTwinModel = () => {
         addName(aromeNames, arome.nom);
         addName(formatNames, format.nom);
         const key = `${normalizeName(arome.nom)}|${normalizeName(format.nom)}`;
-        const pris = stockPool.take(key, qty, cmd.dateLivraison);
+        const pris = stockPool.take(key, qty, cmd.dateLivraison, clientDureeVieMin(clients.find(c => c.id === cmd.clientId)));
         demand.set(key, (demand.get(key) || 0) + qty);
         covered.set(key, (covered.get(key) || 0) + pris);
         if (pris < qty) {
@@ -8169,8 +8257,7 @@ document.addEventListener('pointerdown', (e) => {
 });
 CLICK_HANDLERS['twin-goto-stock'] = (el) => {
     DB.setFilter('stockQuery', '');
-    DB.setFilter('stockArome', el.getAttribute('data-arome') || '');
-    DB.setFilter('stockFormat', el.getAttribute('data-format') || '');
+    DB.setFilter('stockCell', stockCellKey(el.getAttribute('data-arome'), el.getAttribute('data-format')));
     DB.setFilter('stockStatut', '');
     window.location.hash = '#stock';
 };
@@ -8458,23 +8545,6 @@ const initPaletteAndShortcuts = () => {
 };
 
 
-// Toggles de filtres Stock
-const toggleStockAromeFilter = (aromeNom) => {
-    const current = DB.getFilter('stockArome') || '';
-    DB.setFilter('stockArome', current === aromeNom ? '' : aromeNom);
-    renderStock();
-};
-const toggleStockFormatFilter = (formatNom) => {
-    const current = DB.getFilter('stockFormat') || '';
-    DB.setFilter('stockFormat', current === formatNom ? '' : formatNom);
-    renderStock();
-};
-const toggleStockStatutFilter = (statut) => {
-    const current = DB.getFilter('stockStatut') || '';
-    DB.setFilter('stockStatut', current === statut ? '' : statut);
-    renderStock();
-};
-
 // Sous-onglets de la section Stock (Lots / Historique)
 const stockSubTabs = (active) => `
     <div class="sub-tabs" role="tablist" aria-label="Vues du stock">
@@ -8482,75 +8552,542 @@ const stockSubTabs = (active) => `
         <a href="#historique" class="sub-tab ${active === 'historique' ? 'active' : ''}" role="tab" aria-selected="${active === 'historique'}">Historique</a>
     </div>`;
 
-// Stock Management
-const renderStock = () => {
+// Recherche « en direct » (Stock, Historique) : la saisie est gardée telle quelle
+// (espaces, majuscules) et la vue n'est re-rendue qu'après une courte pause, jamais
+// pendant une composition (clavier prédictif) ; le curseur est ensuite replacé.
+// Champ : <input data-live-search="<filtre>">, filtre déclaré ci-dessous.
+const LIVE_SEARCH_RENDERS = {
+    stockQuery: () => renderStockLots(),
+    histQuery: () => renderHistorique(),
+    livraison_search: () => renderLivraisons(),
+    inventaire_search: () => renderInventaire()
+};
+let liveSearchTimer = null;
+const onLiveSearchInput = (el) => {
+    const filterName = el.getAttribute('data-live-search');
+    const render = LIVE_SEARCH_RENDERS[filterName];
+    if (!render) return;
+    DB.setFilter(filterName, el.value);
+    clearTimeout(liveSearchTimer);
+    if (el.__composing) return;
+    liveSearchTimer = setTimeout(() => {
+        const { id } = el;
+        const hadFocus = document.activeElement === el;
+        const pos = el.selectionStart;
+        render();
+        const input = id ? document.getElementById(id) : null;
+        if (hadFocus && input && document.activeElement !== input) {
+            input.focus();
+            try { input.setSelectionRange(pos, pos); } catch (_) { /* champ sans sélection */ }
+        }
+    }, 250);
+};
+// Écouteurs délégués (il n'existe pas d'attribut oncompositionstart en HTML)
+const initLiveSearch = () => {
+    if (window.__liveSearchReady) return;
+    window.__liveSearchReady = true;
+    const champ = (e) => e.target.closest?.('[data-live-search]');
+    document.addEventListener('input', (e) => { const el = champ(e); if (el) onLiveSearchInput(el); });
+    document.addEventListener('compositionstart', (e) => { const el = champ(e); if (el) el.__composing = true; });
+    document.addEventListener('compositionend', (e) => {
+        const el = champ(e);
+        if (!el) return;
+        el.__composing = false;
+        onLiveSearchInput(el);
+    });
+};
+
+// --- Stock : vue d'ensemble par arôme × format ---
+// Les lots référencent l'arôme et le format par NOM : on compare les noms
+// normalisés (casse, accents), comme la livraison, pour qu'un lot « hibiscus »
+// compte bien dans « Hibiscus ».
+const stockCellKey = (arome, format) => `${normalizeName(arome) || '?'}|${normalizeName(format) || '?'}`;
+
+const stockSaleLimit = (lot) => {
+    const t = dateOnly(lot?.dlv || lot?.dlc).getTime();
+    return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+};
+// Premier périmé, premier sorti : DLV croissante (repli DLC), puis production
+const stockFefo = (a, b) => (stockSaleLimit(a) - stockSaleLimit(b))
+    || String(a.dateProduction || '').localeCompare(String(b.dateProduction || ''));
+
+// Bouteilles vendables, réservées et à produire par arôme × format. Les commandes
+// ouvertes réservent le stock par date de livraison, les « produite » d'abord
+// (leurs bouteilles sont déjà dans les lots), comme « ✓ Stock » ; la part non
+// couverte est « à produire ». La réservation est une prévision : à la livraison,
+// on choisit toujours les lots. Les lots invendables (DLV/DLC dépassée, blocage,
+// quantité invalide) sont rangés à part, « hors vente ».
+const buildStockOverview = (referenceDate = new Date()) => {
     const lots = DB.get('lots') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
+    const today = dateOnly(referenceDate);
 
-    const today = new Date();
+    const findArome = (nom) => aromes.find(a => normalizeName(a.nom) === normalizeName(nom));
+    const findFormat = (nom) => formats.find(f => normalizeName(f.nom) === normalizeName(nom));
+    const couleurDe = (nom) => safeColor(findArome(nom)?.couleur || DEFAULT_COULEURS[String(nom || '').toLowerCase()]);
 
-    const savedQuery  = (DB.getFilter('stockQuery')  || '').toString().toLowerCase().trim();
-    const savedArome  = DB.getFilter('stockArome')  || '';
-    const savedFormat = DB.getFilter('stockFormat') || '';
-    const savedStatut = DB.getFilter('stockStatut') || '';
+    // Lignes (arômes) et colonnes (formats) : les actifs toujours, les autres
+    // seulement s'ils portent du stock vendable ou une commande. Un nom absent
+    // des Paramètres reste affiché (« inconnu ») pour ne perdre aucune bouteille.
+    const rows = new Map();
+    const cols = new Map();
+    const addRow = (nom) => {
+        const key = normalizeName(nom) || '?';
+        if (rows.has(key)) return;
+        const arome = findArome(nom);
+        rows.set(key, {
+            key,
+            nom: arome?.nom || nom || '(sans arôme)',
+            couleur: couleurDe(nom),
+            inconnu: !arome,
+            inactif: !!arome && arome.actif === false
+        });
+    };
+    const addCol = (nom) => {
+        const key = normalizeName(nom) || '?';
+        if (cols.has(key)) return;
+        const format = findFormat(nom);
+        cols.set(key, {
+            key,
+            nom: format?.nom || nom || '(sans format)',
+            contenanceCl: resolveFormatContenance(format?.nom || nom, formats) || Number.POSITIVE_INFINITY,
+            inconnu: !format,
+            inactif: !!format && format.actif === false
+        });
+    };
+    aromes.filter(a => a.actif !== false).forEach(a => addRow(a.nom));
+    formats.filter(f => f.actif !== false).forEach(f => addCol(f.nom));
 
-    const sellableBottles = lots
-        .filter(lot => isLotSellable(lot, today))
-        .reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const cells = new Map();
+    const cellOf = (arome, format) => {
+        const key = stockCellKey(arome, format);
+        if (!cells.has(key)) {
+            cells.set(key, { key, vendable: 0, reserve: 0, aProduire: 0, dlvProche: 0, lots: [], horsVente: [], commandes: new Map() });
+        }
+        return cells.get(key);
+    };
 
-    const sellableByAroma = {};
-    aromes.filter(a => a.actif).forEach(a => { sellableByAroma[a.nom] = 0; });
+    const horsVente = [];
+    const ecouler = [];
+    const inconnus = [];
     lots.forEach(lot => {
-        if (!isLotSellable(lot, today)) return;
-        if (sellableByAroma[lot.arome] !== undefined) {
-            sellableByAroma[lot.arome] += (lot.quantite || 0);
+        const quantite = Number(lot.quantite);
+        const cell = cellOf(lot.arome, lot.format);
+        if (!findArome(lot.arome) || !findFormat(lot.format)) inconnus.push(lot);
+        if (!Number.isFinite(quantite) || quantite <= 0 || !isLotSellable(lot, today)) {
+            cell.horsVente.push(lot);
+            horsVente.push(lot);
+            return;
+        }
+        addRow(lot.arome);
+        addCol(lot.format);
+        cell.vendable += quantite;
+        cell.lots.push(lot);
+        if (getLotStatus(lot, today) === 'warning') {
+            cell.dlvProche += quantite;
+            ecouler.push(lot);
         }
     });
 
-    const filteredLots = lots.filter(lot => {
-        if (savedArome  && lot.arome  !== savedArome)  return false;
-        if (savedFormat && lot.format !== savedFormat) return false;
-        if (savedStatut === 'bloque') {
-            if (!lot.bloque) return false;
-        } else if (savedStatut) {
-            const st = getLotStatus(lot, today);
-            if (st !== savedStatut) return false;
+    // Réservations : la règle d'attribution commune (planAttributionCommandes)
+    const { plan, parLot } = planAttributionCommandes(today);
+    plan.forEach(({ commande: cmd, client, lignes }) => {
+        lignes.forEach(l => {
+            addRow(l.arome.nom);
+            addCol(l.format.nom);
+            const cell = cellOf(l.arome.nom, l.format.nom);
+            const pris = l.demande - l.manque;
+            cell.reserve += pris;
+            cell.aProduire += l.manque;
+            if (!cell.commandes.has(cmd.id)) {
+                cell.commandes.set(cmd.id, {
+                    commande: cmd,
+                    numero: getCommandeNumero(cmd),
+                    client: client ? getClientLabel(client) : 'Client inconnu',
+                    reserve: 0,
+                    aProduire: 0
+                });
+            }
+            const resa = cell.commandes.get(cmd.id);
+            resa.reserve += pris;
+            resa.aProduire += l.manque;
+        });
+    });
+
+    cells.forEach(c => c.lots.sort(stockFefo));
+    ecouler.sort(stockFefo);
+
+    const totals = { libre: 0, reserve: 0, aProduire: 0, commandesEnManque: 0 };
+    const enManque = new Set();
+    cells.forEach(c => {
+        totals.libre += c.vendable - c.reserve;
+        totals.reserve += c.reserve;
+        totals.aProduire += c.aProduire;
+        c.commandes.forEach((r, id) => { if (r.aProduire > 0) enManque.add(id); });
+    });
+    totals.commandesEnManque = enManque.size;
+
+    return {
+        rows: [...rows.values()],
+        cols: [...cols.values()].sort((a, b) => a.contenanceCl - b.contenanceCl || String(a.nom).localeCompare(String(b.nom), 'fr')),
+        cells, horsVente, ecouler, inconnus, totals, couleurDe, parLot
+    };
+};
+
+// Attribution prévisionnelle des lots aux commandes ouvertes (v13.0), règle unique
+// de l'app (page Stock, livraison, « ✓ Stock », contrôle avant « produite ») :
+// commandes « produite » d'abord, puis « en attente », par date de livraison ;
+// chaque ligne prend les lots vendables à sa date de livraison et assez longs pour
+// le client, la DLV la plus proche d'abord. Rien n'est réservé en base : la
+// livraison propose ces lots, modifiables. `forceProduite` traite une commande en
+// attente comme produite (contrôle avant « Marquer produite »).
+// Renvoie plan : Map(commandeId → { commande, client, minJours, lignes:
+// [{ key, item, arome, format, demande, lots: [{ lot, quantite }], manque }] })
+// et parLot : Map(lotId → [{ commande, quantite }]).
+const planAttributionCommandes = (referenceDate = new Date(), { forceProduite = null } = {}) => {
+    const lots = DB.get('lots') || [];
+    const commandes = DB.get('commandes') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const clients = DB.get('clients') || [];
+    const pool = createStockPool(lots, referenceDate, lot => stockCellKey(lot.arome, lot.format));
+    const prioritaire = (c) => c.statut === 'produite' || c.id === forceProduite;
+    const ouvertes = sortCommandesByDateLivraison(commandes.filter(c => c.statut === 'produite' || c.statut === 'en_attente'))
+        .map(({ commande }) => commande);
+    const plan = new Map();
+    const parLot = new Map();
+    [...ouvertes.filter(prioritaire), ...ouvertes.filter(c => !prioritaire(c))].forEach(cmd => {
+        const client = clients.find(c => c.id === cmd.clientId) || null;
+        const minJours = clientDureeVieMin(client);
+        const lignes = [];
+        getItems(cmd).forEach(item => {
+            if (item.enPlus) return;
+            const arome = aromes.find(a => a.id === item.aromeId);
+            const format = resolveCommandeFormat(item, formats)?.format;
+            const qty = Number(item.quantite);
+            if (!arome || !format || !Number.isFinite(qty) || qty <= 0) return;
+            const key = stockCellKey(arome.nom, format.nom);
+            const pris = pool.takeLots(key, qty, cmd.dateLivraison, minJours);
+            pris.forEach(p => {
+                if (!parLot.has(p.lot.id)) parLot.set(p.lot.id, []);
+                parLot.get(p.lot.id).push({ commande: cmd, quantite: p.quantite });
+            });
+            lignes.push({ key, item, arome, format, demande: qty, lots: pris, manque: qty - pris.reduce((s, p) => s + p.quantite, 0) });
+        });
+        plan.set(cmd.id, { commande: cmd, client, minJours, lignes });
+    });
+    return { plan, parLot };
+};
+
+// Nom affiché d'une case du tableau (repli sur le nom stocké dans ses lots)
+const stockCellInfo = (ov, key) => {
+    const [rowKey, colKey] = String(key).split('|');
+    const cell = ov.cells.get(key);
+    const exemple = cell?.lots[0] || cell?.horsVente[0];
+    const row = ov.rows.find(r => r.key === rowKey);
+    const col = ov.cols.find(c => c.key === colKey);
+    return {
+        nom: row?.nom || exemple?.arome || '?',
+        formatNom: col?.nom || exemple?.format || '?',
+        couleur: row?.couleur || ov.couleurDe(exemple?.arome)
+    };
+};
+
+// « liv. jeu. 30.10 », « en retard (lun. 20.10) », « sans date »
+const stockLivraisonLabel = (dateLivraison) => {
+    const days = twinDaysUntil(dateLivraison);
+    if (days === null) return 'sans date';
+    const jour = dashWeekdayDay(dateOnly(dateLivraison));
+    if (days < 0) return `en retard (${jour})`;
+    if (days === 0) return "liv. aujourd'hui";
+    if (days === 1) return 'liv. demain';
+    return `liv. ${jour}`;
+};
+
+const stockLotDates = (lot) => [
+    ['Prod.', lot.dateProduction], ['DLV', lot.dlv], ['DLC', lot.dlc]
+].filter(([, d]) => d && isValidDateOnly(d)).map(([label, d]) => `${label} ${formatDate(d)}`).join(' · ');
+
+// `reservations` : [{ commande, quantite }] de la règle d'attribution (v13.0)
+const stockLotRowHtml = (lot, { premier = false, now = new Date(), reservations = [] } = {}) => {
+    const id = escapeHtml(lot.id);
+    const num = escapeHtml(formatLotNumero(getLotNumero(lot)));
+    const tag = getLotStatus(lot, now) === 'warning'
+        ? `<span class="badge badge-bientot">À écouler d'abord</span>`
+        : premier ? '<span class="stock-tag">À sortir en premier</span>' : '';
+    const prevu = reservations.length
+        ? `<div class="stock-lot-resa">Prévu pour ${reservations.map(r => `<button type="button" class="hist-entry-lot" data-click="show-commande-details" data-id="${escapeHtml(r.commande.id)}">#${escapeHtml(getCommandeNumero(r.commande))}</button> ${escapeHtml(twinFmtInt(r.quantite))} bt`).join(', ')}</div>`
+        : '';
+    return `
+        <li class="stock-lot">
+            <div class="stock-lot-id">
+                <span class="stock-lot-num">#${num}</span>
+                <span class="stock-lot-qty">${escapeHtml(twinFmtInt(lot.quantite))} bt</span>
+            </div>
+            <div class="stock-lot-life">
+                ${lotShelfLifeHtml(lot, now)}
+                <div class="stock-lot-dates">${escapeHtml(stockLotDates(lot))}${tag}</div>
+                ${prevu}
+            </div>
+            <div class="stock-lot-actions">
+                <button type="button" class="btn btn-sm btn-success" data-click="sell-lot" data-id="${id}" title="Vente directe, dégustation, casse ou destruction">Sortie</button>
+                ${rowMenuHtml(`lot #${formatLotNumero(getLotNumero(lot))}`, `
+                    <button type="button" data-click="show-lot-trace" data-id="${id}">Tracer</button>
+                    <button type="button" data-click="edit-lot" data-id="${id}">Modifier</button>
+                    <button type="button" class="is-danger" data-click="delete-lot" data-id="${id}">Supprimer</button>`)}
+            </div>
+        </li>`;
+};
+
+const stockHorsVenteRowHtml = (ov, lot, now) => {
+    const id = escapeHtml(lot.id);
+    const num = escapeHtml(formatLotNumero(getLotNumero(lot)));
+    const quantite = Number(lot.quantite);
+    const qtyInvalide = !Number.isFinite(quantite) || quantite <= 0;
+    const raison = qtyInvalide
+        ? 'Quantité invalide : corrigez-la avec « Modifier » ou supprimez le lot'
+        : lot.bloque ? `Bloqué${lot.motifBlocage ? ` : ${lot.motifBlocage}` : ''}`
+        : getLotShelfLife(lot, now).text;
+    const action = qtyInvalide
+        ? `<button type="button" class="btn btn-sm btn-secondary" data-click="edit-lot" data-id="${id}">Modifier</button>`
+        : lot.bloque
+            ? `<button type="button" class="btn btn-sm btn-secondary" data-click="show-lot-rappel" data-num="${escapeHtml(getLotNumero(lot))}">Rappel</button>`
+            : `<button type="button" class="btn btn-sm btn-secondary" data-click="sell-lot" data-id="${id}" title="Destruction, casse ou dégustation">Sortir</button>`;
+    const menu = rowMenuHtml(`lot #${formatLotNumero(getLotNumero(lot))}`, `
+        ${lot.bloque && !qtyInvalide ? `<button type="button" data-click="sell-lot" data-id="${id}">Sortie</button>` : ''}
+        <button type="button" data-click="show-lot-trace" data-id="${id}">Tracer</button>
+        ${qtyInvalide ? '' : `<button type="button" data-click="edit-lot" data-id="${id}">Modifier</button>`}
+        <button type="button" class="is-danger" data-click="delete-lot" data-id="${id}">Supprimer</button>`);
+    return `
+        <li class="stock-lot is-hors-vente">
+            <div class="stock-lot-id">
+                <span class="stock-lot-num">#${num}</span>
+                <span class="stock-lot-qty">${escapeHtml(String(lot.quantite ?? '?'))} bt</span>
+            </div>
+            <div class="stock-lot-life">
+                <div class="stock-lot-name"><span class="aroma-tile-dot" style="background:${ov.couleurDe(lot.arome)}"></span>${escapeHtml(lot.arome || '?')} <span class="stock-group-format">· ${escapeHtml(lot.format || '?')}</span></div>
+                <div class="stock-lot-reason${lot.bloque && !qtyInvalide ? '' : ' is-danger'}">${escapeHtml(raison)}</div>
+                <div class="stock-lot-dates">${escapeHtml(stockLotDates(lot))}</div>
+            </div>
+            <div class="stock-lot-actions">${action}${menu}</div>
+        </li>`;
+};
+
+const stockGroupHtml = (ov, cell, lots, now) => {
+    const { nom, formatNom, couleur } = stockCellInfo(ov, cell.key);
+    const dateVal = (cmd) => { const t = dateOnly(cmd.dateLivraison).getTime(); return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t; };
+    const resas = [...cell.commandes.values()].sort((a, b) => dateVal(a.commande) - dateVal(b.commande));
+    const resasHtml = resas.map(r => `
+        <button type="button" class="stock-resa" data-click="show-commande-details" data-id="${escapeHtml(r.commande.id)}">
+            <span class="stock-resa-main">#${escapeHtml(r.numero)} · ${escapeHtml(r.client)} · ${escapeHtml(stockLivraisonLabel(r.commande.dateLivraison))}</span>
+            ${r.reserve > 0 ? `<span class="stock-resa-qty">${escapeHtml(twinFmtInt(r.reserve))} réservées</span>` : ''}
+            ${r.aProduire > 0 ? `<span class="stock-resa-qty is-danger">${escapeHtml(twinFmtInt(r.aProduire))} à produire</span>` : ''}
+            <span class="badge ${r.commande.statut === 'produite' ? 'badge-produite' : 'badge-en-attente'}">${escapeHtml(getCommandeStatutLabel(r.commande.statut))}</span>
+        </button>`).join('');
+    const lotsHtml = lots.length === 0
+        ? `<li class="stock-lot-empty">${cell.lots.length ? 'Aucun lot ne correspond aux filtres' : 'Aucun lot vendable'}</li>`
+        : lots.map(lot => stockLotRowHtml(lot, { premier: cell.lots.length > 1 && cell.lots[0] === lot, now, reservations: ov.parLot?.get(lot.id) || [] })).join('');
+    return `
+        <div class="stock-group">
+            <div class="stock-group-head">
+                <span class="aroma-tile-dot" style="background:${couleur}"></span>
+                <span class="stock-group-title">${escapeHtml(nom)} <span class="stock-group-format">· ${escapeHtml(formatNom)}</span></span>
+                <span class="stock-group-meta">${escapeHtml(`${twinFmtInt(cell.vendable)} vendables · ${twinFmtInt(cell.vendable - cell.reserve)} libres`)}</span>
+            </div>
+            ${resasHtml ? `<div class="stock-resas">${resasHtml}</div>` : ''}
+            <ul class="stock-lot-list">${lotsHtml}</ul>
+        </div>`;
+};
+
+// Bandeau « À traiter » : n'apparaît que s'il y a quelque chose à faire
+const stockAlertsHtml = (ov) => {
+    const bt = (list) => list.reduce((s, l) => s + Math.max(0, Number(l.quantite) || 0), 0);
+    const items = [];
+    if (ov.ecouler.length) {
+        items.push({
+            level: 'warning', icon: 'horloge',
+            title: `À écouler d'abord · ${dashPlural(ov.ecouler.length, 'lot')}, ${twinFmtInt(bt(ov.ecouler))} bt`,
+            text: `DLV dans ${CONSTANTS.DLV_WARN_DAYS} jours ou moins : à vendre ou livrer en priorité`,
+            attrs: { 'data-click': 'stock-focus', 'data-value': 'warning' }
+        });
+    }
+    if (ov.totals.aProduire > 0) {
+        const manques = [];
+        ov.cells.forEach(cell => cell.commandes.forEach(r => {
+            if (r.aProduire > 0) manques.push({ cell, r, days: twinDaysUntil(r.commande.dateLivraison) });
+        }));
+        manques.sort((a, b) => (a.days ?? 9999) - (b.days ?? 9999));
+        const vus = new Set();
+        const details = [];
+        manques.forEach(({ cell, r }) => {
+            if (vus.has(cell.key)) return;
+            vus.add(cell.key);
+            const { nom, formatNom } = stockCellInfo(ov, cell.key);
+            details.push(`${nom} ${formatNom} (${stockLivraisonLabel(r.commande.dateLivraison)})`);
+        });
+        const premier = manques[0]?.days;
+        items.push({
+            level: premier !== null && premier !== undefined && premier <= 3 ? 'danger' : 'info', icon: 'production',
+            title: `À produire · ${twinFmtInt(ov.totals.aProduire)} bt pour ${dashPlural(ov.totals.commandesEnManque, 'commande')}`,
+            text: details.slice(0, 3).join(', ') + (details.length > 3 ? ` et ${details.length - 3} autre(s)` : ''),
+            attrs: { 'data-click': 'stock-goto-production' }
+        });
+    }
+    if (ov.horsVente.length) {
+        const invalides = ov.horsVente.filter(l => !(Number(l.quantite) > 0)).length;
+        const bloques = ov.horsVente.filter(l => l.bloque && Number(l.quantite) > 0).length;
+        const perimes = ov.horsVente.length - invalides - bloques;
+        items.push({
+            level: 'warning', icon: 'stock',
+            title: `Hors vente · ${dashPlural(ov.horsVente.length, 'lot')}, ${twinFmtInt(bt(ov.horsVente))} bt`,
+            text: [
+                perimes ? `${perimes} à sortir (DLV ou DLC dépassée)` : '',
+                bloques ? dashPlural(bloques, 'bloqué') : '',
+                invalides ? `${invalides} à quantité invalide` : ''
+            ].filter(Boolean).join(' · '),
+            attrs: { 'data-click': 'stock-goto-hors-vente' }
+        });
+    }
+    if (ov.inconnus.length) {
+        items.push({
+            level: 'warning', icon: 'attention',
+            title: `Nom inconnu · ${dashPlural(ov.inconnus.length, 'lot')}`,
+            text: 'Arôme ou format absent des Paramètres : corrigez-le avec « Modifier »',
+            attrs: { 'data-click': 'stock-select-cell', 'data-key': stockCellKey(ov.inconnus[0].arome, ov.inconnus[0].format), 'data-force': '1' }
+        });
+    }
+    if (items.length === 0) return '';
+    const row = (p) => `
+        <li><button type="button" class="dash-prio dash-prio--${p.level}" ${dashAttrs(p.attrs)}>
+            <span class="dash-prio-icon">${dashIcon(p.icon)}</span>
+            <span class="dash-prio-body">
+                <span class="dash-prio-title"><span class="dash-sr">${DASH_LEVELS[p.level].label} : </span>${escapeHtml(p.title)}</span>
+                <span class="dash-prio-text">${escapeHtml(p.text)}</span>
+            </span>
+            <span class="dash-prio-chev">${dashIcon('chevron')}</span>
+        </button></li>`;
+    return `
+        <section class="stock-section" aria-labelledby="stockAlertsTitle">
+            <div class="stock-section-head"><h2 class="stock-section-title" id="stockAlertsTitle">À traiter</h2></div>
+            <ul class="dash-prio-list">${items.map(row).join('')}</ul>
+        </section>`;
+};
+
+// Tableau arôme × format : bouteilles libres en grand, réservées, à produire, DLV proche
+const stockMatrixHtml = (ov, selected) => {
+    if (ov.rows.length === 0 || ov.cols.length === 0) return '';
+    const { libre, reserve, aProduire } = ov.totals;
+    const meta = [
+        `${twinFmtInt(libre)} libres`,
+        reserve ? `${twinFmtInt(reserve)} réservées` : '',
+        aProduire ? `${twinFmtInt(aProduire)} à produire` : ''
+    ].filter(Boolean).join(' · ');
+    const tag = (x) => (x.inconnu ? '<span class="stock-tag">inconnu</span>' : x.inactif ? '<span class="stock-tag">inactif</span>' : '');
+    const cellHtml = (row, col) => {
+        const key = `${row.key}|${col.key}`;
+        const c = ov.cells.get(key);
+        const horsVente = c ? c.horsVente.length : 0;
+        if (!c || (c.vendable === 0 && c.commandes.size === 0 && horsVente === 0)) {
+            return `<td><span class="stock-cell is-empty"><span aria-hidden="true">—</span><span class="dash-sr">${escapeHtml(`${row.nom} ${col.nom} : aucun stock`)}</span></span></td>`;
         }
-        if (savedQuery) {
-            const hay = `${formatLotNumero(getLotNumero(lot))} ${lot.numLot || ''} ${lot.id || ''} ${lot.arome || ''} ${lot.format || ''} ${lot.quantite || ''}`.toLowerCase();
-            if (!hay.includes(savedQuery)) return false;
-        }
-        return true;
-    }).sort((a, b) => new Date(b.dateProduction || 0) - new Date(a.dateProduction || 0));
+        const libreCell = c.vendable - c.reserve;
+        const vide = c.vendable === 0 && c.commandes.size === 0;
+        const subs = [
+            c.aProduire > 0 ? ['is-danger', `${twinFmtInt(c.aProduire)} à produire`] : null,
+            c.reserve > 0 ? ['', `${twinFmtInt(c.reserve)} rés.`] : null,
+            c.dlvProche > 0 ? ['is-warning', 'DLV proche'] : null,
+            vide ? ['', 'hors vente'] : null
+        ].filter(Boolean);
+        const label = [
+            `${row.nom} ${col.nom}`,
+            vide ? 'aucune bouteille vendable, lots hors vente' : `${twinFmtInt(libreCell)} libres`,
+            c.reserve ? `${twinFmtInt(c.reserve)} réservées` : '',
+            c.aProduire ? `${twinFmtInt(c.aProduire)} à produire` : '',
+            c.dlvProche ? `${twinFmtInt(c.dlvProche)} en DLV proche` : ''
+        ].filter(Boolean).join(', ');
+        const isSel = selected === key;
+        return `<td><button type="button" class="stock-cell${isSel ? ' is-selected' : ''}${libreCell <= 0 && c.aProduire > 0 ? ' is-short' : ''}" data-click="stock-select-cell" data-key="${escapeHtml(key)}" aria-pressed="${isSel}" aria-label="${escapeHtml(label)}">
+            <span class="stock-cell-value">${vide ? '—' : escapeHtml(twinFmtInt(libreCell))}</span>
+            ${subs.map(([cls, txt]) => `<span class="stock-cell-sub ${cls}">${escapeHtml(txt)}</span>`).join('')}
+        </button></td>`;
+    };
+    return `
+        <section class="stock-section" aria-labelledby="stockDispoTitle">
+            <div class="stock-section-head">
+                <h2 class="stock-section-title" id="stockDispoTitle">Disponible à la vente</h2>
+                <span class="stock-section-meta">${escapeHtml(meta)}</span>
+            </div>
+            <div class="stock-matrix-wrap">
+                <table class="stock-matrix" style="--stock-cols: ${ov.cols.length}">
+                    <colgroup><col class="stock-matrix-label">${ov.cols.map(() => '<col>').join('')}</colgroup>
+                    <thead><tr><td></td>${ov.cols.map(col => `<th scope="col">${escapeHtml(col.nom)}${tag(col)}</th>`).join('')}</tr></thead>
+                    <tbody>${ov.rows.map(row => `
+                        <tr>
+                            <th scope="row"><span class="stock-row-name"><span class="aroma-tile-dot" style="background:${row.couleur}"></span><span class="stock-row-label">${escapeHtml(row.nom)}</span></span>${tag(row)}</th>
+                            ${ov.cols.map(col => cellHtml(row, col)).join('')}
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+            <p class="stock-hint">Grand chiffre : bouteilles libres, c'est-à-dire vendables moins celles réservées aux commandes en attente ou produites. Touchez une case pour n'afficher que ses lots.</p>
+        </section>`;
+};
 
-    const tileAromas = aromes.filter(a => a.actif);
-    const formatsActifs = formats.filter(f => f.actif);
+// Lots vendables groupés par arôme × format (ordre du tableau, FEFO dans chaque
+// groupe), puis lots hors vente, puis lots épuisés retrouvés par la recherche.
+const stockLotsHtml = (ov) => {
+    const query = (DB.getFilter('stockQuery') || '').toString().trim();
+    const selected = DB.getFilter('stockCell') || '';
+    const focus = DB.getFilter('stockStatut') === 'warning' ? 'warning' : '';
+    const now = new Date();
+    const aromes = DB.get('aromes') || [];
+    const lots = DB.get('lots') || [];
+    const matchLot = (lot) => includesText(
+        `${formatLotNumero(getLotNumero(lot))} ${lot.numLot || ''} ${lot.id || ''} ${lot.arome || ''} ${lot.format || ''} ${lot.quantite ?? ''}`,
+        query
+    );
+    const inCell = (key) => !selected || key === selected;
+    const filtre = !!(query || selected || focus);
 
-    const aromaTilesHtml = `
-        <a href="#stock" class="aroma-tile aroma-all ${!savedArome ? 'active' : ''}" data-click="toggle-stock-arome-filter" data-value="" data-prevent>
-            <div class="aroma-tile-header"><span class="aroma-tile-dot"></span><span class="aroma-tile-name">Tous</span></div>
-            <div class="aroma-tile-value">${sellableBottles}</div>
-            <div class="aroma-tile-sub">btl vendables</div>
-        </a>
-        ${tileAromas.map(a => `
-            <a href="#stock" class="aroma-tile ${savedArome === a.nom ? 'active' : ''}" data-click="toggle-stock-arome-filter" data-value="${escapeHtml(a.nom)}" data-prevent>
-                <div class="aroma-tile-header">
-                    <span class="aroma-tile-dot" style="background:${safeColor(a.couleur)}"></span>
-                    <span class="aroma-tile-name">${escapeHtml(a.nom)}</span>
-                </div>
-                <div class="aroma-tile-value">${sellableByAroma[a.nom] || 0}</div>
-                <div class="aroma-tile-sub">btl vendables</div>
-            </a>
-        `).join('')}
-    `;
+    const ordre = [];
+    ov.rows.forEach(r => ov.cols.forEach(c => ordre.push(`${r.key}|${c.key}`)));
+    const dansTableau = new Set(ordre);
+    ov.cells.forEach((_, key) => { if (!dansTableau.has(key)) ordre.push(key); });
 
-    const fmtPill = (val, label) => `<button type="button" class="status-pill ${savedFormat === val ? 'active' : ''}" data-click="toggle-stock-format-filter" data-value="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
-    const statPill = (val, label) => `<button type="button" class="status-pill ${savedStatut === val ? 'active' : ''}" data-click="toggle-stock-statut-filter" data-value="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
+    let nbLots = 0;
+    let nbBt = 0;
+    const groupsHtml = ordre.map(key => ov.cells.get(key)).filter(c => c && inCell(c.key)).map(cell => {
+        const visibles = cell.lots.filter(lot => matchLot(lot) && (!focus || getLotStatus(lot, now) === 'warning'));
+        const afficher = filtre
+            ? visibles.length > 0 || (cell.key === selected && !query && !focus)
+            : cell.lots.length > 0 || cell.commandes.size > 0;
+        if (!afficher) return '';
+        nbLots += visibles.length;
+        nbBt += visibles.reduce((s, l) => s + (Number(l.quantite) || 0), 0);
+        return stockGroupHtml(ov, cell, visibles, now);
+    }).join('');
+
+    const rang = (lot) => (!(Number(lot.quantite) > 0) ? 0 : lot.bloque ? 3 : getLotStatus(lot, now) === 'expired' ? 1 : 2);
+    const horsVente = focus ? [] : ov.horsVente
+        .filter(lot => inCell(stockCellKey(lot.arome, lot.format)) && matchLot(lot))
+        .sort((a, b) => rang(a) - rang(b) || stockFefo(a, b));
+
+    const chips = [
+        selected ? (() => {
+            const { nom, formatNom } = stockCellInfo(ov, selected);
+            return `<button type="button" class="stock-chip" data-click="stock-select-cell" data-key="${escapeHtml(selected)}" aria-label="${escapeHtml(`Retirer le filtre ${nom} ${formatNom}`)}">${escapeHtml(`${nom} · ${formatNom}`)}${dashIcon('croix')}</button>`;
+        })() : '',
+        focus ? `<button type="button" class="stock-chip" data-click="stock-focus" data-value="warning" aria-label="Retirer le filtre DLV proche">DLV proche${dashIcon('croix')}</button>` : ''
+    ].join('');
+
+    const vide = lots.length === 0
+        ? 'Aucun lot en stock. Créez un lot avec « + Lot » ou terminez une production.'
+        : filtre ? 'Aucun lot vendable ne correspond aux filtres.' : 'Aucun lot vendable en stock.';
 
     // Traçabilité : retrouver les lots épuisés (disparus du stock) via la recherche
-    let archivedLotsHtml = '';
-    if (savedQuery) {
+    let epuisesHtml = '';
+    if (query) {
         const knownIds = new Set(lots.map(l => String(l.id)));
         const archived = {};
         const addArchived = (src) => {
@@ -8568,118 +9105,158 @@ const renderStock = () => {
         (DB.get('livraisons') || []).forEach(liv => (liv.lotsTraces || []).forEach(addArchived));
         (DB.get('history') || []).forEach(addArchived);
         const matches = Object.values(archived)
-            .filter(l => `${formatLotNumero(l.numLot || l.id)} ${l.numLot} ${l.id} ${l.arome} ${l.format}`.toLowerCase().includes(savedQuery))
+            .filter(l => includesText(`${formatLotNumero(l.numLot || l.id)} ${l.numLot} ${l.id} ${l.arome} ${l.format}`, query))
             .slice(0, 12);
         if (matches.length > 0) {
-            archivedLotsHtml = `
-                <h3 style="margin: 16px 0 8px; font-size: 15px;">Lots épuisés (traçabilité)</h3>
-                ${matches.map(l => {
-                    const arome = aromes.find(a => a.nom === l.arome);
-                    return `<div class="lot-card">
-                        <div class="lot-card-header">
-                            <span class="lot-card-numero">#${escapeHtml(formatLotNumero(l.numLot || l.id))}</span>
-                            <span class="badge badge-default">Épuisé</span>
-                        </div>
-                        <div class="lot-card-aroma">
-                            <span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>
-                            <span class="lot-card-aroma-name">${escapeHtml(l.arome || '?')}</span>
-                            <span class="lot-card-aroma-format">• ${escapeHtml(l.format || '?')}</span>
-                        </div>
-                        <div class="lot-card-meta">
-                            ${l.dateProduction ? `<span>Prod. <strong>${formatDate(l.dateProduction)}</strong></span>` : ''}
-                            ${l.dlc ? `<span>DLC <strong>${formatDate(l.dlc)}</strong></span>` : ''}
-                        </div>
-                        <div class="lot-card-actions">
-                            <button class="btn btn-sm btn-ghost" data-click="show-lot-trace" data-id="${escapeHtml(l.id)}">Tracer</button>
-                        </div>
-                    </div>`;
-                }).join('')}
-            `;
+            epuisesHtml = `
+                <section class="stock-section" aria-labelledby="stockEpuisesTitle">
+                    <div class="stock-section-head"><h2 class="stock-section-title" id="stockEpuisesTitle">Lots épuisés (traçabilité)</h2></div>
+                    <div class="stock-group"><ul class="stock-lot-list">${matches.map(l => {
+                        const arome = aromes.find(a => normalizeName(a.nom) === normalizeName(l.arome));
+                        return `
+                            <li class="stock-lot is-hors-vente">
+                                <div class="stock-lot-id"><span class="stock-lot-num">#${escapeHtml(formatLotNumero(l.numLot || l.id))}</span><span class="stock-lot-qty">Épuisé</span></div>
+                                <div class="stock-lot-life">
+                                    <div class="stock-lot-name"><span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>${escapeHtml(l.arome || '?')} <span class="stock-group-format">· ${escapeHtml(l.format || '?')}</span></div>
+                                    <div class="stock-lot-dates">${escapeHtml(stockLotDates({ dateProduction: l.dateProduction, dlc: l.dlc }))}</div>
+                                </div>
+                                <div class="stock-lot-actions"><button type="button" class="btn btn-sm btn-secondary" data-click="show-lot-trace" data-id="${escapeHtml(l.id)}">Tracer</button></div>
+                            </li>`;
+                    }).join('')}</ul></div>
+                </section>`;
         }
     }
 
-    const lotCardsHtml = filteredLots.length === 0
-        ? '<div class="commande-empty">Aucun lot ne correspond aux filtres</div>'
-        : filteredLots.map(lot => {
-            const arome = aromes.find(a => a.nom === lot.arome);
-            const status = getLotStatus(lot, today);
-            const badgeClass = status === 'expired' || status === 'invendable' ? 'badge-expire' : status === 'warning' ? 'badge-bientot' : 'badge-ok';
-            const statusLabel = getLotStatusLabel(status, lot);
-            return `<div class="lot-card lot-status-${status}${lot.bloque ? ' lot-bloque' : ''}">
-                <div class="lot-card-header">
-                    <span class="lot-card-numero">#${escapeHtml(formatLotNumero(getLotNumero(lot)))}</span>
-                    <span class="lot-card-badges">
-                        ${lot.bloque ? `<span class="badge badge-danger" title="${escapeHtml(lot.motifBlocage || '')}">Bloqué</span>` : ''}
-                        <span class="badge ${badgeClass}">${statusLabel}</span>
-                    </span>
-                </div>
-                <div class="lot-card-aroma">
-                    <span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>
-                    <span class="lot-card-aroma-name">${escapeHtml(lot.arome || '?')}</span>
-                    <span class="lot-card-aroma-format">• ${escapeHtml(lot.format || '?')}</span>
-                </div>
-                ${lotShelfLifeHtml(lot, today)}
-                <div class="lot-card-meta">
-                    <span><strong class="lot-card-qty">${escapeHtml(String(lot.quantite))}</strong> bt</span>
-                    <span>Prod. <strong>${formatDate(lot.dateProduction)}</strong></span>
-                    ${lot.dlv ? `<span>DLV <strong>${formatDate(lot.dlv)}</strong></span>` : ''}
-                    <span>DLC <strong>${formatDate(lot.dlc)}</strong></span>
-                </div>
-                <div class="lot-card-actions">
-                    <button class="btn btn-sm btn-success" data-click="sell-lot" data-id="${escapeHtml(lot.id)}" title="Vente directe, dégustation, casse ou destruction">Sortie</button>
-                    <button class="btn btn-sm btn-ghost" data-click="show-lot-trace" data-id="${escapeHtml(lot.id)}">Tracer</button>
-                    <button class="btn btn-sm btn-ghost" data-click="edit-lot" data-id="${escapeHtml(lot.id)}">Modifier</button>
-                    <button class="btn btn-sm btn-ghost" style="color: var(--danger);" data-click="delete-lot" data-id="${escapeHtml(lot.id)}">Supprimer</button>
-                </div>
-            </div>`;
-        }).join('');
+    return `
+        <section class="stock-section" aria-labelledby="stockLotsTitle">
+            <div class="stock-section-head">
+                <h2 class="stock-section-title" id="stockLotsTitle">Lots vendables</h2>
+                <span class="stock-section-meta">${escapeHtml(`${dashPlural(nbLots, 'lot')} · ${twinFmtInt(nbBt)} bt`)}</span>
+                ${chips ? `<div class="stock-chips">${chips}</div>` : ''}
+            </div>
+            ${groupsHtml || `<div class="commande-empty">${escapeHtml(vide)}</div>`}
+        </section>
+        ${horsVente.length ? `
+        <section class="stock-section" aria-labelledby="stockHorsVenteTitle">
+            <div class="stock-section-head">
+                <h2 class="stock-section-title" id="stockHorsVenteTitle">Hors vente</h2>
+                <span class="stock-section-meta">${escapeHtml(`${dashPlural(horsVente.length, 'lot')} · ${twinFmtInt(horsVente.reduce((s, l) => s + Math.max(0, Number(l.quantite) || 0), 0))} bt`)}</span>
+            </div>
+            <p class="stock-hint stock-hint--top">Ni vendables ni livrables : sortez-les du stock (destruction, casse) ou traitez le rappel du lot bloqué.</p>
+            <div class="stock-group"><ul class="stock-lot-list">${horsVente.map(lot => stockHorsVenteRowHtml(ov, lot, now)).join('')}</ul></div>
+        </section>` : ''}
+        ${epuisesHtml}`;
+};
+
+// Stock Management
+const renderStock = () => {
+    const ov = buildStockOverview();
+    const search = document.activeElement?.id === 'stockSearch' ? document.activeElement : null;
+    const caret = search ? search.selectionStart : null;
+    const query = (DB.getFilter('stockQuery') || '').toString();
+    const selected = DB.getFilter('stockCell') || '';
 
     const html = `
-        <div class="commandes-toolbar">
-            <h1>Stock</h1>
-            <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
-        </div>
-
-        ${stockSubTabs('lots')}
+        ${pageToolbar('<button type="button" class="btn btn-primary" onclick="showNouveauLotModal()">+ Lot</button>', stockSubTabs('lots'))}
 
         <div class="stock-search">
             <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="search"
+            <input type="search" id="stockSearch"
                    placeholder="Rechercher un lot, arôme, format…"
-                   value="${escapeHtml(savedQuery)}"
-                   oninput="DB.setFilter('stockQuery', this.value); renderStock(); document.querySelector('.stock-search input')?.focus();">
+                   aria-label="Rechercher un lot"
+                   value="${escapeHtml(query)}"
+                   data-live-search="stockQuery">
         </div>
 
-        <div class="aroma-tile-grid">
-            ${aromaTilesHtml}
-        </div>
-
-        ${formatsActifs.length > 0 ? `
-            <div class="stock-pills-row">
-                <span class="stock-pills-label">Format :</span>
-                <button type="button" class="status-pill ${!savedFormat ? 'active' : ''}" onclick="toggleStockFormatFilter('')">Tous</button>
-                ${formatsActifs.map(f => fmtPill(f.nom, f.nom)).join('')}
-            </div>
-        ` : ''}
-
-        <div class="stock-pills-row">
-            <span class="stock-pills-label">Statut :</span>
-            <button type="button" class="status-pill ${!savedStatut ? 'active' : ''}" onclick="toggleStockStatutFilter('')">Tous</button>
-            ${statPill('ok', 'OK')}
-            ${statPill('warning', 'DLV proche')}
-            ${statPill('invendable', 'Invendable')}
-            ${statPill('expired', 'Expiré')}
-            ${(lots.some(l => l.bloque) || savedStatut === 'bloque') ? statPill('bloque', 'Bloqué') : ''}
-        </div>
-
-        <div class="commande-section" style="padding: 0; background: transparent; border: none; box-shadow: none;">
-            <div class="commande-section-title" style="padding: 0 4px;">Lots récents</div>
-            ${lotCardsHtml}
-            ${archivedLotsHtml}
-        </div>
+        ${stockAlertsHtml(ov)}
+        ${stockMatrixHtml(ov, selected)}
+        <div id="stockLots">${stockLotsHtml(ov)}</div>
     `;
 
     safeRender(html);
+    // Re-rendu pendant la saisie (synchro d'un autre appareil) : garder le focus
+    if (search) {
+        const input = document.getElementById('stockSearch');
+        input?.focus();
+        try { input?.setSelectionRange(caret, caret); } catch (_) { /* champ sans sélection */ }
+    }
+};
+
+// Recherche : seule la liste des lots est re-rendue (le champ garde le focus)
+const renderStockLots = () => {
+    const el = document.getElementById('stockLots');
+    if (!el) { renderStock(); return; }
+    el.innerHTML = stockLotsHtml(buildStockOverview());
+};
+
+const stockScrollBehavior = () => (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth');
+
+// Fait défiler jusqu'à une section si son titre n'est pas visible
+const stockRevealSection = (id, force = false) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    if (force || top < 0 || top > window.innerHeight - 120) {
+        el.scrollIntoView({ behavior: stockScrollBehavior(), block: 'start' });
+    }
+};
+
+// Filtre sur une case du tableau (un second appui le retire) ; `force` l'impose
+const selectStockCell = (key, force = false) => {
+    const current = DB.getFilter('stockCell') || '';
+    const next = !force && current === key ? '' : key;
+    DB.setFilter('stockCell', next);
+    renderStock();
+    if (key && window.CSS?.escape) {
+        document.querySelector(`.stock-cell[data-key="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+    }
+    if (next) stockRevealSection('stockLotsTitle');
+};
+
+const toggleStockFocus = (value) => {
+    const current = DB.getFilter('stockStatut') || '';
+    const next = current === value ? '' : value;
+    DB.setFilter('stockStatut', next);
+    renderStock();
+    if (next) stockRevealSection('stockLotsTitle');
+};
+
+const showStockHorsVente = () => {
+    if (DB.getFilter('stockCell') || DB.getFilter('stockStatut')) {
+        DB.setFilter('stockCell', '');
+        DB.setFilter('stockStatut', '');
+        renderStock();
+    }
+    stockRevealSection('stockHorsVenteTitle', true);
+};
+
+// Bouteilles libres de l'arôme × format d'un lot vendable, pour avertir quand une
+// sortie entame le stock réservé aux commandes ; null s'il n'y a rien de réservé.
+const getStockReservation = (lot) => {
+    if (!lot || !isLotSellable(lot)) return null;
+    const cell = buildStockOverview().cells.get(stockCellKey(lot.arome, lot.format));
+    if (!cell || cell.reserve <= 0) return null;
+    return {
+        libre: cell.vendable - cell.reserve,
+        reserve: cell.reserve,
+        commandes: [...cell.commandes.values()].filter(r => r.reserve > 0).map(r => `#${r.numero}`).join(', ')
+    };
+};
+
+const sortieReserveWarningText = (libre, quantite, commandes) => {
+    const entame = quantite - Math.max(0, libre);
+    const s = entame > 1 ? 's' : '';
+    return `Cette sortie entame ${entame} bouteille${s} réservée${s} aux commandes ${commandes} : leur livraison pourrait manquer de stock.`;
+};
+
+const updateSortieReserveWarning = (input) => {
+    const warn = document.getElementById('sortieReserveWarn');
+    if (!warn) return;
+    const quantite = Number(input.value);
+    const libre = Number(input.dataset.libre);
+    const show = Number.isInteger(quantite) && quantite > libre;
+    warn.hidden = !show;
+    if (show) warn.textContent = sortieReserveWarningText(libre, quantite, input.dataset.commandes || '');
 };
 
 const showNouveauLotModal = () => {
@@ -8796,7 +9373,8 @@ const renderHistorique = () => {
         return sum;
     })();
 
-    const savedQuery  = (DB.getFilter('histQuery') || '').toString().toLowerCase().trim();
+    const rawQuery    = (DB.getFilter('histQuery') || '').toString();
+    const savedQuery  = rawQuery.trim();
     const savedType   = DB.getFilter('histType')   || ''; // '', 'prod', 'vente', 'sortie', 'ajust'
     const savedArome  = DB.getFilter('histArome')  || '';
     const savedFormat = DB.getFilter('histFormat') || '';
@@ -8831,8 +9409,8 @@ const renderHistorique = () => {
         if (savedFormat && e.format !== savedFormat) return false;
         if (cutoff !== null && e.when < cutoff)      return false;
         if (savedQuery) {
-            const hay = `${formatLotNumero(e.numLot || e.lotId)} ${e.numLot || ''} ${e.lotId || ''} ${e.arome || ''} ${e.format || ''} ${e.quantity || ''} ${SORTIE_MOTIFS[e.motif] || ''} ${e.clientLabel} ${e.note || ''}`.toLowerCase();
-            if (!hay.includes(savedQuery)) return false;
+            const hay = `${formatLotNumero(e.numLot || e.lotId)} ${e.numLot || ''} ${e.lotId || ''} ${e.arome || ''} ${e.format || ''} ${e.quantity || ''} ${SORTIE_MOTIFS[e.motif] || ''} ${e.clientLabel} ${e.note || ''}`;
+            if (!includesText(hay, savedQuery)) return false;
         }
         return true;
     }).sort((a, b) => b.when - a.when);
@@ -8920,12 +9498,7 @@ const renderHistorique = () => {
         }).join('');
 
     const html = `
-        <div class="commandes-toolbar">
-            <h1>Historique</h1>
-            <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
-        </div>
-
-        ${stockSubTabs('historique')}
+        ${pageToolbar('<button type="button" class="btn btn-primary" onclick="showNouveauLotModal()">+ Lot</button>', stockSubTabs('historique'))}
 
         <div class="hist-summary">
             <button type="button" class="hist-summary-stat hist-summary-stat-btn" onclick="showProductionStatsModal()" aria-label="Voir les statistiques de production">
@@ -8944,10 +9517,11 @@ const renderHistorique = () => {
 
         <div class="stock-search" id="histSearch">
             <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="search"
+            <input type="search" id="histSearchInput"
                    placeholder="Rechercher un lot, arôme, format…"
-                   value="${escapeHtml(savedQuery)}"
-                   oninput="DB.setFilter('histQuery', this.value); renderHistorique(); document.querySelector('#histSearch input')?.focus();">
+                   aria-label="Rechercher dans l'historique"
+                   value="${escapeHtml(rawQuery)}"
+                   data-live-search="histQuery">
         </div>
 
         <div class="stock-pills-row">
@@ -9258,7 +9832,9 @@ const confirmDeleteLot = (id) => {
 // facultatif (retrouvable en cas de rappel).
 const SORTIE_MOTIFS_SAISIE = ['vente', 'echantillon', 'casse', 'destruction'];
 
-const showVendreModal = (lotId) => {
+// `saisie` : valeurs à remettre dans le formulaire (retour depuis l'avertissement
+// de stock réservé).
+const showVendreModal = (lotId, saisie = null) => {
     const lot = (DB.get('lots') || []).find(l => l.id === lotId);
     if (!lot) return;
     const vendable = isLotSellable(lot);
@@ -9266,6 +9842,8 @@ const showVendreModal = (lotId) => {
     const clients = (DB.get('clients') || [])
         .filter(c => c.actif !== false)
         .sort((a, b) => getClientLabel(a).localeCompare(getClientLabel(b), 'fr'));
+    const resa = getStockReservation(lot);
+    const quantiteInit = Number.isInteger(saisie?.quantite) && saisie.quantite > 0 ? saisie.quantite : 1;
 
     modal.show('Sortie de stock', `
         <form id="vendreForm">
@@ -9274,25 +9852,28 @@ const showVendreModal = (lotId) => {
             <div class="form-group">
                 <label for="sortieMotif">Motif</label>
                 <select id="sortieMotif" name="motif">
-                    ${motifs.map(m => `<option value="${m}">${escapeHtml(SORTIE_MOTIFS[m])}</option>`).join('')}
+                    ${motifs.map(m => `<option value="${m}"${saisie?.motif === m ? ' selected' : ''}>${escapeHtml(SORTIE_MOTIFS[m])}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group">
                 <label for="sortieQuantite">Quantité</label>
-                <input type="number" id="sortieQuantite" name="quantite" min="1" max="${safeNumAttr(lot.quantite)}" step="1" value="1" required>
+                <input type="number" id="sortieQuantite" name="quantite" min="1" max="${safeNumAttr(lot.quantite)}" step="1" value="${quantiteInit}" required
+                       ${resa ? `data-libre="${safeNumAttr(resa.libre)}" data-commandes="${escapeHtml(resa.commandes)}" oninput="updateSortieReserveWarning(this)"` : ''}>
                 <small class="text-muted">Stock disponible: ${escapeHtml(String(lot.quantite))}</small>
+                ${resa ? `<small class="text-muted" style="display: block;">${escapeHtml(`${lot.arome} ${lot.format} : ${twinFmtInt(Math.max(0, resa.libre))} libre(s), ${twinFmtInt(resa.reserve)} réservée(s) aux commandes ${resa.commandes}`)}</small>` : ''}
             </div>
+            ${resa ? `<p class="trace-alert" id="sortieReserveWarn" role="status"${quantiteInit > resa.libre ? '' : ' hidden'}>${escapeHtml(quantiteInit > resa.libre ? sortieReserveWarningText(resa.libre, quantiteInit, resa.commandes) : '')}</p>` : ''}
             <div class="form-group">
                 <label for="sortieClient">Client (facultatif)</label>
                 <select id="sortieClient" name="clientId">
                     <option value="">— Aucun / inconnu —</option>
-                    ${clients.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(getClientLabel(c))}</option>`).join('')}
+                    ${clients.map(c => `<option value="${escapeHtml(c.id)}"${saisie?.clientId === c.id ? ' selected' : ''}>${escapeHtml(getClientLabel(c))}</option>`).join('')}
                 </select>
                 <small class="text-muted">Permet de retrouver le destinataire en cas de rappel.</small>
             </div>
             <div class="form-group">
                 <label for="sortieNote">Note (facultatif)</label>
-                <input type="text" id="sortieNote" name="note" maxlength="200" placeholder="Ex. marché du samedi, casse au transport">
+                <input type="text" id="sortieNote" name="note" maxlength="200" placeholder="Ex. marché du samedi, casse au transport" value="${escapeHtml(saisie?.note || '')}">
             </div>
         </form>
     `, `
@@ -9301,39 +9882,65 @@ const showVendreModal = (lotId) => {
     `);
 };
 
-const vendreLot = (lotId) => {
-    const lots = DB.get('lots');
-    const lotIndex = lots.findIndex(l => l.id === lotId);
-
-    if (lotIndex === -1) {
-        showToast('Lot introuvable', 'error');
-        return;
-    }
-
-    const lot = lots[lotIndex];
+const vendreLot = async (lotId) => {
     const form = document.getElementById('vendreForm');
-    const motif = form?.querySelector('[name="motif"]')?.value || 'vente';
+    const saisie = {
+        motif: form?.querySelector('[name="motif"]')?.value || 'vente',
+        quantite: Number(form?.querySelector('[name="quantite"]')?.value),
+        clientId: form?.querySelector('[name="clientId"]')?.value || '',
+        note: (form?.querySelector('[name="note"]')?.value || '').trim()
+    };
+    const { motif, quantite, clientId, note } = saisie;
     if (!SORTIE_MOTIFS_SAISIE.includes(motif)) {
         showToast('Motif de sortie invalide', 'error');
         return;
     }
 
-    // Une vente exige un lot vendable (DLV/DLC valides, lot non bloqué)
-    if (motif === 'vente' && !isLotSellable(lot)) {
-        showToast('Ce lot ne peut plus être vendu (DLV/DLC expirée ou lot bloqué).', 'error');
+    // Message d'erreur si la sortie est impossible sur ce lot, sinon ''
+    const refus = (lot) => {
+        if (!lot) return 'Lot introuvable';
+        // Une vente exige un lot vendable (DLV/DLC valides, lot non bloqué)
+        if (motif === 'vente' && !isLotSellable(lot)) return 'Ce lot ne peut plus être vendu (DLV/DLC expirée ou lot bloqué).';
+        const stockDisponible = Number(lot.quantite);
+        if (!Number.isInteger(quantite) || quantite <= 0 || !Number.isFinite(stockDisponible) || quantite > stockDisponible) {
+            return 'Quantité invalide : saisissez un nombre entier disponible en stock';
+        }
+        return '';
+    };
+
+    const lotAvant = (DB.get('lots') || []).find(l => l.id === lotId);
+    const erreur = refus(lotAvant);
+    if (erreur) {
+        showToast(erreur, 'error');
         return;
     }
 
-    const quantite = Number(form?.querySelector('[name="quantite"]')?.value);
-    const stockDisponible = Number(lot.quantite);
-    if (!Number.isInteger(quantite) || quantite <= 0 || !Number.isFinite(stockDisponible) || quantite > stockDisponible) {
-        showToast('Quantité invalide : saisissez un nombre entier disponible en stock', 'error');
+    // Stock promis aux commandes : confirmer avant de l'entamer
+    const resa = getStockReservation(lotAvant);
+    if (resa && quantite > resa.libre) {
+        const ok = await confirmDialog(
+            `${sortieReserveWarningText(resa.libre, quantite, resa.commandes)} Enregistrer quand même cette sortie ?`,
+            { danger: true, title: 'Stock réservé', confirmLabel: 'Sortir quand même', cancelLabel: 'Revenir' }
+        );
+        if (!ok) {
+            showVendreModal(lotId, saisie);
+            return;
+        }
+    }
+
+    // Relecture après la confirmation : un autre appareil a pu modifier le stock
+    const lots = DB.get('lots') || [];
+    const lotIndex = lots.findIndex(l => l.id === lotId);
+    const lot = lots[lotIndex];
+    const erreurApres = refus(lot);
+    if (erreurApres) {
+        modal.hide();
+        showToast(erreurApres, 'error');
+        renderCurrentView();
         return;
     }
 
-    const clientId = form?.querySelector('[name="clientId"]')?.value || '';
     const client = clientId ? (DB.get('clients') || []).find(c => c.id === clientId) : null;
-    const note = (form?.querySelector('[name="note"]')?.value || '').trim();
 
     lot.quantite -= quantite;
 
@@ -9415,6 +10022,18 @@ const getLotTraceData = (lotId) => {
 
     // Infos de référence : lot en stock, puis production la plus ancienne, puis
     // toute autre trace (les entrées récentes portent DLV/DLC, les livraisons aussi)
+    // Traçabilité amont (v12.9) : lots d'ingrédients des productions de ce lot,
+    // une fois par production (quantités pour toute la production, tous formats)
+    const productionsVues = new Set();
+    const ingredients = [];
+    productions.forEach(p => {
+        if (!Array.isArray(p.ingredients)) return;
+        const cle = p.productionId || p.id;
+        if (productionsVues.has(cle)) return;
+        productionsVues.add(cle);
+        p.ingredients.forEach(ing => ingredients.push({ ...ing, productionId: cle, dateProduction: p.productionDate || '' }));
+    });
+
     const sources = [lot, ...productions.slice().reverse(), ...livraisonsClients, ...ventes, ...sorties, ...ajustements, ...retours].filter(Boolean);
     const first = (...fields) => {
         for (const s of sources) {
@@ -9446,8 +10065,30 @@ const getLotTraceData = (lotId) => {
         ventes,
         sorties,
         ajustements,
-        retours
+        retours,
+        ingredients
     };
+};
+
+// Tableau des lots d'ingrédients utilisés (Tracer et Rappel du lot)
+const ingredientsTraceHtml = (ingredients, totalProduit) => {
+    if (ingredients.length === 0) {
+        return totalProduit > 0
+            ? '<p class="text-muted">Lots d\'ingrédients non suivis pour ce lot (production antérieure au suivi, ou lot créé sans passer par la production).</p>'
+            : '';
+    }
+    return `<div class="trace-scroll"><table class="details-table">
+        <thead><tr><th>Ingrédient</th><th>N° de lot</th><th>Fournisseur</th><th>Quantité</th></tr></thead>
+        <tbody>
+            ${ingredients.map(ing => `<tr>
+                <td>${escapeHtml(ing.article || '?')}</td>
+                <td>${ing.numLot ? `<code class="inv-lot-num">${escapeHtml(ing.numLot)}</code>` : '<span class="text-muted">sans n° de lot</span>'}</td>
+                <td>${ing.fournisseur ? escapeHtml(ing.fournisseur) : '—'}</td>
+                <td>${escapeHtml(invFmtQte(ing.quantite, ing.unite))}</td>
+            </tr>`).join('')}
+        </tbody>
+    </table></div>
+    <p class="text-muted" style="font-size: 12px; margin: 6px 0 0;">Quantités pour toute la production du jour, tous formats confondus.</p>`;
 };
 
 // Bouteilles non expliquées : produit + ajustements − livré − vendu − sorti − stock.
@@ -9555,6 +10196,8 @@ const showLotTraceModal = (lotId) => {
             ${ligne('En stock', t.lot ? `${t.enStock} bt` : '<span class="badge badge-default">Épuisé</span>')}
             ${ecart !== null && ecart !== 0 ? ligne('Écart non expliqué', `${ecart} bt`) : ''}
 
+            ${t.ingredients.length || t.totalProduit > 0 ? `<h4 style="margin-top: 16px;">Ingrédients utilisés</h4>${ingredientsTraceHtml(t.ingredients, t.totalProduit)}` : ''}
+
             <h4 style="margin-top: 16px;">Livraisons clients</h4>
             ${livraisonsHtml}
             ${mouvementsHtml}
@@ -9606,6 +10249,14 @@ const getLotRappelData = (numLot) => {
         .sort((a, b) => new Date(a.dateAdded || 0) - new Date(b.dateAdded || 0));
     const retours = traces.flatMap(t => t.retours)
         .sort((a, b) => new Date(a.dateAdded || 0) - new Date(b.dateAdded || 0));
+    // Lots d'ingrédients : une production couvre tous les formats du numéro
+    const productionsVues = new Set();
+    const ingredients = traces.flatMap(t => t.ingredients).filter(ing => {
+        const cle = `${ing.productionId}|${ing.article}|${ing.numLot}|${ing.quantite}`;
+        if (productionsVues.has(cle)) return false;
+        productionsVues.add(cle);
+        return true;
+    });
 
     const destinataires = uniq([
         ...livraisonsClients.map(l => l.clientId || l.clientNom),
@@ -9630,6 +10281,7 @@ const getLotRappelData = (numLot) => {
         livraisonsClients,
         sorties,
         retours,
+        ingredients,
         lotsEnStock: lots.filter(l => ids.has(String(l.id)))
     };
 };
@@ -9739,6 +10391,8 @@ const showLotRappelModal = (numLot) => {
             <h4 style="margin-top: 16px;">Par format</h4>
             ${formatsHtml}
 
+            ${r.ingredients.length || r.totalProduit > 0 ? `<h4 style="margin-top: 16px;">Ingrédients utilisés</h4>${ingredientsTraceHtml(r.ingredients, r.totalProduit)}` : ''}
+
             <h4 style="margin-top: 16px;">Clients livrés</h4>
             ${clientsHtml}
             ${sortiesHtml}
@@ -9831,9 +10485,19 @@ const exportLotRappelExcel = (numLot) => {
         'Quantité re-créditée': Number(x.quantity) || 0
     }));
 
+    const ingredients = r.ingredients.map(ing => ({
+        'Production': ing.dateProduction || '',
+        'Ingrédient': ing.article || '',
+        'N° de lot fournisseur': ing.numLot || 'sans n° de lot',
+        'Fournisseur': ing.fournisseur || '',
+        'Quantité': Number(ing.quantite) || 0,
+        'Unité': displayUnit(ing.unite || '')
+    }));
+
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, feuille(synthese), 'Synthèse');
     XLSX.utils.book_append_sheet(wb, feuille(parFormat), 'Par format');
+    if (ingredients.length > 0) XLSX.utils.book_append_sheet(wb, feuille(ingredients), 'Ingrédients');
     XLSX.utils.book_append_sheet(wb, feuille(clientsLivres), 'Clients livrés');
     XLSX.utils.book_append_sheet(wb, feuille(sorties), 'Sorties');
     if (annulations.length > 0) XLSX.utils.book_append_sheet(wb, feuille(annulations), 'Annulations');
@@ -10319,10 +10983,6 @@ const renderPointage = (_tabIgnored) => {
         .sort((a, b) => (a.heureDebut || '').localeCompare(b.heureDebut || ''));
 
     safeRender(`
-        <div class="page-header-big">
-            <h1>Pointage</h1>
-        </div>
-
         <div class="pointage-hero">
             <div class="section-label">${selectedEmp ? escapeHtml(selectedEmp.prenom + ' ' + (selectedEmp.nom || '')) : 'Aucun employé sélectionné'}</div>
             <div class="pointage-clock-big current-time">${currentTime}</div>
@@ -10410,7 +11070,7 @@ const renderPointage = (_tabIgnored) => {
                     </div>
                     <div class="history-row-total">
                         <button type="button" class="btn btn-sm btn-secondary" data-click="cloturer-pointage" data-id="${escapeHtml(p.id)}">Clôturer</button>
-                        <button type="button" class="btn btn-sm btn-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
+                        ${rowMenuHtml(`pointage du ${formatDate(p.date)}`, `<button type="button" class="is-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>`)}
                     </div>
                 </div>`;
             }).join('')}
@@ -10506,7 +11166,7 @@ const renderHistoriqueTable = (pointages, employes) => {
                 <td>${p.pause || 0} min</td>
                 <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
                 <td>
-                    <button class="btn btn-sm btn-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
+                    <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
                 </td>
             </tr>
         `;
@@ -10778,6 +11438,9 @@ const renderCommandes = () => {
     const savedFilterStatut = DB.getFilter('statut') || '';
     const savedFilterClient = DB.getFilter('commandeClient') || '';
     const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
+    // Le titre de la barre du haut suit le mode (commandes actives ou archives)
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = showArchives ? 'Archives' : 'Commandes';
 
     const allCommandes = DB.get('commandes') || [];
     const commandesScope = showArchives
@@ -10825,7 +11488,7 @@ const renderCommandes = () => {
             const articlesPreview = safeItems.slice(0, 3).map(i => {
                 const a = aromes.find(a => a.id === i.aromeId);
                 const f = formats.find(f => f.id === i.formatId);
-                return `${i.quantite}× ${a?.nom || '?'} ${f?.nom || '?'}`;
+                return `${i.quantite}× ${a?.nom || '?'} ${f?.nom || '?'}${libelleEnPlus(i)}`;
             }).join(' • ');
             const more = safeItems.length > 3 ? ` • +${safeItems.length - 3}` : '';
             const montant = getCommandeMontant(cmd, clients, formats);
@@ -10851,18 +11514,15 @@ const renderCommandes = () => {
         }).join('');
 
     const html = `
-        <div class="commandes-toolbar">
-            <h1>${showArchives ? 'Archives' : 'Commandes'}</h1>
-            <div class="header-actions" style="display:flex; gap:8px;">
-                <button class="btn btn-ghost btn-sm" onclick="toggleArchives()" title="${showArchives ? 'Voir commandes actives' : 'Voir archives'}">
-                    ${showArchives ? '← Actives' : 'Archives'}
-                </button>
-                ${showArchives
-                    ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
-                    : `<button class="btn btn-ghost btn-sm" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock libre (hors bouteilles réservées aux commandes déjà produites)">✓ Stock</button>
-                       <button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
-            </div>
-        </div>
+        ${pageToolbar(`
+            <button type="button" class="btn btn-secondary" onclick="toggleArchives()" title="${showArchives ? 'Voir commandes actives' : 'Voir archives'}">
+                ${showArchives ? '← Actives' : 'Archives'}
+            </button>
+            ${showArchives
+                ? `<button type="button" class="btn btn-secondary" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
+                : `<button type="button" class="btn btn-secondary" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock libre (hors bouteilles réservées aux commandes déjà produites)">✓ Stock</button>
+                   <button type="button" class="btn btn-primary" onclick="showCommandeModal()">+ Créer</button>`}
+        `)}
 
         ${!showArchives ? renderWeekCalendar(commandesByDate) : ''}
 
@@ -11219,10 +11879,25 @@ const updateCommandeStatut = (id, statut, { fromLivraison = false } = {}) => {
     return false;
 };
 
-const marquerCommandeProduite = (id) => {
-    updateCommandeStatut(id, 'produite');
-    modal.hide();
-    showToast('Commande marquée comme produite');
+// Avant de passer « produite », la règle d'attribution vérifie que les bouteilles
+// libres (vendables à la date de livraison, assez longues pour le client) suffisent
+const marquerCommandeProduite = async (id) => {
+    const { plan } = planAttributionCommandes(new Date(), { forceProduite: id });
+    const p = plan.get(id);
+    const manques = (p?.lignes || []).filter(l => l.manque > 0);
+    if (manques.length > 0) {
+        const detail = manques.map(l => `${l.manque} bt ${l.arome.nom} ${l.format.nom}`).join(', ');
+        const ok = await confirmDialog(
+            `Pour #${getCommandeNumero(p.commande)} · ${p.client ? getClientLabel(p.client) : 'client inconnu'}, il manque ${detail} (bouteilles libres${p.minJours ? ` et assez longues pour ce client, ${p.minJours} j minimum` : ''}). La marquer produite quand même ?`,
+            { title: 'Stock insuffisant', confirmLabel: 'Marquer quand même' }
+        );
+        if (!ok) return;
+    }
+    // updateCommandeStatut relit les commandes : rien n'est gardé d'avant la confirmation
+    if (updateCommandeStatut(id, 'produite')) {
+        modal.hide();
+        showToast('Commande marquée comme produite');
+    }
 };
 
 const restaurerCommande = (id) => {
@@ -11305,6 +11980,9 @@ const restaurerCommande = (id) => {
             DB.set('lots', lots);
 
             cmd.lotsUtilises = [];
+            // Les bouteilles livrées en plus reviennent au stock avec le reste :
+            // la commande retrouve ses seules quantités commandées
+            cmd.items = getItems(cmd).filter(i => !i.enPlus);
             delete cmd.dateLivraisonEffective;
             delete cmd.clientLivraison;
             delete cmd.numeroBL;
@@ -11334,7 +12012,13 @@ const restaurerCommande = (id) => {
 //
 // allocations attend : [{ lotId, quantite, expectedArome, expectedFormat }]
 // Les quantités sont agrégées en interne par lotId pour éviter double décrément.
-const deliverCommandeTransaction = async (commandeId, allocations) => {
+// options (v13.0) : extras [{ aromeId, formatId, quantite, offert }] — bouteilles
+// livrées en plus de la commande, incluses dans les allocations ; partielle —
+// autorise à livrer moins que commandé, le reste devient un reliquat « en attente »
+// (reliquatId, reliquatNumero) écrit dans la même transaction.
+// Renvoie { lotsUtilises, reliquat }.
+const deliverCommandeTransaction = async (commandeId, allocations, options = {}) => {
+    const { extras = [], partielle = false, reliquatId = null, reliquatNumero = null } = options;
     // --- Guardes : exiger Firebase prêt, V11 prêt, authentifié ---
     if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) {
         throw new Error(
@@ -11415,6 +12099,17 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
         la.formats.add(normalize(a.expectedFormat));
     }
 
+    // Bouteilles en plus par article (comptées dans les allocations)
+    const extrasAgg = new Map();  // itemKey → { quantite, offert }
+    for (const x of extras) {
+        const q = Number(x.quantite);
+        if (!Number.isInteger(q) || q <= 0) throw new Error('Quantité de bouteilles en plus invalide. Livraison annulée.');
+        const k = `${x.aromeId}|${x.formatId}`;
+        const prev = extrasAgg.get(k);
+        extrasAgg.set(k, { quantite: (prev?.quantite || 0) + q, offert: !!x.offert });
+    }
+    if (partielle && !reliquatId) throw new Error('Identifiant de reliquat manquant. Livraison annulée.');
+
     // Vérification : un lot ne doit servir qu'à un seul couple (arome, format)
     for (const [lotId, la] of lotsAgg) {
         if (la.aromes.size > 1 || la.formats.size > 1) {
@@ -11450,33 +12145,60 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
             remoteItemsMap.set(key, (remoteItemsMap.get(key) || 0) + Number(item.quantite));
         }
 
-        // Vérifier que chaque article alloué existe dans la commande distante avec le bon total
+        // Vérifier chaque article alloué : la part « commandée » (alloué − en plus)
+        // ne dépasse jamais la commande distante ; un article hors commande n'est
+        // livrable qu'en bouteilles en plus déclarées
         for (const [itemKey, allocatedQty] of itemAgg) {
             const remoteQty = remoteItemsMap.get(itemKey);
-            if (remoteQty === undefined) {
+            const extraQty = extrasAgg.get(itemKey)?.quantite || 0;
+            if (remoteQty === undefined && !extraQty) {
                 throw new Error(
                     `L'article (${itemKey}) a été retiré de la commande distante. Livraison annulée.`
                 );
             }
-            if (allocatedQty !== remoteQty) {
+            const base = allocatedQty - extraQty;
+            if (base < 0 || base > (remoteQty || 0)) {
                 throw new Error(
                     `Quantité allouée incorrecte pour l'article (${itemKey}) : ` +
-                    `alloué ${allocatedQty}, requis ${remoteQty} d'après la commande distante. ` +
+                    `alloué ${allocatedQty} dont ${extraQty} en plus, requis ${remoteQty || 0} d'après la commande distante. ` +
                     'Livraison annulée.'
                 );
             }
         }
-        // Vérifier qu'aucun article distant n'est oublié
+        for (const itemKey of extrasAgg.keys()) {
+            if (!itemAgg.has(itemKey)) throw new Error(`Bouteilles en plus sans lot alloué (${itemKey}). Livraison annulée.`);
+        }
+        // Vérifier qu'aucun article distant n'est oublié (sauf livraison partielle)
+        const baseLivree = new Map();
         for (const [itemKey, remoteQty] of remoteItemsMap) {
-            const allocatedQty = itemAgg.get(itemKey) || 0;
-            if (allocatedQty !== remoteQty) {
+            const base = (itemAgg.get(itemKey) || 0) - (extrasAgg.get(itemKey)?.quantite || 0);
+            baseLivree.set(itemKey, base);
+            if (base !== remoteQty && !partielle) {
                 throw new Error(
                     `L'article (${itemKey}) est absent ou mal alloué dans cette livraison ` +
-                    `(alloué ${allocatedQty}, requis ${remoteQty} d'après la commande distante). ` +
+                    `(alloué ${base}, requis ${remoteQty} d'après la commande distante). ` +
                     'Livraison annulée.'
                 );
             }
         }
+
+        // Lignes livrées (part commandée, puis bouteilles en plus) et reliquat
+        const itemsLivres = [];
+        const itemsReliquat = [];
+        const resteBase = new Map(baseLivree);
+        remoteItems.forEach(item => {
+            const k = `${item.aromeId}|${item.formatId}`;
+            const q = Number(item.quantite) || 0;
+            const livre = Math.min(q, Math.max(0, resteBase.get(k) || 0));
+            resteBase.set(k, (resteBase.get(k) || 0) - livre);
+            if (livre > 0) itemsLivres.push({ ...item, quantite: livre });
+            if (q - livre > 0) itemsReliquat.push({ ...item, quantite: q - livre });
+        });
+        extrasAgg.forEach((x, k) => {
+            const [aromeId, formatId] = k.split('|');
+            itemsLivres.push({ aromeId, formatId, quantite: x.quantite, enPlus: true, ...(x.offert ? { offert: true } : {}) });
+        });
+        if (itemsLivres.length === 0) throw new Error('Aucune bouteille à livrer. Livraison annulée.');
 
         // --- 3. Lecture et validation de chaque lot distant ---
         const lotsUtilises = [];
@@ -11570,10 +12292,23 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
         const clientLocal = clientsLocaux.find(c => c.id === commande.clientId);
         const updatedCommande = {
             ...commande,
+            items: itemsLivres,
             statut: 'livrée',
             lotsUtilises,
             dateLivraisonEffective: now
         };
+        // Livraison partielle : le reste devient une commande « en attente » liée
+        let reliquat = null;
+        if (itemsReliquat.length > 0) {
+            reliquat = { ...commande, id: reliquatId, numero: reliquatNumero || `${getCommandeNumero(commande)}-2`, statut: 'en_attente', items: itemsReliquat, reliquatDe: commandeId };
+            ['lotsUtilises', 'dateLivraisonEffective', 'clientLivraison', 'numeroBL', 'reliquatId'].forEach(f => delete reliquat[f]);
+            updatedCommande.reliquatId = reliquatId;
+            transaction.set(v11GetRecordRef('commandes', reliquatId), {
+                record: reliquat,
+                updatedAt: now,
+                _version: txVersion
+            });
+        }
         if (clientLocal) {
             updatedCommande.clientLivraison = {
                 societe: clientLocal.societe || '',
@@ -11604,6 +12339,7 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
 
         return {
             updatedCommande,
+            reliquat,
             lotsUtilises,
             lotResults: updatedLots.map(u => ({
                 lotId: u.lot.id,
@@ -11622,11 +12358,13 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
     if (cmdIdx !== -1) {
         allCommandes[cmdIdx] = result.updatedCommande;
     }
+    if (result.reliquat) allCommandes.push(result.reliquat);
     DB._applyRemoteSnapshot('commandes', allCommandes);
 
     // Met à jour les versions commande
     if (!V11._versions['commandes']) V11._versions['commandes'] = {};
     V11._versions['commandes'][commandeId] = txVersion;
+    if (result.reliquat) V11._versions['commandes'][result.reliquat.id] = txVersion;
 
     // Met à jour / supprime les lots dans le cache local
     const allLots = DB.get('lots');
@@ -11653,12 +12391,282 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
     }
     v11SaveVersions();
 
-    return result.lotsUtilises;
+    return { lotsUtilises: result.lotsUtilises, reliquat: result.reliquat };
+};
+
+// --- Livraison d'une commande (v13.0) ---
+// Les lots sont pré-remplis selon la règle d'attribution : DLV la plus proche
+// d'abord, parmi les lots vendables aujourd'hui, assez longs pour le client et non
+// prévus pour d'autres commandes (planAttributionCommandes). Tout reste modifiable.
+// Livraison partielle : ce qui manque devient un reliquat « en attente ». Bouteilles
+// en plus (menus ⋯) : sur une ligne ou un article hors commande, facturées ou offertes.
+let livraisonState = null;
+
+// Lots vendables aujourd'hui pour un arôme × format (normalisés), DLV la plus
+// proche d'abord, avec la part prévue pour d'autres commandes
+const livraisonLotsPour = (key, minJours, autresParLot, today) => {
+    const limiteMin = today.getTime() + minJours * 86400000;
+    return (DB.get('lots') || [])
+        .filter(l => stockCellKey(l.arome, l.format) === key && Number(l.quantite) > 0 && isLotSellable(l, today))
+        .sort(stockFefo)
+        .map(lot => {
+            const autres = autresParLot.get(lot.id) || [];
+            const reserveAutres = autres.reduce((s, r) => s + r.quantite, 0);
+            return {
+                lot,
+                max: Number(lot.quantite),
+                libre: Math.max(0, Number(lot.quantite) - reserveAutres),
+                autres,
+                tropCourt: minJours > 0 && stockSaleLimit(lot) < limiteMin
+            };
+        });
+};
+
+// Répartit `cible` bouteilles sur les lots d'une ligne, DLV la plus proche
+// d'abord, sans toucher aux bouteilles prévues pour d'autres commandes
+const remplirLigneLivraison = (ligne, cible) => {
+    let reste = Math.max(0, cible);
+    ligne.lots.forEach(l => {
+        const pris = l.tropCourt ? 0 : Math.min(l.libre, reste);
+        ligne.qte[l.lot.id] = pris;
+        reste -= pris;
+    });
+};
+
+const livraisonTotalLigne = (ligne) => ligne.lots.reduce((s, l) => s + (ligne.qte[l.lot.id] || 0), 0);
+
+// État d'une ligne : alloué, livré au titre de la commande, en plus, reliquat
+const livraisonEtatLigne = (ligne) => {
+    const alloue = livraisonTotalLigne(ligne);
+    const base = Math.min(alloue, ligne.commande);
+    const enPlus = Math.max(0, alloue - ligne.commande);
+    return { alloue, base, enPlus, reliquat: ligne.commande - base, depasse: enPlus > 0 && !ligne.enPlusOuvert };
+};
+
+const livraisonStatutLigneHtml = (ligne) => {
+    const e = livraisonEtatLigne(ligne);
+    if (e.depasse) return `<span class="liv-statut is-danger">${e.alloue} / ${ligne.commande} · dépasse la commande</span>`;
+    if (ligne.horsCommande) return `<span class="liv-statut is-plus">${e.enPlus} en plus</span>`;
+    if (e.enPlus > 0) return `<span class="liv-statut is-plus">${e.alloue} / ${ligne.commande} · ${e.enPlus} en plus</span>`;
+    if (e.reliquat > 0) return `<span class="liv-statut is-warning">${e.alloue} / ${ligne.commande} · ${e.reliquat} en reliquat</span>`;
+    return `<span class="liv-statut is-ok">${e.alloue} / ${ligne.commande} ✓</span>`;
+};
+
+const livraisonLigneHtml = (ligne) => {
+    const e = livraisonEtatLigne(ligne);
+    const today = dateOnly(new Date()).getTime();
+    const jours = (lot) => {
+        const t = stockSaleLimit(lot);
+        return Number.isFinite(t) ? Math.round((t - today) / 86400000) : null;
+    };
+    const lotsHtml = ligne.lots.map(l => {
+        const j = jours(l.lot);
+        const dlv = l.lot.dlv || l.lot.dlc;
+        const info = `${twinFmtInt(l.max)} bt${dlv ? ` · DLV ${formatDate(dlv)}` : ''}${j !== null ? ` (${j} j)` : ''}`;
+        if (l.tropCourt) {
+            return `<li class="liv-lot is-off">
+                <span class="liv-lot-num">#${escapeHtml(formatLotNumero(getLotNumero(l.lot)))}</span>
+                <span class="liv-lot-info">${escapeHtml(info)} · trop court pour ce client (min ${livraisonState.minJours} j)</span>
+            </li>`;
+        }
+        const autres = l.autres.length
+            ? `<span class="liv-lot-autres">prévu pour ${l.autres.map(r => `#${escapeHtml(getCommandeNumero(r.commande))} (${r.quantite} bt, ${escapeHtml(stockLivraisonLabel(r.commande.dateLivraison))})`).join(', ')}</span>`
+            : '';
+        return `<li class="liv-lot">
+            <span class="liv-lot-num">#${escapeHtml(formatLotNumero(getLotNumero(l.lot)))}</span>
+            <span class="liv-lot-info">${escapeHtml(info)}${autres}</span>
+            <input type="number" class="liv-lot-qte" min="0" max="${safeNumAttr(l.max)}" step="1" inputmode="numeric"
+                   value="${safeNumAttr(ligne.qte[l.lot.id] || 0)}" data-ligne="${escapeHtml(ligne.id)}" data-lot="${escapeHtml(l.lot.id)}"
+                   aria-label="${escapeHtml(`Bouteilles du lot ${formatLotNumero(getLotNumero(l.lot))}`)}" oninput="majLivraisonQte(this)">
+        </li>`;
+    }).join('');
+    const enPlusHtml = (ligne.enPlusOuvert || ligne.horsCommande) ? `
+        <div class="liv-en-plus">
+            <label for="livPlus-${escapeHtml(ligne.id)}">${ligne.horsCommande ? 'Bouteilles livrées' : 'Bouteilles en plus'}</label>
+            <input type="number" id="livPlus-${escapeHtml(ligne.id)}" min="0" step="1" inputmode="numeric" value="${e.enPlus || ''}"
+                   data-ligne="${escapeHtml(ligne.id)}" oninput="majLivraisonEnPlus(this)">
+            <label class="liv-offert"><input type="checkbox" ${ligne.offert ? 'checked' : ''} data-ligne="${escapeHtml(ligne.id)}" onchange="majLivraisonOffert(this)"> offertes</label>
+        </div>` : '';
+    const menu = ligne.horsCommande
+        ? rowMenuHtml(`${ligne.aromeNom} ${ligne.formatNom}`, `<button type="button" class="is-danger" data-click="livraison-retirer-ligne" data-ligne="${escapeHtml(ligne.id)}">Retirer cet article</button>`)
+        : (ligne.enPlusOuvert ? '' : rowMenuHtml(`${ligne.aromeNom} ${ligne.formatNom}`, `<button type="button" data-click="livraison-en-plus" data-ligne="${escapeHtml(ligne.id)}">Ajouter des bouteilles en plus</button>`));
+    return `<section class="liv-ligne" data-ligne="${escapeHtml(ligne.id)}">
+        <div class="liv-ligne-head">
+            <span class="liv-ligne-nom">${escapeHtml(`${ligne.aromeNom} ${ligne.formatNom}`)}${ligne.horsCommande ? ' <span class="stock-tag">hors commande</span>' : ''}</span>
+            <span class="liv-ligne-statut" id="livStatut-${escapeHtml(ligne.id)}">${livraisonStatutLigneHtml(ligne)}</span>
+            ${menu}
+        </div>
+        ${ligne.lots.length ? `<ul class="liv-lots">${lotsHtml}</ul>` : '<p class="liv-vide">Aucun lot vendable pour cet article.</p>'}
+        ${enPlusHtml}
+    </section>`;
+};
+
+// Pied de fenêtre : récapitulatif et libellé du bouton
+const majPiedLivraison = () => {
+    if (!livraisonState) return;
+    let alloue = 0, reliquat = 0, enPlus = 0, offertes = 0, depasse = false;
+    livraisonState.lignes.forEach(l => {
+        const e = livraisonEtatLigne(l);
+        alloue += e.alloue;
+        reliquat += e.reliquat;
+        enPlus += e.enPlus;
+        if (l.offert) offertes += e.enPlus;
+        depasse = depasse || e.depasse;
+    });
+    const recap = document.getElementById('livRecap');
+    if (recap) {
+        recap.textContent = [
+            `${alloue} bt à livrer`,
+            enPlus ? `dont ${enPlus} en plus${offertes ? ` (${offertes} offerte${offertes > 1 ? 's' : ''})` : ''}` : '',
+            reliquat ? `reliquat de ${reliquat} bt` : ''
+        ].filter(Boolean).join(' · ');
+    }
+    const note = document.getElementById('livReliquatNote');
+    if (note) {
+        note.hidden = !(reliquat > 0 && alloue > 0);
+        note.textContent = `Il manque ${reliquat} bt : les bouteilles prêtes partent maintenant et un reliquat ${livraisonState.reliquatNumero} de ${reliquat} bt reste « en attente » (même client, même date).`;
+    }
+    const btn = document.getElementById('confirm-livraison-btn');
+    if (btn && !btn.disabled) btn.textContent = depasse ? 'Livrer' : reliquat > 0 && alloue > 0 ? `Livrer ${alloue} bt · reliquat de ${reliquat}` : `Livrer ${alloue} bt`;
+};
+
+const majLigneLivraisonDom = (ligne, { valeursLots = true, champEnPlus = true } = {}) => {
+    const statut = document.getElementById(`livStatut-${ligne.id}`);
+    if (statut) statut.innerHTML = livraisonStatutLigneHtml(ligne);
+    if (valeursLots) {
+        document.querySelectorAll(`.liv-lot-qte[data-ligne="${ligne.id}"]`).forEach(inp => {
+            inp.value = ligne.qte[inp.dataset.lot] || 0;
+        });
+    }
+    if (champEnPlus) {
+        const plus = document.getElementById(`livPlus-${ligne.id}`);
+        if (plus) plus.value = livraisonEtatLigne(ligne).enPlus || '';
+    }
+    majPiedLivraison();
+};
+
+const livraisonLigne = (id) => livraisonState?.lignes.find(l => l.id === id);
+
+const majLivraisonQte = (input) => {
+    const ligne = livraisonLigne(input.dataset.ligne);
+    if (!ligne) return;
+    const v = parseInt(input.value, 10);
+    ligne.qte[input.dataset.lot] = Number.isFinite(v) && v > 0 ? v : 0;
+    majLigneLivraisonDom(ligne, { valeursLots: false });
+};
+
+const majLivraisonEnPlus = (input) => {
+    const ligne = livraisonLigne(input.dataset.ligne);
+    if (!ligne) return;
+    const n = Math.max(0, parseInt(input.value, 10) || 0);
+    remplirLigneLivraison(ligne, ligne.commande + n);
+    majLigneLivraisonDom(ligne, { champEnPlus: false });
+};
+
+const majLivraisonOffert = (input) => {
+    const ligne = livraisonLigne(input.dataset.ligne);
+    if (!ligne) return;
+    ligne.offert = input.checked;
+    majPiedLivraison();
+};
+
+const rerenderLigneLivraison = (ligne) => {
+    const el = document.querySelector(`.liv-ligne[data-ligne="${ligne.id}"]`);
+    if (el) el.outerHTML = livraisonLigneHtml(ligne);
+    majPiedLivraison();
+};
+
+const ouvrirEnPlusLivraison = (id) => {
+    const ligne = livraisonLigne(id);
+    if (!ligne) return;
+    ligne.enPlusOuvert = true;
+    rerenderLigneLivraison(ligne);
+    document.getElementById(`livPlus-${ligne.id}`)?.focus();
+};
+
+// Articles hors commande proposables : arôme × format avec des bouteilles libres
+// (vendables aujourd'hui, assez longues pour le client), absents des lignes
+const livraisonArticlesHorsCommande = () => {
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const today = dateOnly(new Date());
+    const dejaLa = new Set(livraisonState.lignes.map(l => l.key));
+    const parCle = new Map();
+    aromes.forEach(a => formats.forEach(f => {
+        const key = stockCellKey(a.nom, f.nom);
+        if (dejaLa.has(key) || parCle.has(key)) return;
+        const lots = livraisonLotsPour(key, livraisonState.minJours, livraisonState.autresParLot, today).filter(l => !l.tropCourt);
+        const libre = lots.reduce((s, l) => s + l.libre, 0);
+        if (libre > 0) parCle.set(key, { key, arome: a, format: f, libre });
+    }));
+    return [...parCle.values()].sort((x, y) => `${x.arome.nom} ${x.format.nom}`.localeCompare(`${y.arome.nom} ${y.format.nom}`, 'fr'));
+};
+
+const montrerHorsCommandeLivraison = () => {
+    const bloc = document.getElementById('livHorsCommande');
+    if (!bloc || !livraisonState) return;
+    const options = livraisonArticlesHorsCommande();
+    bloc.hidden = false;
+    bloc.innerHTML = options.length === 0
+        ? '<p class="liv-vide">Aucun autre article n\'a de bouteilles libres.</p>'
+        : `<label for="livHorsSelect">Article hors commande</label>
+           <div class="liv-hors-row">
+               <select id="livHorsSelect">${options.map(o => `<option value="${escapeHtml(o.key)}">${escapeHtml(`${o.arome.nom} ${o.format.nom} — ${o.libre} bt libres`)}</option>`).join('')}</select>
+               <button type="button" class="btn btn-secondary" data-click="livraison-hors-commande-ajouter">Ajouter</button>
+           </div>`;
+    document.getElementById('livHorsSelect')?.focus();
+};
+
+const ajouterHorsCommandeLivraison = () => {
+    const key = document.getElementById('livHorsSelect')?.value;
+    const choix = livraisonArticlesHorsCommande().find(o => o.key === key);
+    if (!choix) return;
+    const ligne = {
+        id: `h${Date.now()}`,
+        key,
+        aromeId: choix.arome.id,
+        formatId: choix.format.id,
+        aromeNom: choix.arome.nom,
+        formatNom: choix.format.nom,
+        commande: 0,
+        horsCommande: true,
+        enPlusOuvert: true,
+        offert: false,
+        lots: livraisonLotsPour(key, livraisonState.minJours, livraisonState.autresParLot, dateOnly(new Date())),
+        qte: {}
+    };
+    livraisonState.lignes.push(ligne);
+    const bloc = document.getElementById('livHorsCommande');
+    if (bloc) {
+        bloc.hidden = true;
+        bloc.innerHTML = '';
+    }
+    document.getElementById('livLignes')?.insertAdjacentHTML('beforeend', livraisonLigneHtml(ligne));
+    majPiedLivraison();
+    document.getElementById(`livPlus-${ligne.id}`)?.focus();
+};
+
+const retirerLigneLivraison = (id) => {
+    if (!livraisonState) return;
+    livraisonState.lignes = livraisonState.lignes.filter(l => l.id !== id || !l.horsCommande);
+    document.querySelector(`.liv-ligne[data-ligne="${id}"]`)?.remove();
+    majPiedLivraison();
+};
+
+// Numéro du reliquat : « 00048-2 », puis « -3 »… (parseInt l'ignore pour la
+// numérotation des commandes)
+const prochainNumeroReliquat = (numero) => {
+    const base = String(numero || '').split('-')[0];
+    let max = 1;
+    (DB.get('commandes') || []).forEach(c => {
+        const [b, suffixe] = String(c.numero || '').split('-');
+        if (b === base && /^\d+$/.test(suffixe || '')) max = Math.max(max, parseInt(suffixe, 10));
+    });
+    return `${base}-${max + 1}`;
 };
 
 const showLivraisonBouteillesModal = (commandeId) => {
     const commandes = DB.get('commandes') || [];
-    const lots = DB.get('lots') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
     const clients = DB.get('clients') || [];
@@ -11674,279 +12682,156 @@ const showLivraisonBouteillesModal = (commandeId) => {
     }
 
     const client = clients.find(cl => cl.id === cmd.clientId);
-    const clientName = client ? (client.societe || client.nom) : 'N/A';
-    const totalItems = (cmd.items || []).reduce((sum, i) => sum + i.quantite, 0);
+    const clientName = client ? getClientLabel(client) : 'Client inconnu';
+    const minJours = clientDureeVieMin(client);
+    const today = dateOnly(new Date());
 
-    const normalize = (s) => (s || '').toString().toLowerCase().trim();
-
-    const sortedLots = [...lots]
-        .filter(lot => isLotSellable(lot))
-        .sort((a, b) => new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01'));
-
-    const lignesHtml = getItems(cmd).map(item => {
-        const arome = aromes.find(a => a.id === item.aromeId);
-        const format = formats.find(f => f.id === item.formatId);
-        const aromeNom = arome?.nom || '?';
-        const formatNom = format?.nom || '?';
-        const aromeNorm = normalize(aromeNom);
-        const formatNorm = normalize(formatNom);
-
-        const lotsDisponibles = sortedLots.filter(lot =>
-            normalize(lot.arome) === aromeNorm &&
-            normalize(lot.format) === formatNorm &&
-            lot.quantite > 0
-        );
-
-        const lotsRow = lotsDisponibles.length === 0
-            ? `<em class="text-muted">Aucun lot disponible</em>`
-            : lotsDisponibles.map(lot => {
-                return `<div class="flex-between" style="padding: 4px 0;">
-                    <span style="font-size: 12px;">#${escapeHtml(formatLotNumero(getLotNumero(lot)))} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${escapeHtml(String(lot.quantite))})</em></span>
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        <input type="number" class="lot-qty-input" data-lot="${escapeHtml(lot.id)}" data-item="${escapeHtml(item.aromeId)}|${escapeHtml(item.formatId)}" value="0" min="0" max="${Number.isFinite(lot.quantite) ? lot.quantite : 0}" style="width: 60px;">
-                        <span style="font-size: 12px; color: var(--text-muted);">/ ${escapeHtml(String(lot.quantite))}</span>
-                    </div>
-                </div>`;
-            }).join('');
-
-        const itemKey = `${item.aromeId}|${item.formatId}`;
-        const filledTotal = 0;
-        const totalId = `item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_');
-
-        return `<div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
-            <div class="flex-between" style="margin-bottom: 8px;">
-                <strong>${escapeHtml(aromeNom)} ${escapeHtml(formatNom)}</strong>
-                <span style="color: var(--text-muted); font-size: 12px;">${escapeHtml(String(item.quantite))} commandées</span>
-            </div>
-            <div id="${totalId}" class="item-total-display" data-required="${Number.isFinite(item.quantite) ? item.quantite : 0}">
-                <span style="font-size: 12px;">Alloué: <strong id="${totalId}-count">${escapeHtml(String(filledTotal))}</strong> / ${escapeHtml(String(item.quantite))}</span>
-            </div>
-            <div style="margin-top: 8px;">${lotsRow}</div>
-        </div>`;
-    }).join('');
-
-    const validateAndDeliver = async () => {
-        const inputs = document.querySelectorAll('.lot-qty-input');
-        const allocations = {};
-        const allocationsParLot = new Map();
-        let allocationInvalide = false;
-
-        inputs.forEach(input => {
-            const valeur = input.value.trim();
-            const quantite = valeur === '' ? 0 : Number(valeur);
-            const maximum = Number(input.max);
-            const lotId = String(input.dataset.lot || '');
-            const itemKey = input.dataset.item || '';
-
-            if (!Number.isInteger(quantite) || quantite < 0 || !Number.isInteger(maximum) || maximum < 0 || quantite > maximum) {
-                allocationInvalide = true;
-                return;
-            }
-            if (quantite === 0) return;
-            if (!lotId || !itemKey) {
-                allocationInvalide = true;
-                return;
-            }
-
-            if (!allocations[itemKey]) allocations[itemKey] = [];
-            allocations[itemKey].push({ lotId, quantite });
-            allocationsParLot.set(lotId, (allocationsParLot.get(lotId) || 0) + quantite);
-        });
-
-        if (allocationInvalide) {
-            showToast('Les quantités allouées doivent être des entiers compris dans le stock disponible', 'error');
-            return;
-        }
-
-        const commandesActuelles = DB.get('commandes') || [];
-        const cmdIndex = commandesActuelles.findIndex(c => c.id === commandeId);
-        const commandeActuelle = commandesActuelles[cmdIndex];
-        if (!commandeActuelle || commandeActuelle.statut !== 'produite') {
-            showToast('Cette commande ne peut plus être livrée', 'error');
-            return;
-        }
-
-        const itemsCommande = getItems(commandeActuelle);
-        if (itemsCommande.length === 0) {
-            showToast('La commande ne contient aucun article à livrer', 'error');
-            return;
-        }
-
-        for (const item of itemsCommande) {
-            const quantiteDemandee = Number(item.quantite);
-            if (!Number.isInteger(quantiteDemandee) || quantiteDemandee <= 0) {
-                showToast('La commande contient une quantité invalide', 'error');
-                return;
-            }
-
-            const key = `${item.aromeId}|${item.formatId}`;
-            const alloue = allocations[key]?.reduce((s, allocation) => s + allocation.quantite, 0) || 0;
-            if (alloue !== quantiteDemandee) {
-                const arome = aromes.find(a => a.id === item.aromeId);
-                const format = formats.find(f => f.id === item.formatId);
-                showToast(`Quantité incorrecte pour ${arome?.nom || '?'} ${format?.nom || '?'} : alloué ${alloue} / ${quantiteDemandee}`, 'error');
-                return;
-            }
-        }
-
-        const allLots = DB.get('lots') || [];
-        const lotsParId = new Map(allLots.map(lot => [String(lot.id), lot]));
-        for (const [itemKey, group] of Object.entries(allocations)) {
-            const [aromeId, formatId] = itemKey.split('|');
-            const arome = aromes.find(item => item.id === aromeId);
-            const format = formats.find(item => item.id === formatId);
-            const aromeAttendu = normalize(arome?.nom || aromeId);
-            const formatAttendu = normalize(format?.nom || formatId);
-
-            for (const { lotId } of group) {
-                const lot = lotsParId.get(String(lotId));
-                if (!lot || normalize(lot.arome) !== aromeAttendu || normalize(lot.format) !== formatAttendu) {
-                    showToast('Un lot alloué ne correspond pas à l\'article commandé', 'error');
-                    return;
-                }
-            }
-        }
-        for (const [lotId, quantite] of allocationsParLot) {
-            const lot = lotsParId.get(lotId);
-            const disponible = Number(lot?.quantite);
-            if (!lot || !isLotSellable(lot) || !Number.isFinite(disponible) || disponible < quantite) {
-                showToast(`Lot indisponible ou stock insuffisant sur #${formatLotNumero(lot ? getLotNumero(lot) : lotId)}. Livraison non effectuée.`, 'error');
-                return;
-            }
-        }
-
-        // --- Validation locale réussie → exécution atomique distante ---
-
-        // État busy : désactiver le bouton Confirmer (anti-double-clic)
-        const btn = document.getElementById('confirm-livraison-btn');
-        if (btn) {
-            btn.disabled = true;
-            btn.textContent = 'Livraison en cours…';
-        }
-
-        try {
-            // Construire le tableau d'allocations pour la transaction
-            // Chaque entrée porte l'itemKey (aromeId|formatId) pour la validation distante des articles
-            const allocationsForTx = [];
-            for (const [itemKey, group] of Object.entries(allocations)) {
-                const [aromeId, formatId] = itemKey.split('|');
-                const arome = aromes.find(a => a.id === aromeId);
-                const format = formats.find(f => f.id === formatId);
-                const expectedArome = arome?.nom || aromeId;
-                const expectedFormat = format?.nom || formatId;
-                for (const { lotId, quantite } of group) {
-                    allocationsForTx.push({ lotId, quantite, itemKey, expectedArome, expectedFormat });
-                }
-            }
-
-            // UNE transaction Firestore multi-documents atomique
-            await deliverCommandeTransaction(commandeId, allocationsForTx);
-
-            // Succès
-            modal.hide();
-            showToast('Commande livrée et stock déduit avec succès');
-
-            // Prompt de génération BL (préservé)
-            confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
-                if (!ok) return;
-                prepareCommandeBLExport(commandeId);
-            });
-        } catch (e) {
-            console.error('Échec de la transaction de livraison :', e);
-            // Détecter les erreurs réseau Firebase pour message utilisateur clair
-            const isNetworkError = e && (
-                e.code === 'unavailable' ||
-                e.code === 'deadline-exceeded' ||
-                /firestore.*(network|unavailable|timeout)/i.test(e.message || '') ||
-                /ERR_NETWORK|ERR_CONNECTION|fetch/i.test(e.message || '')
-            );
-            const isAuthError = e && (e.code === 'permission-denied' || e.code === 'unauthenticated');
-            const isConcurrencyError = e && (e.code === 'aborted' || e.code === 'failed-precondition');
-            if (isAuthError) {
-                showToast(
-                    'Session expirée ou refusée par le serveur. ' +
-                    'Veuillez vous reconnecter puis réessayer la livraison. ' +
-                    'Aucun stock n\'a été déduit.',
-                    'error'
-                );
-            } else if (isConcurrencyError) {
-                showToast(
-                    'La commande ou les lots ont été modifiés sur un autre appareil. ' +
-                    'Rechargez la page et réessayez. Aucun stock n\'a été déduit.',
-                    'error'
-                );
-            } else if (isNetworkError) {
-                showToast(
-                    'Erreur réseau : la transaction n\'a pas pu aboutir. ' +
-                    'Vérifiez votre connexion et réessayez. Aucun stock n\'a été déduit.',
-                    'error'
-                );
-            } else {
-                showToast(e.message || 'Erreur lors de la livraison. Aucune modification effectuée.', 'error');
-            }
-            // Restaurer le bouton en cas d'échec
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = 'Confirmer la livraison';
-            }
-        }
-    };
-
-    const inputsByItemKey = () => {
-        const all = Array.from(document.querySelectorAll('.lot-qty-input'));
-        const map = {};
-        for (const inp of all) {
-            const key = inp.dataset.item;
-            if (key === undefined) continue;
-            if (!map[key]) map[key] = [];
-            map[key].push(inp);
-        }
-        return map;
-    };
-
-    const computeTotals = () => {
-        let totalAlloueGlobal = 0;
-        let ecarts = 0;
-        const byKey = inputsByItemKey();
-        for (const [itemKey, itemInputs] of Object.entries(byKey)) {
-            const total = itemInputs.reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
-            const totalEl = document.getElementById(`item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_') + '-count');
-            if (totalEl) totalEl.textContent = total;
-        }
-        getItems(cmd).forEach(item => {
-            const itemKey = `${item.aromeId}|${item.formatId}`;
-            const itemInputs = byKey[itemKey] || [];
-            const total = itemInputs.reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
-            totalAlloueGlobal += total;
-            if (total !== item.quantite) ecarts++;
-        });
-        const totalEl = document.getElementById('livraison-total-alloue');
-        const ecartsEl = document.getElementById('livraison-ecarts');
-        if (totalEl) totalEl.textContent = totalAlloueGlobal;
-        if (ecartsEl) ecartsEl.textContent = ecarts === 0 ? 'Aucun écart' : `${ecarts} écart(s)`;
-    };
-
-    modal.show(`Livrer commande #${getCommandeNumero(cmd)} — ${clientName}`, `
-        <div style="max-height: 65vh; overflow-y: auto;">
-            <div class="workflow-summary">
-                <div><span>Client</span><strong>${escapeHtml(clientName)}</strong></div>
-                <div><span>Commandé</span><strong>${totalItems}</strong></div>
-                <div><span>Alloué</span><strong id="livraison-total-alloue">0</strong></div>
-                <div><span>Écarts</span><strong id="livraison-ecarts">Calcul...</strong></div>
-            </div>
-            ${lignesHtml}
-        </div>
-    `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-success" id="confirm-livraison-btn">Confirmer la livraison</button>
-    `, 'large');
-
-    document.querySelectorAll('.lot-qty-input').forEach(input => {
-        input.addEventListener('input', computeTotals);
+    // Bouteilles prévues pour les AUTRES commandes (règle d'attribution commune)
+    const { parLot } = planAttributionCommandes(today);
+    const autresParLot = new Map();
+    parLot.forEach((liste, lotId) => {
+        const autres = liste.filter(r => r.commande.id !== commandeId);
+        if (autres.length) autresParLot.set(lotId, autres);
     });
 
-    document.getElementById('confirm-livraison-btn')?.addEventListener('click', validateAndDeliver);
-    computeTotals();
+    // Une ligne par arôme × format commandé (quantités cumulées)
+    const parCle = new Map();
+    getItems(cmd).forEach(item => {
+        if (item.enPlus) return;
+        const itemKey = `${item.aromeId}|${item.formatId}`;
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = resolveCommandeFormat(item, formats)?.format;
+        if (!parCle.has(itemKey)) {
+            parCle.set(itemKey, {
+                id: `l${parCle.size}`,
+                aromeId: item.aromeId,
+                formatId: item.formatId,
+                aromeNom: arome?.nom || '?',
+                formatNom: format?.nom || '?',
+                key: stockCellKey(arome?.nom || '', format?.nom || ''),
+                commande: 0,
+                horsCommande: false,
+                enPlusOuvert: false,
+                offert: false,
+                lots: [],
+                qte: {}
+            });
+        }
+        parCle.get(itemKey).commande += Number(item.quantite) || 0;
+    });
+    const lignes = [...parCle.values()];
+    lignes.forEach(l => {
+        l.lots = livraisonLotsPour(l.key, minJours, autresParLot, today);
+        remplirLigneLivraison(l, l.commande);
+    });
+
+    livraisonState = { commandeId, minJours, autresParLot, lignes, reliquatNumero: `#${prochainNumeroReliquat(getCommandeNumero(cmd))}` };
+
+    modal.show(`Livrer #${getCommandeNumero(cmd)} · ${clientName}`, `
+        <div class="liv-modal">
+            <p class="text-muted liv-intro">Livraison prévue ${escapeHtml(formatDate(cmd.dateLivraison))}${minJours ? ` · durée de vie minimale du client : ${minJours} j` : ''}</p>
+            <div id="livLignes">${lignes.map(livraisonLigneHtml).join('')}</div>
+            <div id="livHorsCommande" class="liv-hors" hidden></div>
+            <p id="livReliquatNote" class="trace-alert" hidden></p>
+            <p class="liv-aide">Proposé : DLV la plus proche d'abord, sans toucher aux bouteilles prévues pour d'autres commandes. Modifiable.</p>
+        </div>
+    `, `
+        ${rowMenuHtml('livraison', '<button type="button" data-click="livraison-hors-commande">Ajouter un article hors commande</button>')}
+        <span id="livRecap" class="liv-recap"></span>
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button class="btn btn-success" id="confirm-livraison-btn" data-click="livraison-confirmer">Livrer</button>
+    `, 'large');
+    majPiedLivraison();
+};
+
+const confirmerLivraison = async () => {
+    const state = livraisonState;
+    if (!state) return;
+    const btn = document.getElementById('confirm-livraison-btn');
+    if (btn?.disabled) return;
+
+    const allocations = [];
+    const extras = [];
+    let total = 0;
+    let partielle = false;
+    for (const ligne of state.lignes) {
+        const e = livraisonEtatLigne(ligne);
+        if (e.depasse) {
+            showToast(`${ligne.aromeNom} ${ligne.formatNom} : ${e.alloue} bt pour ${ligne.commande} commandées. Pour livrer plus, passez par ⋯ → « Ajouter des bouteilles en plus ».`, 'error');
+            return;
+        }
+        for (const l of ligne.lots) {
+            const q = ligne.qte[l.lot.id] || 0;
+            if (!q) continue;
+            if (!Number.isInteger(q) || q < 0 || q > l.max || l.tropCourt) {
+                showToast(`Quantité invalide sur le lot #${formatLotNumero(getLotNumero(l.lot))}`, 'error');
+                return;
+            }
+            allocations.push({
+                lotId: l.lot.id,
+                quantite: q,
+                itemKey: `${ligne.aromeId}|${ligne.formatId}`,
+                expectedArome: ligne.aromeNom,
+                expectedFormat: ligne.formatNom
+            });
+        }
+        if (e.enPlus > 0) extras.push({ aromeId: ligne.aromeId, formatId: ligne.formatId, quantite: e.enPlus, offert: !!ligne.offert });
+        if (e.reliquat > 0) partielle = true;
+        total += e.alloue;
+    }
+    if (total === 0) {
+        showToast('Aucune bouteille à livrer : saisissez au moins une quantité', 'error');
+        return;
+    }
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Livraison en cours…';
+    }
+    try {
+        const commande = (DB.get('commandes') || []).find(c => c.id === state.commandeId);
+        const options = { extras, partielle };
+        if (partielle) {
+            options.reliquatId = generateId();
+            options.reliquatNumero = prochainNumeroReliquat(getCommandeNumero(commande || {}));
+        }
+        // UNE transaction Firestore multi-documents atomique
+        const resultat = await deliverCommandeTransaction(state.commandeId, allocations, options);
+        livraisonState = null;
+        modal.hide();
+        showToast(`Commande livrée : ${total} bt, stock déduit`);
+        if (resultat?.reliquat) {
+            showToast(`Reliquat #${resultat.reliquat.numero} créé : ${getItems(resultat.reliquat).reduce((s, i) => s + (Number(i.quantite) || 0), 0)} bt en attente`, 'warning');
+        }
+        renderCurrentView();
+        confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
+            if (!ok) return;
+            prepareCommandeBLExport(state.commandeId);
+        });
+    } catch (e) {
+        console.error('Échec de la transaction de livraison :', e);
+        const isNetworkError = e && (
+            e.code === 'unavailable' ||
+            e.code === 'deadline-exceeded' ||
+            /firestore.*(network|unavailable|timeout)/i.test(e.message || '') ||
+            /ERR_NETWORK|ERR_CONNECTION|fetch/i.test(e.message || '')
+        );
+        const isAuthError = e && (e.code === 'permission-denied' || e.code === 'unauthenticated');
+        const isConcurrencyError = e && (e.code === 'aborted' || e.code === 'failed-precondition');
+        if (isAuthError) {
+            showToast('Session expirée ou refusée par le serveur. Reconnectez-vous puis réessayez la livraison. Aucun stock n\'a été déduit.', 'error');
+        } else if (isConcurrencyError) {
+            showToast('La commande ou les lots ont été modifiés sur un autre appareil. Rechargez la page et réessayez. Aucun stock n\'a été déduit.', 'error');
+        } else if (isNetworkError) {
+            showToast('Erreur réseau : la transaction n\'a pas pu aboutir. Vérifiez votre connexion et réessayez. Aucun stock n\'a été déduit.', 'error');
+        } else {
+            showToast(e.message || 'Erreur lors de la livraison. Aucune modification effectuée.', 'error');
+        }
+        if (btn) {
+            btn.disabled = false;
+            majPiedLivraison();
+        }
+    }
 };
 
 const checkStockAndUpdateCommandes = () => {
@@ -11954,8 +12839,12 @@ const checkStockAndUpdateCommandes = () => {
     const lots = DB.get('lots') || [];
     const formats = DB.get('formats') || [];
     const aromes = DB.get('aromes') || [];
+    const clients = DB.get('clients') || [];
     const now = new Date();
-    const stockPool = createStockPool(lots, now);
+    // Même rapprochement que la règle d'attribution : noms normalisés, durée de
+    // vie minimale du client, bouteilles « en plus » ignorées
+    const stockPool = createStockPool(lots, now, lot => stockCellKey(lot.arome, lot.format));
+    const minJoursDe = (cmd) => clientDureeVieMin(clients.find(c => c.id === cmd.clientId));
     let updatedCount = 0;
 
     const commandesTriees = sortCommandesByDateLivraison(commandes);
@@ -11965,11 +12854,12 @@ const checkStockAndUpdateCommandes = () => {
     const besoinsDe = (cmd) => {
         const needed = {};
         for (const item of getItems(cmd)) {
+            if (item.enPlus) continue;
             const quantite = Number(item.quantite);
             if (!Number.isInteger(quantite) || quantite <= 0) return null;
-            const format = formats.find(f => f.id === item.formatId);
+            const format = resolveCommandeFormat(item, formats)?.format;
             const arome = aromes.find(a => a.id === item.aromeId);
-            const key = `${arome?.nom || item.aromeId}-${format?.nom || item.formatId}`;
+            const key = stockCellKey(arome?.nom || item.aromeId, format?.nom || item.formatId);
             needed[key] = (needed[key] || 0) + quantite;
         }
         return needed;
@@ -11980,7 +12870,7 @@ const checkStockAndUpdateCommandes = () => {
     commandesTriees.forEach(({ commande: cmd }) => {
         if (cmd.statut !== 'produite') return;
         Object.entries(besoinsDe(cmd) || {}).forEach(([key, qty]) => {
-            stockPool.take(key, qty, cmd.dateLivraison);
+            stockPool.take(key, qty, cmd.dateLivraison, minJoursDe(cmd));
         });
     });
 
@@ -11988,10 +12878,11 @@ const checkStockAndUpdateCommandes = () => {
         if (cmd.statut !== 'en_attente' || getItems(cmd).length === 0) return;
         const needed = besoinsDe(cmd);
         if (!needed) return;
-        const canProduce = Object.entries(needed).every(([key, qty]) => stockPool.available(key, cmd.dateLivraison) >= qty);
+        const minJours = minJoursDe(cmd);
+        const canProduce = Object.entries(needed).every(([key, qty]) => stockPool.available(key, cmd.dateLivraison, minJours) >= qty);
         if (!canProduce) return;
         Object.entries(needed).forEach(([key, qty]) => {
-            stockPool.take(key, qty, cmd.dateLivraison);
+            stockPool.take(key, qty, cmd.dateLivraison, minJours);
         });
         updatedCount++;
         updatedCommandes[index] = { ...cmd, statut: 'produite' };
@@ -12025,11 +12916,16 @@ const showCommandeDetails = (id) => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
         return `<tr>
-            <td>${escapeHtml(arome?.nom || '?')}</td>
+            <td>${escapeHtml(arome?.nom || '?')}${item.enPlus ? ` <span class="stock-tag">${item.offert ? 'en plus · offert' : 'en plus'}</span>` : ''}</td>
             <td>${escapeHtml(format?.nom || '?')}</td>
-            <td>${escapeHtml(String(item.quantite))}</td>
+            <td>${item.enPlus ? '+' : ''}${escapeHtml(String(item.quantite))}</td>
         </tr>`;
     }).join('');
+    // Livraison partielle : liens entre la commande livrée et son reliquat
+    const lienCommande = (cid) => {
+        const c = commandes.find(x => x.id === cid);
+        return c ? `<a href="#" data-click="show-commande-details" data-id="${escapeHtml(c.id)}" data-prevent>#${escapeHtml(getCommandeNumero(c))}</a> (${escapeHtml(getCommandeStatutLabel(c.statut).toLowerCase())})` : '—';
+    };
 
     const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0
         ? commande.lotsUtilises.map(lot => `
@@ -12055,6 +12951,8 @@ const showCommandeDetails = (id) => {
             <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
             ${commande.dateLivraisonEffective ? `<p><strong>Livrée le:</strong> ${formatDateTime(commande.dateLivraisonEffective)}</p>` : ''}
             <p><strong>Statut:</strong> ${escapeHtml(getCommandeStatutLabel(commande.statut))}</p>
+            ${commande.reliquatDe ? `<p><strong>Reliquat de:</strong> ${lienCommande(commande.reliquatDe)}</p>` : ''}
+            ${commande.reliquatId ? `<p><strong>Reliquat:</strong> ${lienCommande(commande.reliquatId)}</p>` : ''}
             ${renderStepTracker(commande.statut)}
             <p><strong>Total:</strong> ${totalItems} articles</p>
             <table class="details-table">
@@ -12140,9 +13038,10 @@ const duplicateCommande = (id) => {
     if (!original) return;
     // Rien n'est enregistré ici : la copie n'existe qu'au clic sur Enregistrer
     modal.hide();
+    // Seules les quantités commandées sont reprises (pas les bouteilles livrées en plus)
     showCommandeModal(null, {
         clientId: original.clientId,
-        items: (original.items || []).map(i => ({ ...i }))
+        items: getItems(original).filter(i => !i.enPlus).map(({ enPlus, offert, ...i }) => ({ ...i }))
     });
 };
 
@@ -12181,14 +13080,12 @@ const renderArchives = () => {
     const filteredCommandes = getArchivesFiltrees(commandes);
 
     let html = `
+        ${pageToolbar(`
+            <button type="button" class="btn btn-secondary" onclick="exportArchivesExcel()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Exporter Excel
+            </button>`)}
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Archives des commandes</h3>
-                <button class="btn btn-secondary" onclick="exportArchivesExcel()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    Exporter Excel
-                </button>
-            </div>
 
             <div class="filters">
                 <select id="filterArchiveYear" onchange="DB.setFilter('archive_year', this.value); renderArchives()">
@@ -12229,7 +13126,7 @@ const renderArchives = () => {
                                 const articlesPreview = safeItems.slice(0, 2).map(i => {
                                     const a = aromes.find(a => a.id === i.aromeId);
                                     const f = formats.find(f => f.id === i.formatId);
-                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
+                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}${libelleEnPlus(i)}`);
                                 }).join(', ');
 
                                 return `
@@ -12267,7 +13164,7 @@ const exportArchivesExcel = () => {
         const items = getItems(cmd).map(item => {
             const a = aromes.find(a => a.id === item.aromeId);
             const f = formats.find(f => f.id === item.formatId);
-            return `${item.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+            return `${item.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}${libelleEnPlus(item)}`;
         }).join(', ');
 
         return {
@@ -12335,12 +13232,8 @@ const renderLivraisons = () => {
 
     let html = `
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Bulletins de Livraison</h3>
-            </div>
-
             <div class="filters">
-                <input type="search" id="filterLivraisonSearch" placeholder="Rechercher BL, client, commande, n° de lot..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('livraison_search', this.value); window.__focusLivraisonSearch = true; renderLivraisons()">
+                <input type="search" id="filterLivraisonSearch" placeholder="Rechercher BL, client, commande, n° de lot..." value="${escapeHtml(savedSearch)}" aria-label="Rechercher un bulletin de livraison" data-live-search="livraison_search">
                 <select id="filterLivraisonYear" onchange="DB.setFilter('livraison_year', this.value); renderLivraisons()">
                     <option value="">Toutes les années</option>
                     ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
@@ -12381,9 +13274,9 @@ const renderLivraisons = () => {
                                 <span class="text-muted" style="font-size: 11px;">${escapeHtml(lastExport)}</span>
                             </div>
                             <div class="lot-card-actions" style="margin-top: 10px;">
-                                <button class="btn btn-sm btn-secondary" data-click="show-livraison-details" data-id="${escapeHtml(liv.id)}">Détails</button>
                                 <button class="btn btn-sm btn-primary" data-click="prepare-bl-export" data-id="${escapeHtml(liv.id)}">Préparer / Exporter</button>
-                                <button class="btn btn-sm btn-danger" data-click="delete-livraison" data-id="${escapeHtml(liv.id)}">Supprimer</button>
+                                <button class="btn btn-sm btn-secondary" data-click="show-livraison-details" data-id="${escapeHtml(liv.id)}">Détails</button>
+                                ${rowMenuHtml(`BL-${getBLNumero(liv)}`, `<button type="button" class="is-danger" data-click="delete-livraison" data-id="${escapeHtml(liv.id)}">Supprimer</button>`)}
                             </div>
                         </div>`;
                     }).join('')}
@@ -12392,15 +13285,6 @@ const renderLivraisons = () => {
     `;
 
     safeRender(html);
-
-    if (window.__focusLivraisonSearch) {
-        const input = document.getElementById('filterLivraisonSearch');
-        if (input) {
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-        }
-        window.__focusLivraisonSearch = false;
-    }
 };
 
 const showLivraisonDetails = (id) => {
@@ -12907,10 +13791,10 @@ const exportBLPDF = (livraisonId) => {
             .pdf-cell { display: flex; align-items: center; min-width: 0; padding: 0 1mm; overflow: hidden; white-space: nowrap; }
             .pdf-qtt { justify-content: center; font-weight: 600; }
             .pdf-format { justify-content: flex-end; text-align: right; }
-            .pdf-ifco { left: 25.4mm; width: 13mm; font-size: 10.5px; font-weight: 700; text-align: center; }
+            .pdf-ifco { left: 25.4mm; width: 13mm; font-size: 11px; font-weight: 700; text-align: center; }
             .pdf-ifco-green { top: 154.7mm; }
             .pdf-ifco-black { top: 160mm; }
-            .pdf-fact-mark { left: 115.5mm; width: 8mm; font-size: 10.5px; font-weight: 700; text-align: center; }
+            .pdf-fact-mark { left: 115.5mm; width: 8mm; font-size: 11px; font-weight: 700; text-align: center; }
             .pdf-fact-email { top: 149mm; }
             .pdf-fact-poste { top: 154.35mm; }
             .pdf-fact-other { top: 159.7mm; }
@@ -13448,8 +14332,11 @@ const computeProductionPlan = () => {
     const recettes = DB.get('recettes');
     const lots = DB.get('lots') || [];
 
+    const clients = DB.get('clients') || [];
     const now = new Date();
-    const stockPool = createStockPool(lots, now);
+    // Réserve rapprochée par noms normalisés, comme la règle d'attribution
+    const stockPool = createStockPool(lots, now, lot => stockCellKey(lot.arome, lot.format));
+    const cleStock = (b) => stockCellKey(b.aromeNom, b.formatNom);
 
     const besoins = {};
     let commandesAInclure = [];
@@ -13489,7 +14376,9 @@ const computeProductionPlan = () => {
         // Par date de livraison croissante : chaque commande ne consomme que les
         // lots encore vendables à sa date de livraison (DLV croissante).
         sortCommandesByDateLivraison(commandesAInclure).forEach(({ commande: cmd }) => {
+            const minJours = clientDureeVieMin(clients.find(c => c.id === cmd.clientId));
             (cmd.items || []).forEach(item => {
+                if (item.enPlus) return;
                 const arome = aromes.find(a => a.id === item.aromeId);
                 const format = formats.find(f => f.id === item.formatId);
                 const key = `${arome?.nom || ''}-${format?.nom || ''}`;
@@ -13497,7 +14386,7 @@ const computeProductionPlan = () => {
                     besoins[key] = { aromeId: item.aromeId, formatId: item.formatId, aromeNom: arome?.nom || '', formatNom: format?.nom || '', quantite: 0, disponible: 0 };
                 }
                 besoins[key].quantite += item.quantite;
-                besoins[key].disponible += stockPool.take(key, Number(item.quantite) || 0, cmd.dateLivraison);
+                besoins[key].disponible += stockPool.take(cleStock(besoins[key]), Number(item.quantite) || 0, cmd.dateLivraison, minJours);
             });
         });
     }
@@ -13506,7 +14395,7 @@ const computeProductionPlan = () => {
     // saisie ; en mode auto on déduit le stock vendable à la date de livraison.
     const productionNecesaire = {};
     Object.entries(besoins).forEach(([key, b]) => {
-        const disponible = productionMode === 'manuel' ? stockPool.available(key) : b.disponible;
+        const disponible = productionMode === 'manuel' ? stockPool.available(cleStock(b)) : b.disponible;
         const aProduire = productionMode === 'manuel' ? b.quantite : Math.max(0, b.quantite - disponible);
         productionNecesaire[key] = { ...b, disponible, aProduire };
     });
@@ -13864,12 +14753,9 @@ const renderProduction = () => {
     }
 
     const html = `
+        ${pageToolbar('', modeToggleHtml)}
         <div id="productionKpi">${buildProductionKpiHtml(plan)}</div>
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Planificateur de production</h3>
-                ${modeToggleHtml}
-            </div>
             ${toolbarHtml}
             <div id="productionResults">${buildProductionResultsHtml(plan)}</div>
         </div>
@@ -14283,12 +15169,15 @@ const confirmerProductionArome = (aromeNom) => {
 
 // Déductions d'inventaire d'une production (ingrédients de la recette, bouteilles
 // vides, bouchons) appliquées au tableau `inventaire` fourni. N'écrit rien en base.
+// `ingredients` : lots d'ingrédients consommés, dans l'ordre d'utilisation
+// ({ article, unite, numLot, fournisseur, quantite } ; numLot '' = sans n° de lot).
 const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, litresProduit) => {
     const aromes = DB.get('aromes') || [];
     const recettes = DB.get('recettes') || [];
     const arome = aromes.find(a => a.nom === aromeNom);
     const recette = recettes.find(r => r.aromeId === arome?.id);
     const warnings = [];
+    const ingredients = [];
     // Erreurs de conversion incompatibles : bloquantes, distinctes des
     // avertissements métier (stock / ingrédient manquant). Une incohérence
     // d'unités ne peut jamais être confirmée par l'utilisateur.
@@ -14320,6 +15209,10 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
                 return;
             }
             if ((item.quantite || 0) < converted) warnings.push(`Stock insuffisant: ${item.nom}`);
+            const allocations = isLotSuiviArticle(item)
+                ? consommerLotsIngredient(item, converted)
+                : [{ numLot: '', fournisseur: '', quantite: arrondiInv(converted) }];
+            allocations.forEach(a => ingredients.push({ article: item.nom, unite: invUnit, ...a }));
             item.quantite = Math.round(((item.quantite || 0) - converted) * 10000) / 10000;
         });
     } else {
@@ -14365,7 +15258,7 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
         }
     }
 
-    return { warnings, conversionErrors };
+    return { warnings, conversionErrors, ingredients };
 };
 
 // Annule une production pour incohérence d'unités (premier élément + nombre restant)
@@ -14399,10 +15292,14 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
     // réécrit la table entière : des tableaux lus avant l'attente effaceraient
     // ces changements sans qu'aucun conflit ne soit détecté.
     const inventaire = (DB.get('inventaire') || []).map(item => ({ ...item }));
-    const { warnings, conversionErrors } = deduireInventaireProduction(inventaire, aromeNom, producedByFormat, litresProduit);
+    const { warnings, conversionErrors, ingredients } = deduireInventaireProduction(inventaire, aromeNom, producedByFormat, litresProduit);
     if (conversionErrors.length > 0) return annulerProductionUnites(conversionErrors);
     const lots = DB.get('lots') || [];
     const history = DB.get('history') || [];
+    // Traçabilité amont : chaque entrée PROD- de cette production porte les lots
+    // d'ingrédients utilisés (quantités pour toute la production, tous formats)
+    const productionId = generateId();
+    const tracesProduction = { productionId, ...(ingredients.length ? { ingredients } : {}) };
 
     const dateProduction = getLocalDateISOString();
     const dates = calculateDates(dateProduction);
@@ -14425,7 +15322,7 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
             lot = { id: generateId(), numLot, arome: aromeNom, format: format.nom, quantite, dateProduction, dlv: dates.dlv, dlc: dates.dlc };
             lots.push(lot);
         }
-        history.unshift(buildLotHistoryEntry('PROD', lot, quantite));
+        history.unshift(buildLotHistoryEntry('PROD', lot, quantite, tracesProduction));
     });
 
     DB.set('inventaire', inventaire);
@@ -14542,9 +15439,27 @@ const CONTAINER_CONSOMMABLES = [
     { nom: 'Bouchons 50cl/100cl', unite: 'pcs', seuilAlerte: 0 }
 ];
 
-// Migration unique : garantit la présence des bouteilles et bouchons dans un inventaire existant
+// Articles proposés pour un inventaire vide, sur demande explicite : une fonction
+// de rendu n'écrit jamais (un appareil neuf, avant le premier chargement cloud,
+// semait des doublons — audit du 23.10, n° 7).
+const DEFAULT_CONSOMMABLES = [
+    { nom: 'Eau', unite: 'L', seuilAlerte: 0 },
+    { nom: 'Sucre', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Citron', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Menthe', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Hibiscus', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Mûre sauvage', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Poire à botzi', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Sureau', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Herbes des alpes', unite: 'kg', seuilAlerte: 0 },
+    { nom: 'Étiquettes', unite: 'pcs', seuilAlerte: 0 },
+    ...CONTAINER_CONSOMMABLES
+];
+
+// Migration unique : garantit la présence des bouteilles et bouchons dans un
+// inventaire existant. Jamais sur un inventaire vide (pas encore chargé).
 const ensureContainerConsommables = (items) => {
-    if (localStorage.getItem('thecol_migr_contenants') === '1') return items;
+    if (items.length === 0 || localStorage.getItem('thecol_migr_contenants') === '1') return items;
     let changed = false;
 
     // Héritage : un ancien article « Capsules » devient « Bouchons 50cl/100cl »
@@ -14566,307 +15481,863 @@ const ensureContainerConsommables = (items) => {
     return items;
 };
 
+const seedInventaireParDefaut = () => {
+    const items = DB.get('inventaire') || [];
+    if (items.length > 0) {
+        renderInventaire();
+        return;
+    }
+    DB.set('inventaire', DEFAULT_CONSOMMABLES.map(c => ({ ...c, id: generateId(), categorie: 'consommable', quantite: 0 })));
+    localStorage.setItem('thecol_migr_contenants', '1');
+    showToast('Articles de base créés');
+    renderInventaire();
+};
+
+// --- Inventaire : ingrédients suivis par lot fournisseur (v12.9) ---
+// Contenants (bouteilles, bouchons, étiquettes…) : comptés sans lot. Les autres
+// consommables sont des ingrédients ; tous sauf l'eau sont suivis par lot.
+// article.lots = [{ id, numLot, quantite, quantiteRecue, dateReception,
+// fournisseur, dateLimite, dateRetrait }] ; article.quantite reste le total, et
+// la part non couverte par les lots est le stock « sans n° de lot » (antérieur
+// au suivi), utilisé en premier.
+const isContenantNom = (nom) => /^(bouteille|bouchon|etiquette|capsule|carton|caisse|couvercle)/.test(normalizeName(nom));
+const isIngredientArticle = (item) => !!item && item.categorie !== 'equipement' && !isContenantNom(item.nom);
+const isLotSuiviArticle = (item) => isIngredientArticle(item) && !isWaterIngredient(item.nom);
+
+const arrondiInv = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+const invFmtNombre = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('fr-CH', { maximumFractionDigits: 2 });
+const invFmtQte = (n, unite) => `${invFmtNombre(n)} ${displayUnit(unite || '')}`.trim();
+const normLotFournisseur = (v) => String(v ?? '').trim().toLowerCase();
+
+const invLotsEnStock = (item) => (item?.lots || []).filter(l => Number(l.quantite) > 0);
+const invSansLot = (item) => Math.max(0, arrondiInv((Number(item?.quantite) || 0) - invLotsEnStock(item).reduce((s, l) => s + Number(l.quantite), 0)));
+const invDateTri = (d) => {
+    const t = d ? dateOnly(d).getTime() : NaN;
+    return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+};
+// Ordre d'utilisation : date limite la plus proche, puis réception la plus ancienne
+const invLotsOrdreUsage = (item) => invLotsEnStock(item).slice().sort((a, b) =>
+    (invDateTri(a.dateLimite) - invDateTri(b.dateLimite))
+    || (invDateTri(a.dateReception) - invDateTri(b.dateReception))
+    || String(a.numLot).localeCompare(String(b.numLot)));
+
+// Retire `qty` des lots d'un ingrédient : d'abord le stock sans n° de lot (le plus
+// ancien), puis les lots dans l'ordre d'utilisation. Ne touche pas à `quantite`
+// (l'appelant la diminue). Renvoie [{ numLot, fournisseur, quantite }], numLot ''
+// pour le stock sans n° de lot ou ce qui dépasse le stock.
+const consommerLotsIngredient = (item, qty) => {
+    const allocations = [];
+    let reste = arrondiInv(qty);
+    const sansLot = invSansLot(item);
+    if (sansLot > 0 && reste > 0) {
+        const pris = Math.min(sansLot, reste);
+        allocations.push({ numLot: '', fournisseur: '', quantite: arrondiInv(pris) });
+        reste = arrondiInv(reste - pris);
+    }
+    for (const lot of invLotsOrdreUsage(item)) {
+        if (reste <= 0) break;
+        const pris = Math.min(Number(lot.quantite), reste);
+        lot.quantite = arrondiInv(Number(lot.quantite) - pris);
+        reste = arrondiInv(reste - pris);
+        allocations.push({ numLot: lot.numLot, fournisseur: lot.fournisseur || '', quantite: arrondiInv(pris) });
+    }
+    if (reste > 0) allocations.push({ numLot: '', fournisseur: '', quantite: reste });
+    return allocations;
+};
+
+// Consommation prévue des commandes à produire (même déduction qu'une production
+// confirmée : recette × litres × perte, bouteilles vides, bouchons + marge),
+// simulée sur une copie de l'inventaire. N'écrit rien.
+const computeInventairePrevu = () => {
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const parArome = new Map();
+    buildStockOverview().cells.forEach(cell => {
+        if (cell.aProduire <= 0) return;
+        const [rowKey, colKey] = cell.key.split('|');
+        const arome = aromes.find(a => normalizeName(a.nom) === rowKey);
+        const format = formats.find(f => normalizeName(f.nom) === colKey);
+        if (!arome || !format) return;
+        const e = parArome.get(arome.nom) || { produced: [], litres: 0 };
+        e.produced.push({ format, quantite: cell.aProduire });
+        e.litres += cell.aProduire * (Number(format.contenanceCl) || 0) / 100;
+        parArome.set(arome.nom, e);
+    });
+
+    const origine = DB.get('inventaire') || [];
+    const copie = JSON.parse(JSON.stringify(origine));
+    const alertes = new Set();
+    parArome.forEach((e, nom) => {
+        const { warnings, conversionErrors } = deduireInventaireProduction(copie, nom, e.produced, e.litres);
+        warnings.forEach(w => {
+            if (w.startsWith('Stock insuffisant')) return;
+            alertes.add(w.startsWith('Recette introuvable')
+                ? `${nom} : pas de recette, les ingrédients des ${invFmtNombre(e.litres)} L à produire ne sont pas comptés`
+                : w);
+        });
+        conversionErrors.forEach(w => alertes.add(w));
+    });
+
+    const besoin = new Map();
+    origine.forEach(item => {
+        const apres = copie.find(c => c.id === item.id);
+        const b = arrondiInv((Number(item.quantite) || 0) - (Number(apres?.quantite) || 0));
+        if (b > 0) besoin.set(item.id, b);
+    });
+    return { besoin, alertes: [...alertes] };
+};
+
+// Quantité à commander : de quoi rester au-dessus du seuil après la production
+// prévue (ou de quoi la couvrir sans seuil), arrondie au-dessus — 0,1 kg ou L,
+// une unité sinon
+const invACommander = (item, besoin) => {
+    const apres = (Number(item.quantite) || 0) - besoin;
+    const seuil = Number(item.seuilAlerte) || 0;
+    const brut = seuil > 0 ? seuil - apres : -apres;
+    if (brut <= 1e-9) return 0;
+    const pas = ['kg', 'L'].includes(normalizeUnit(item.unite)) ? 0.1 : 1;
+    return arrondiInv(Math.ceil(arrondiInv(brut / pas)) * pas);
+};
+
+const INV_ICON_LEAF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg>';
+const INV_ICON_BOX = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>';
+
+// Résumé des lots d'un ingrédient (ligne de la liste)
+const invLotsResumeHtml = (item) => {
+    const lots = invLotsOrdreUsage(item);
+    const sansLot = invSansLot(item);
+    if (lots.length === 0) {
+        return sansLot > 0
+            ? `<div class="inv-lots is-warning">${escapeHtml(invFmtQte(sansLot, item.unite))} sans n° de lot</div>`
+            : '';
+    }
+    const prochain = lots[0];
+    const now = dateOnly(new Date()).getTime();
+    const perime = lots.find(l => l.dateLimite && invDateTri(l.dateLimite) < now);
+    const proche = !perime && lots.find(l => l.dateLimite && invDateTri(l.dateLimite) - now <= 30 * 86400000);
+    return `<div class="inv-lots">
+        ${lots.length} lot${lots.length > 1 ? 's' : ''} · prochain utilisé :
+        ${sansLot > 0
+            ? `sans n° de lot (${escapeHtml(invFmtQte(sansLot, item.unite))})`
+            : `<code class="inv-lot-num">${escapeHtml(prochain.numLot)}</code> ${escapeHtml(invFmtQte(prochain.quantite, item.unite))}${prochain.dateLimite ? `, limite ${escapeHtml(formatDate(prochain.dateLimite))}` : ''}`}
+        ${perime ? `<span class="inv-lots-alert is-danger">lot ${escapeHtml(perime.numLot)} : date limite dépassée</span>` : ''}
+        ${proche ? `<span class="inv-lots-alert">lot ${escapeHtml(proche.numLot)} : limite le ${escapeHtml(formatDate(proche.dateLimite))}</span>` : ''}
+    </div>`;
+};
+
+const invRowHtml = (item, besoin = 0) => {
+    const id = escapeHtml(item.id);
+    const stock = Number(item.quantite) || 0;
+    const apres = arrondiInv(stock - besoin);
+    const seuil = Number(item.seuilAlerte) || 0;
+    const equipement = item.categorie === 'equipement';
+    const aCommander = equipement ? 0 : invACommander(item, besoin);
+    const etat = !equipement && apres < 0 ? 'manque' : aCommander > 0 ? 'commander' : 'ok';
+    const chip = etat === 'manque' ? `<span class="badge badge-expire">manque ${escapeHtml(invFmtQte(-apres, item.unite))}</span>`
+        : etat === 'commander' ? '<span class="badge badge-bientot">à commander</span>' : '';
+    const echelle = Math.max(stock, seuil * 2, besoin, 1);
+    const pct = (v) => safeNumAttr(Math.round(Math.min(100, Math.max(0, v / echelle * 100)) * 10) / 10);
+    const suivi = isLotSuiviArticle(item);
+    const action = suivi
+        ? `<button type="button" class="btn btn-sm btn-secondary" data-click="inventaire-lots" data-id="${id}">Lots</button>`
+        : `<button type="button" class="btn btn-sm btn-secondary" data-click="inventaire-ajuster" data-id="${id}">Ajuster</button>`;
+    return `
+        <li class="inv-row inv-row--${etat}">
+            <div class="inv-row-main">
+                <div class="inv-row-name">${escapeHtml(item.nom)} ${chip}</div>
+                ${equipement ? '' : `<div class="inv-bar" aria-hidden="true"><span style="width:${pct(stock)}%"></span>${seuil > 0 ? `<i style="left:${pct(seuil)}%"></i>` : ''}</div>`}
+                ${suivi ? invLotsResumeHtml(item) : ''}
+            </div>
+            <div class="inv-row-qty">
+                <strong>${escapeHtml(invFmtQte(stock, item.unite))}</strong>
+                ${seuil > 0 ? `<span>seuil ${escapeHtml(invFmtNombre(seuil))}</span>` : ''}
+            </div>
+            <div class="inv-row-prevu">
+                ${besoin > 0
+                    ? `<span>prévu −${escapeHtml(invFmtNombre(besoin))}</span><span class="${etat !== 'ok' ? 'is-low' : ''}">après ${escapeHtml(invFmtNombre(apres))}</span>`
+                    : (equipement ? '' : '<span class="text-muted">—</span>')}
+            </div>
+            <div class="inv-row-actions">
+                ${action}
+                ${rowMenuHtml(item.nom, `
+                    ${suivi ? `<button type="button" data-click="inventaire-reception" data-id="${id}">Réception</button>` : ''}
+                    <button type="button" data-click="show-inventaire-modal" data-type="${escapeHtml(item.categorie || 'consommable')}" data-id="${id}">Modifier l'article</button>
+                    <button type="button" class="is-danger" data-click="delete-inventaire-item" data-id="${id}">Supprimer</button>`)}
+            </div>
+        </li>`;
+};
+
 // Inventaire
 const renderInventaire = () => {
-    // Initialize default consumables if list is empty
-    const defaultConsommables = [
-        { nom: 'Eau', unite: 'L', seuilAlerte: 0 },
-        { nom: 'Sucre', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Citron', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Menthe', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Hibiscus', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Mûre sauvage', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Poire à botzi', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Sureau', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Herbes des alpes', unite: 'kg', seuilAlerte: 0 },
-        { nom: 'Bouchons 25cl', unite: 'pcs', seuilAlerte: 0 },
-        { nom: 'Bouchons 50cl/100cl', unite: 'pcs', seuilAlerte: 0 },
-        { nom: 'Étiquettes', unite: 'pcs', seuilAlerte: 0 },
-        { nom: 'Bouteilles vides 25cl', unite: 'pcs', seuilAlerte: 0 },
-        { nom: 'Bouteilles vides 50cl', unite: 'pcs', seuilAlerte: 0 },
-        { nom: 'Bouteilles vides 1L', unite: 'pcs', seuilAlerte: 0 }
-    ];
+    const items = ensureContainerConsommables(DB.get('inventaire') || []);
+    const query = (DB.getFilter('inventaire_search') || '').toString();
+    const q = query.trim();
+    const { besoin, alertes } = items.length ? computeInventairePrevu() : { besoin: new Map(), alertes: [] };
+    const parNom = (a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr');
+    const visible = (item) => includesText(`${item.nom} ${item.unite || ''} ${(item.lots || []).map(l => `${l.numLot} ${l.fournisseur || ''}`).join(' ')}`, q);
 
-    let items = DB.get('inventaire');
-    if (items.length === 0) {
-        items = defaultConsommables.map(item => ({
-            ...item,
-            id: generateId(),
-            categorie: 'consommable',
-            quantite: 0
-        }));
-        DB.set('inventaire', items);
-    }
-    // Ajoute bouteilles + bouchons aux inventaires existants qui ne les ont pas encore (une seule fois)
-    items = ensureContainerConsommables(items);
+    const consommables = items.filter(i => i.categorie !== 'equipement');
+    const ingredients = consommables.filter(isIngredientArticle).sort(parNom);
+    const contenants = consommables.filter(i => !isIngredientArticle(i)).sort(parNom);
+    const equipement = items.filter(i => i.categorie === 'equipement').sort(parNom);
 
-    const savedSearch = DB.getFilter('inventaire_search');
-    const savedType = DB.getFilter('inventaire_type') || 'tous';
-    const filterInventaireItem = (item) => {
-        const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-        const matchesType = savedType === 'tous' ||
-            (savedType === 'alerte' && isAlerte) ||
-            item.categorie === savedType;
-        return matchesType && includesText(`${item.nom} ${item.unite} ${item.categorie}`, savedSearch);
+    const aCommander = consommables
+        .map(item => {
+            const b = besoin.get(item.id) || 0;
+            return { item, b, qte: invACommander(item, b), apres: arrondiInv((Number(item.quantite) || 0) - b) };
+        })
+        .filter(x => x.qte > 0)
+        .sort((x, y) => (x.apres < 0 ? 0 : 1) - (y.apres < 0 ? 0 : 1) || parNom(x.item, y.item));
+
+    const commanderHtml = (aCommander.length || alertes.length) ? `
+        <section class="stock-section" aria-labelledby="invCommanderTitle">
+            <div class="stock-section-head">
+                <h2 class="stock-section-title" id="invCommanderTitle">À commander</h2>
+                <span class="stock-section-meta">d'après les commandes à produire et les seuils</span>
+            </div>
+            <div class="stock-group inv-order">
+                <ul class="inv-order-list">
+                    ${aCommander.map(({ item, b, qte, apres }) => {
+                        const seuil = Number(item.seuilAlerte) || 0;
+                        const detail = [
+                            apres < 0 ? `manque ${invFmtQte(-apres, item.unite)} pour la production prévue`
+                                : b > 0 ? `${invFmtQte(apres, item.unite)} après la production prévue` : `${invFmtQte(apres, item.unite)} en stock`,
+                            seuil > 0 ? `seuil ${invFmtNombre(seuil)}` : ''
+                        ].filter(Boolean).join(', ');
+                        return `<li class="inv-order-row${apres < 0 ? ' is-danger' : ''}">
+                            <span class="inv-order-icon">${isIngredientArticle(item) ? INV_ICON_LEAF : INV_ICON_BOX}</span>
+                            <span class="inv-order-main"><span class="inv-order-name">${escapeHtml(item.nom)}</span><span class="inv-order-sub">${escapeHtml(detail)}</span></span>
+                            <strong class="inv-order-qty">${escapeHtml(invFmtQte(qte, item.unite))}</strong>
+                        </li>`;
+                    }).join('')}
+                    ${alertes.map(a => `<li class="inv-order-row is-warning">
+                        <span class="inv-order-icon">${dashIcon('attention')}</span>
+                        <span class="inv-order-main"><span class="inv-order-sub">${escapeHtml(a)}</span></span>
+                        ${/recette/i.test(a) ? '<a href="#parametres" class="btn btn-sm btn-secondary">Paramètres</a>' : ''}
+                    </li>`).join('')}
+                </ul>
+                ${aCommander.length ? `<div class="inv-order-foot"><button type="button" class="btn btn-sm btn-secondary" data-click="inventaire-copier-commande">Copier la liste</button></div>` : ''}
+            </div>
+        </section>` : '';
+
+    const section = (id, titre, meta, list, opts = {}) => {
+        const rows = list.filter(visible);
+        if (rows.length === 0 && (q || list.length === 0)) return '';
+        return `
+            <section class="stock-section" aria-labelledby="${id}">
+                <div class="stock-section-head">
+                    <h2 class="stock-section-title" id="${id}">${titre}</h2>
+                    <span class="stock-section-meta">${escapeHtml(meta)}</span>
+                </div>
+                <div class="stock-group"><ul class="inv-list">${rows.map(item => invRowHtml(item, opts.sansPrevu ? 0 : (besoin.get(item.id) || 0))).join('')}</ul></div>
+            </section>`;
     };
 
-    const consommables = items.filter(i => i.categorie === 'consommable').filter(filterInventaireItem);
-    const equipement = items.filter(i => i.categorie === 'equipement').filter(filterInventaireItem);
-    const allConsommablesCount = items.filter(i => i.categorie === 'consommable').length;
-    const allEquipementCount = items.filter(i => i.categorie === 'equipement').length;
-    const alertItems = items.filter(item => item.seuilAlerte && (item.quantite || 0) <= item.seuilAlerte);
+    const equipVisibles = equipement.filter(visible);
+    const equipOpen = q ? equipVisibles.length > 0 : DB.getFilter('inventaire_equip') === 'open';
+    const equipementHtml = equipement.length ? `
+        <details class="inv-equip"${equipOpen ? ' open' : ''} ontoggle="if (!${q ? 'true' : 'false'}) DB.setFilter('inventaire_equip', this.open ? 'open' : '')">
+            <summary class="inv-equip-summary">Équipement <span class="stock-section-meta">${equipement.length} article${equipement.length > 1 ? 's' : ''}</span></summary>
+            <div class="stock-group"><ul class="inv-list">${equipVisibles.map(item => invRowHtml(item, 0)).join('') || '<li class="stock-lot-empty">Aucun équipement ne correspond à la recherche</li>'}</ul></div>
+        </details>` : '';
 
-    const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
+    const vide = items.length === 0;
+    const sections = [
+        section('invIngredientsTitle', 'Ingrédients', `${ingredients.length} article${ingredients.length > 1 ? 's' : ''} · suivis par lot`, ingredients),
+        section('invContenantsTitle', 'Contenants', 'bouteilles, bouchons, étiquettes', contenants)
+    ].join('');
 
-    let html = `
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-icon blue">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-                </div>
-                <div class="stat-content"><h3>${items.length}</h3><p>Articles total</p></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon green">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                </div>
-                <div class="stat-content"><h3>${allConsommablesCount}</h3><p>Consommables</p></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon orange">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                </div>
-                <div class="stat-content"><h3>${allEquipementCount}</h3><p>Équipement</p></div>
-            </div>
-            <a href="#inventaire" class="stat-card stat-link" onclick="DB.setFilter('inventaire_type', 'alerte'); renderInventaire()">
-                <div class="stat-icon red">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-                </div>
-                <div class="stat-content"><h3>${alertItems.length}</h3><p>Stock bas</p></div>
-            </a>
-        </div>
-
-        ${alertItems.length > 0 ? `
-        <div class="card" style="border-left: 4px solid var(--warning); background: var(--bg-warning);">
-            <div class="flex-between">
-                <div>
-                    <strong>Articles sous seuil</strong>
-                    <p style="margin-top: 4px; color: var(--text-light);">${alertItems.slice(0, 4).map(item => `${escapeHtml(item.nom)} (${escapeHtml(String(item.quantite))} ${escapeHtml(displayUnit(item.unite))})`).join(', ')}${alertItems.length > 4 ? ` +${alertItems.length - 4}` : ''}</p>
-                </div>
-                <button class="btn btn-sm btn-secondary" onclick="DB.setFilter('inventaire_type', 'alerte'); renderInventaire()">Voir</button>
-            </div>
-        </div>
-        ` : ''}
-
-        <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Inventaire</h3>
-                <div class="card-actions">
-                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('consommable')">+ Consommable</button>
-                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('equipement')">+ Équipement</button>
-                </div>
-            </div>
-
-            <div class="filters">
-                ${renderSegmentedFilter('inventaire_type', savedType, [
-                    { value: 'tous', label: 'Tous' },
-                    { value: 'alerte', label: 'Stock bas' },
-                    { value: 'consommable', label: 'Consommables' },
-                    { value: 'equipement', label: 'Équipement' }
-                ], 'renderInventaire')}
-                <input type="search" id="filterInventaireSearch" placeholder="Rechercher un item..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('inventaire_search', this.value); window.__focusInventaireSearch = true; renderInventaire()">
-            </div>
-
-            <!-- Consommables Section -->
-            <div class="inventaire-section">
-                <h4>Consommables</h4>
-                <div class="inventaire-grid">
-                    ${consommables.length === 0 ? renderEmptyState('Aucun consommable trouvé.', '<button class="btn btn-primary" onclick="showInventaireModal(\'consommable\')">Ajouter un consommable</button>') :
-                        consommables.map(item => {
-                            const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-                            return `
-                            <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
-                                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
-                                <div class="inventaire-qty-controls">
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="-1">−</button>
-                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${escapeHtml(item.id)}">
-                                    <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="1">+</button>
-                                </div>
-                                <div class="inventaire-item-actions">
-                                    <button class="btn btn-sm btn-secondary" data-click="show-inventaire-modal" data-type="consommable" data-id="${escapeHtml(item.id)}">✏️</button>
-                                    <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
-                                </div>
-                            </div>
-                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
-                          `;
-                      }).join('')}
-                </div>
-            </div>
-
-            <!-- Équipement Section (collapsible) -->
-            <div class="inventaire-section">
-                <h4 class="inventaire-section-heading">
-                    <button type="button" class="inventaire-section-header" onclick="toggleEquipementSection()" aria-expanded="false" aria-controls="equipementContent">
-                        <span>Équipement</span>
-                        <span class="inventaire-toggle" id="equipementToggle">▶</span>
-                    </button>
-                </h4>
-                <div class="inventaire-grid collapse-content" id="equipementContent">
-                    ${equipement.length === 0 ? renderEmptyState('Aucun équipement trouvé.', '<button class="btn btn-primary" onclick="showInventaireModal(\'equipement\')">Ajouter un équipement</button>') :
-                      equipement.map(item => {
-                            const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-                            return `
-                            <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
-                                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
-                                <div class="inventaire-qty-controls">
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="-1">−</button>
-                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${escapeHtml(item.id)}">
-                                    <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="1">+</button>
-                                </div>
-                                <div class="inventaire-item-actions">
-                                    <button class="btn btn-sm btn-secondary" data-click="show-inventaire-modal" data-type="equipement" data-id="${escapeHtml(item.id)}">✏️</button>
-                                    <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
-                                </div>
-                            </div>
-                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
-                          `;
-                      }).join('')}
-                </div>
-            </div>
-        </div>
+    const html = `
+        ${pageToolbar(`
+            <button type="button" class="btn btn-secondary" data-click="show-inventaire-modal" data-type="consommable">+ Article</button>
+            <button type="button" class="btn btn-primary" data-click="inventaire-reception">Réception</button>`,
+            vide ? '' : `<div class="stock-search inv-search">
+                <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="search" id="filterInventaireSearch" placeholder="Article, n° de lot, fournisseur…" aria-label="Rechercher un article" value="${escapeHtml(query)}" data-live-search="inventaire_search">
+            </div>`)}
+        ${vide ? `
+            <div class="empty-state">
+                <p>L'inventaire est vide. Créez les articles de base (ingrédients, bouteilles, bouchons, étiquettes) ou ajoutez-les un par un.</p>
+                <button type="button" class="btn btn-primary" data-click="inventaire-seed">Créer les articles de base</button>
+            </div>` : `
+            ${q ? '' : commanderHtml}
+            ${sections || (q ? `<div class="commande-empty">Aucun article ne correspond à « ${escapeHtml(q)} »</div>` : '')}
+            ${equipementHtml}
+            ${q ? '' : `<button type="button" class="btn btn-ghost inv-add-equip" data-click="show-inventaire-modal" data-type="equipement">+ Équipement</button>`}`}
     `;
 
     safeRender(html);
-    if (window.__focusInventaireSearch) {
-        const input = document.getElementById('filterInventaireSearch');
-        if (input) {
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-        }
-        window.__focusInventaireSearch = false;
+};
+
+// Liste « À commander » copiée pour un fournisseur (repli : fenêtre à copier)
+const copierListeACommander = () => {
+    const items = DB.get('inventaire') || [];
+    const { besoin } = computeInventairePrevu();
+    const lignes = items
+        .filter(i => i.categorie !== 'equipement')
+        .map(item => ({ item, qte: invACommander(item, besoin.get(item.id) || 0) }))
+        .filter(x => x.qte > 0)
+        .sort((a, b) => String(a.item.nom).localeCompare(String(b.item.nom), 'fr'))
+        .map(({ item, qte }) => `${item.nom} : ${invFmtQte(qte, item.unite)}`);
+    if (lignes.length === 0) {
+        showToast('Rien à commander', 'warning');
+        return;
+    }
+    const texte = `À commander (${formatDate(new Date())})\n${lignes.join('\n')}`;
+    const fenetre = () => modal.show('Liste à commander', `
+        <textarea class="inv-copy-text" rows="${Math.min(12, lignes.length + 2)}" readonly>${escapeHtml(texte)}</textarea>
+        <small class="text-muted">Sélectionnez le texte pour le copier.</small>`,
+        '<button class="btn btn-secondary" data-click="close-modal">Fermer</button>');
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(texte)
+            .then(() => showToast(`Liste copiée (${lignes.length} article${lignes.length > 1 ? 's' : ''})`))
+            .catch(fenetre);
+    } else {
+        fenetre();
     }
 };
 
-// Toggle equipement section
-const toggleEquipementSection = () => {
-    const content = document.getElementById('equipementContent');
-    const toggle = document.getElementById('equipementToggle');
-    const isOpen = content.classList.toggle('open');
-    toggle.textContent = isOpen ? '▼' : '▶';
-    toggle.parentElement?.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+// Ajuster un article sans lot (contenant, équipement, eau) : réception,
+// recomptage ou sortie, avec aperçu du résultat
+const INV_MODES = {
+    add: { label: 'Réception', champ: 'Quantité reçue' },
+    set: { label: 'Recomptage', champ: 'Quantité comptée' },
+    sub: { label: 'Sortie', champ: 'Quantité sortie' }
 };
 
-// Show inventaire modal
-const showInventaireModal = (categorie, id = null) => {
+const ouvrirAjusterInventaire = (id) => {
+    const item = (DB.get('inventaire') || []).find(i => i.id === id);
+    if (!item) return;
+    if (isLotSuiviArticle(item)) showInventaireLotsModal(id);
+    else showInventaireAjusterModal(id);
+};
+
+const showInventaireAjusterModal = (id, mode = 'add') => {
+    const item = (DB.get('inventaire') || []).find(i => i.id === id);
+    if (!item) return;
+    const unite = displayUnit(item.unite || '');
+    const seuil = Number(item.seuilAlerte) || 0;
+    modal.show(item.nom, `
+        <form id="invAjusterForm" data-stock="${safeNumAttr(item.quantite)}" data-unite="${escapeHtml(unite)}">
+            <p class="text-muted" style="margin: 0 0 12px;">${escapeHtml(invFmtQte(item.quantite, unite))} en stock${seuil > 0 ? ` · seuil ${escapeHtml(invFmtQte(seuil, unite))}` : ''}</p>
+            <input type="hidden" name="mode" value="${mode}">
+            <div class="segmented-filter" role="group" aria-label="Type d'ajustement">
+                ${Object.entries(INV_MODES).map(([m, d]) => `<button type="button" class="segment${m === mode ? ' active' : ''}" data-click="inventaire-ajuster-mode" data-mode="${m}" aria-pressed="${m === mode}">${d.label}</button>`).join('')}
+            </div>
+            <div class="form-group" style="margin-top: 14px;">
+                <label for="invAjQte" id="invAjLabel">${INV_MODES[mode].champ} (${escapeHtml(unite)})</label>
+                <input type="number" id="invAjQte" name="quantite" min="0" step="any" inputmode="decimal" required oninput="majApercuAjusterInventaire()">
+            </div>
+            <p id="invAjApercu" class="inv-apercu" aria-live="polite"></p>
+        </form>
+    `, `
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button class="btn btn-primary" data-click="inventaire-ajuster-save" data-id="${escapeHtml(id)}">Enregistrer</button>
+    `);
+    majApercuAjusterInventaire();
+    document.getElementById('invAjQte')?.focus();
+};
+
+const invCalculAjustement = (stock, mode, v) => (mode === 'add' ? stock + v : mode === 'sub' ? Math.max(0, stock - v) : v);
+
+const majApercuAjusterInventaire = () => {
+    const form = document.getElementById('invAjusterForm');
+    const out = document.getElementById('invAjApercu');
+    if (!form || !out) return;
+    const stock = Number(form.dataset.stock) || 0;
+    const unite = form.dataset.unite || '';
+    const v = parseFloat(form.querySelector('[name="quantite"]').value);
+    const mode = form.querySelector('[name="mode"]').value;
+    out.innerHTML = Number.isFinite(v) && v >= 0
+        ? `${escapeHtml(invFmtQte(stock, unite))} → <strong>${escapeHtml(invFmtQte(invCalculAjustement(stock, mode, v), unite))}</strong>`
+        : '';
+};
+
+const choisirModeAjusterInventaire = (mode) => {
+    const form = document.getElementById('invAjusterForm');
+    if (!form || !INV_MODES[mode]) return;
+    form.querySelector('[name="mode"]').value = mode;
+    form.querySelectorAll('[data-click="inventaire-ajuster-mode"]').forEach(b => {
+        const actif = b.getAttribute('data-mode') === mode;
+        b.classList.toggle('active', actif);
+        b.setAttribute('aria-pressed', String(actif));
+    });
+    const label = document.getElementById('invAjLabel');
+    if (label) label.textContent = `${INV_MODES[mode].champ} (${form.dataset.unite || ''})`;
+    majApercuAjusterInventaire();
+    document.getElementById('invAjQte')?.focus();
+};
+
+const saveAjusterInventaire = (id) => {
+    const form = document.getElementById('invAjusterForm');
+    const mode = form?.querySelector('[name="mode"]')?.value || 'add';
+    const v = parseFloat(form?.querySelector('[name="quantite"]')?.value);
+    if (!Number.isFinite(v) || v < 0 || (mode !== 'set' && v === 0)) {
+        showToast('Saisissez une quantité valide', 'error');
+        return;
+    }
     const items = DB.get('inventaire') || [];
-    const item = id ? items.find(i => i.id === id) : null;
+    const item = items.find(i => i.id === id);
+    if (!item) {
+        modal.hide();
+        showToast('Article introuvable : il a peut-être été supprimé sur un autre appareil', 'error');
+        renderCurrentView();
+        return;
+    }
+    const avant = Number(item.quantite) || 0;
+    item.quantite = arrondiInv(invCalculAjustement(avant, mode, v));
+    DB.set('inventaire', items);
+    modal.hide();
+    showToast(`${item.nom} : ${invFmtQte(avant, item.unite)} → ${invFmtQte(item.quantite, item.unite)}`);
+    renderCurrentView();
+};
 
-    const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
+// Fenêtre d'un ingrédient : lots en stock dans l'ordre d'utilisation, stock sans
+// n° de lot, lots épuisés ou retirés avec les lots de bouteilles qui les ont utilisés
+const showInventaireLotsModal = (id) => {
+    const item = (DB.get('inventaire') || []).find(i => i.id === id);
+    if (!item) return;
+    const unite = displayUnit(item.unite || '');
+    const seuil = Number(item.seuilAlerte) || 0;
+    const besoin = computeInventairePrevu().besoin.get(id) || 0;
+    const sansLot = invSansLot(item);
+    const enStock = invLotsOrdreUsage(item);
+    const passes = (item.lots || []).filter(l => !(Number(l.quantite) > 0))
+        .sort((a, b) => invDateTri(b.dateRetrait || b.dateReception) - invDateTri(a.dateRetrait || a.dateReception));
+    const usages = getUsagesLotIngredient(item.nom);
+    const now = dateOnly(new Date()).getTime();
+    const idAttr = escapeHtml(id);
 
-    modal.show(id ? 'Modifier item' : 'Nouvel item', `
-        <form id="inventaireForm">
-            <input type="hidden" name="categorie" value="${escapeHtml(categorie)}">
-            <div class="form-group">
-                <label>Nom</label>
-                <input type="text" name="nom" value="${escapeHtml(item?.nom || '')}" required>
+    const lotHtml = (lot, epuise) => {
+        const u = usages.get(normLotFournisseur(lot.numLot)) || [];
+        const limite = lot.dateLimite ? invDateTri(lot.dateLimite) : null;
+        const meta = [
+            lot.dateReception ? `reçu le ${formatDate(lot.dateReception)}` : '',
+            lot.fournisseur || '',
+            lot.dateLimite ? `limite ${formatDate(lot.dateLimite)}` : '',
+            lot.dateRetrait ? `retiré le ${formatDate(lot.dateRetrait)}` : ''
+        ].filter(Boolean).join(' · ');
+        return `<li class="inv-lot${epuise ? ' is-epuise' : ''}">
+            <div class="inv-lot-head">
+                <code class="inv-lot-num">${escapeHtml(lot.numLot)}</code>
+                <strong>${epuise ? (lot.dateRetrait ? 'retiré' : 'épuisé') : escapeHtml(invFmtQte(lot.quantite, unite))}</strong>
             </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Quantité</label>
-                    <input type="number" name="quantite" value="${escapeHtml(safeNumAttr(item?.quantite))}" min="0" required>
-                </div>
-                <div class="form-group">
-                    <label>Unité</label>
-                    <select name="unite" required>
-                        ${unités.map(u => `<option value="${u}" ${item?.unite === u ? 'selected' : ''}>${u}</option>`).join('')}
-                    </select>
-                </div>
+            <div class="inv-lot-meta">${escapeHtml(meta)}${!epuise && limite !== null && limite < now ? ' <span class="inv-lots-alert is-danger">date limite dépassée</span>' : ''}</div>
+            ${u.length ? `<div class="inv-lot-meta">Utilisé dans ${u.map(x => `<button type="button" class="hist-entry-lot" data-click="show-lot-rappel" data-num="${escapeHtml(x.numLot)}">#${escapeHtml(formatLotNumero(x.numLot))}</button>`).join(' ')}</div>` : ''}
+            <div class="inv-lot-actions">
+                ${epuise ? '' : `<button type="button" class="btn btn-sm btn-ghost" data-click="inventaire-lot-corriger" data-id="${idAttr}" data-lot="${escapeHtml(lot.id)}">Corriger</button>
+                <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" data-click="inventaire-lot-retirer" data-id="${idAttr}" data-lot="${escapeHtml(lot.id)}">Retirer</button>`}
+                ${u.length ? `<button type="button" class="btn btn-sm btn-ghost" data-click="inventaire-rappel-fournisseur" data-id="${idAttr}" data-lot="${escapeHtml(lot.numLot)}">Rappel fournisseur</button>` : ''}
+            </div>
+        </li>`;
+    };
+
+    modal.show(item.nom, `
+        <div class="inv-lots-modal">
+            <p class="text-muted" style="margin: 0 0 12px;">${escapeHtml(invFmtQte(item.quantite, unite))} en stock${seuil > 0 ? ` · seuil ${escapeHtml(invFmtQte(seuil, unite))}` : ''}${besoin > 0 ? ` · prévu −${escapeHtml(invFmtQte(besoin, unite))} pour les commandes` : ''}</p>
+            <h4 class="inv-lots-title">En stock, dans l'ordre d'utilisation</h4>
+            <ul class="inv-lot-list">
+                ${sansLot > 0 ? `<li class="inv-lot is-sans">
+                    <div class="inv-lot-head"><span class="inv-lot-num is-sans">sans n° de lot</span><strong>${escapeHtml(invFmtQte(sansLot, unite))}</strong></div>
+                    <div class="inv-lot-meta">Stock d'avant le suivi des lots, utilisé en premier</div>
+                    <div class="inv-lot-actions"><button type="button" class="btn btn-sm btn-ghost" data-click="inventaire-lot-corriger" data-id="${idAttr}" data-lot="">Corriger</button></div>
+                </li>` : ''}
+                ${enStock.map(l => lotHtml(l, false)).join('')}
+                ${sansLot <= 0 && enStock.length === 0 ? '<li class="inv-lot-empty">Aucun stock. Enregistrez une réception avec le n° de lot du fournisseur.</li>' : ''}
+            </ul>
+            ${passes.length ? `
+                <h4 class="inv-lots-title">Lots épuisés ou retirés</h4>
+                <ul class="inv-lot-list">${passes.map(l => lotHtml(l, true)).join('')}</ul>` : ''}
+        </div>
+    `, `
+        <button class="btn btn-secondary" data-click="close-modal">Fermer</button>
+        <button class="btn btn-primary" data-click="inventaire-reception" data-id="${idAttr}" data-retour="lots">Réception</button>
+    `, 'large');
+};
+
+// Réception d'un article ; pour un ingrédient suivi, le n° de lot du fournisseur
+// est obligatoire (fournisseur et date limite facultatifs). `retour` : 'lots' pour
+// revenir à la fenêtre de l'ingrédient.
+const showReceptionModal = (itemId = '', retour = '', fournisseurPrecedent = '') => {
+    const items = (DB.get('inventaire') || []).filter(i => i.categorie !== 'equipement');
+    if (items.length === 0) {
+        showToast('Ajoutez d\'abord un article à l\'inventaire', 'warning');
+        return;
+    }
+    const parNom = (a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr');
+    const option = (i) => `<option value="${escapeHtml(i.id)}"${i.id === itemId ? ' selected' : ''}>${escapeHtml(i.nom)} (${escapeHtml(displayUnit(i.unite || ''))})</option>`;
+    const fournisseurs = [...new Set((DB.get('inventaire') || []).flatMap(i => (i.lots || []).map(l => l.fournisseur).filter(Boolean)))].sort((a, b) => a.localeCompare(b, 'fr'));
+
+    modal.show('Réception', `
+        <form id="receptionForm" data-retour="${escapeHtml(retour)}">
+            <div class="form-group">
+                <label for="recArticle">Article</label>
+                <select id="recArticle" name="article" required onchange="majChampsReception()">
+                    <option value="">Choisir un article…</option>
+                    <optgroup label="Ingrédients">${items.filter(isIngredientArticle).sort(parNom).map(option).join('')}</optgroup>
+                    <optgroup label="Contenants">${items.filter(i => !isIngredientArticle(i)).sort(parNom).map(option).join('')}</optgroup>
+                </select>
             </div>
             <div class="form-group">
-                <label>Seuil d'alerte (stock bas)</label>
-                <input type="number" name="seuilAlerte" value="${item?.seuilAlerte || 0}" min="0">
-                <small class="text-muted">Alerte quand la quantité est en dessous de ce seuil</small>
+                <label for="recQte" id="recQteLabel">Quantité reçue</label>
+                <input type="number" id="recQte" name="quantite" min="0" step="any" inputmode="decimal" required>
+            </div>
+            <div id="recLotFields">
+                <div class="form-group">
+                    <label for="recLot">N° de lot du fournisseur</label>
+                    <input type="text" id="recLot" name="numLot" maxlength="60" autocomplete="off" placeholder="Ex. H-2026-044">
+                    <small class="text-muted">Inscrit sur le sac ou le carton. Il relie l'ingrédient aux lots de bouteilles produits avec.</small>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="recFournisseur">Fournisseur (facultatif)</label>
+                        <input type="text" id="recFournisseur" name="fournisseur" maxlength="80" list="recFournisseurs" value="${escapeHtml(fournisseurPrecedent)}">
+                        <datalist id="recFournisseurs">${fournisseurs.map(f => `<option value="${escapeHtml(f)}">`).join('')}</datalist>
+                    </div>
+                    <div class="form-group">
+                        <label for="recLimite">Date limite (facultatif)</label>
+                        <input type="date" id="recLimite" name="dateLimite">
+                    </div>
+                </div>
             </div>
         </form>
     `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        ${retour ? '' : '<button class="btn btn-secondary" data-click="inventaire-reception-save" data-suite="1">Enregistrer et continuer</button>'}
+        <button class="btn btn-primary" data-click="inventaire-reception-save">Enregistrer</button>
+    `);
+    majChampsReception();
+    document.getElementById(itemId ? 'recQte' : 'recArticle')?.focus();
+};
+
+const majChampsReception = () => {
+    const id = document.getElementById('recArticle')?.value || '';
+    const item = (DB.get('inventaire') || []).find(i => i.id === id);
+    const suivi = isLotSuiviArticle(item);
+    const bloc = document.getElementById('recLotFields');
+    if (bloc) bloc.hidden = !suivi;
+    const lot = document.getElementById('recLot');
+    if (lot) lot.required = suivi;
+    const label = document.getElementById('recQteLabel');
+    if (label) label.textContent = item ? `Quantité reçue (${displayUnit(item.unite || '')})` : 'Quantité reçue';
+};
+
+const saveReception = (suite = false) => {
+    const form = document.getElementById('receptionForm');
+    if (!form?.reportValidity()) return;
+    const get = (n) => (form.querySelector(`[name="${n}"]`)?.value || '').trim();
+    const itemId = get('article');
+    const qte = parseFloat(get('quantite'));
+    const retour = form.dataset.retour || '';
+    if (!Number.isFinite(qte) || qte <= 0) {
+        showToast('Saisissez une quantité reçue', 'error');
+        return;
+    }
+    const items = DB.get('inventaire') || [];
+    const item = items.find(i => i.id === itemId);
+    if (!item) {
+        showToast('Article introuvable', 'error');
+        return;
+    }
+    const suivi = isLotSuiviArticle(item);
+    const numLot = get('numLot');
+    const fournisseur = get('fournisseur');
+    const dateLimite = get('dateLimite');
+    if (suivi && !numLot) {
+        showToast('Le n° de lot du fournisseur est obligatoire pour un ingrédient', 'error');
+        return;
+    }
+    item.quantite = arrondiInv((Number(item.quantite) || 0) + qte);
+    if (suivi) {
+        item.lots = item.lots || [];
+        // Même n° de lot reçu une seconde fois : on complète le lot existant
+        const existant = item.lots.find(l => normLotFournisseur(l.numLot) === normLotFournisseur(numLot));
+        if (existant) {
+            existant.quantite = arrondiInv((Number(existant.quantite) || 0) + qte);
+            existant.quantiteRecue = arrondiInv((Number(existant.quantiteRecue) || 0) + qte);
+            if (fournisseur && !existant.fournisseur) existant.fournisseur = fournisseur;
+            if (dateLimite && !existant.dateLimite) existant.dateLimite = dateLimite;
+            delete existant.dateRetrait;
+        } else {
+            item.lots.push({
+                id: generateId(), numLot, quantite: arrondiInv(qte), quantiteRecue: arrondiInv(qte),
+                dateReception: getLocalDateISOString(),
+                ...(fournisseur ? { fournisseur } : {}),
+                ...(dateLimite ? { dateLimite } : {})
+            });
+        }
+    }
+    DB.set('inventaire', items);
+    showToast(`Réception : +${invFmtQte(qte, item.unite)} ${item.nom}${suivi ? ` (lot ${numLot})` : ''}`);
+    if (retour === 'lots') {
+        showInventaireLotsModal(item.id);
+    } else if (suite) {
+        showReceptionModal('', '', fournisseur);
+    } else {
+        modal.hide();
+    }
+    if (window.location.hash.startsWith('#inventaire')) renderInventaire();
+};
+
+// Corriger la quantité restante d'un lot (ou du stock sans n° de lot : lotId vide)
+const showCorrigerLotModal = (itemId, lotId) => {
+    const item = (DB.get('inventaire') || []).find(i => i.id === itemId);
+    if (!item) return;
+    const lot = lotId ? (item.lots || []).find(l => l.id === lotId) : null;
+    if (lotId && !lot) return;
+    const actuel = lot ? Number(lot.quantite) || 0 : invSansLot(item);
+    const unite = displayUnit(item.unite || '');
+    modal.show(`Corriger ${lot ? `le lot ${lot.numLot}` : 'le stock sans n° de lot'}`, `
+        <form id="corrigerLotForm">
+            <p class="text-muted" style="margin: 0 0 12px;">${escapeHtml(item.nom)} · actuellement ${escapeHtml(invFmtQte(actuel, unite))}</p>
+            <div class="form-group">
+                <label for="corrLotQte">Quantité restante comptée (${escapeHtml(unite)})</label>
+                <input type="number" id="corrLotQte" name="quantite" min="0" step="any" inputmode="decimal" value="${safeNumAttr(actuel)}" required>
+            </div>
+        </form>
+    `, `
+        <button class="btn btn-secondary" data-click="inventaire-lots" data-id="${escapeHtml(itemId)}">Retour</button>
+        <button class="btn btn-primary" data-click="inventaire-lot-corriger-save" data-id="${escapeHtml(itemId)}" data-lot="${escapeHtml(lotId || '')}">Enregistrer</button>
+    `);
+    document.getElementById('corrLotQte')?.select();
+};
+
+const saveCorrigerLot = (itemId, lotId) => {
+    const v = parseFloat(document.getElementById('corrLotQte')?.value);
+    if (!Number.isFinite(v) || v < 0) {
+        showToast('Saisissez une quantité valide', 'error');
+        return;
+    }
+    const items = DB.get('inventaire') || [];
+    const item = items.find(i => i.id === itemId);
+    const lot = lotId ? (item?.lots || []).find(l => l.id === lotId) : null;
+    if (!item || (lotId && !lot)) {
+        modal.hide();
+        showToast('Lot introuvable : il a peut-être changé sur un autre appareil', 'error');
+        renderCurrentView();
+        return;
+    }
+    const delta = lot ? v - (Number(lot.quantite) || 0) : v - invSansLot(item);
+    if (lot) {
+        lot.quantite = arrondiInv(v);
+        if (v > 0) delete lot.dateRetrait;
+    }
+    item.quantite = arrondiInv(Math.max(0, (Number(item.quantite) || 0) + delta));
+    DB.set('inventaire', items);
+    showToast(`${item.nom}${lot ? ` · lot ${lot.numLot}` : ''} : ${invFmtQte(v, item.unite)}`);
+    showInventaireLotsModal(itemId);
+    if (window.location.hash.startsWith('#inventaire')) renderInventaire();
+};
+
+// Retirer un lot du stock (périmé, perdu) : il reste listé comme « retiré »
+const retirerLotIngredient = (itemId, lotId) => {
+    const avant = (DB.get('inventaire') || []).find(i => i.id === itemId);
+    const lotAvant = (avant?.lots || []).find(l => l.id === lotId);
+    if (!lotAvant) return;
+    confirmDialog(`Retirer le lot ${lotAvant.numLot} (${invFmtQte(lotAvant.quantite, avant.unite)}) du stock ? À utiliser pour un lot périmé, perdu ou jeté.`, { danger: true, confirmLabel: 'Retirer' }).then(ok => {
+        // Relecture après la confirmation (DB.set réécrit la table entière)
+        const items = DB.get('inventaire') || [];
+        const item = items.find(i => i.id === itemId);
+        const lot = (item?.lots || []).find(l => l.id === lotId);
+        if (ok && item && lot) {
+            const q = Number(lot.quantite) || 0;
+            lot.quantite = 0;
+            lot.dateRetrait = getLocalDateISOString();
+            item.quantite = arrondiInv(Math.max(0, (Number(item.quantite) || 0) - q));
+            DB.set('inventaire', items);
+            showToast(`Lot ${lot.numLot} retiré du stock`);
+            if (window.location.hash.startsWith('#inventaire')) renderInventaire();
+        }
+        if (item) showInventaireLotsModal(itemId);
+    });
+};
+
+// Lots de bouteilles produits avec un lot d'ingrédient : entrées PROD- de
+// l'historique, une seule fois par production (productionId)
+const getUsagesLotIngredient = (articleNom, numLot = null) => {
+    const cible = normalizeName(articleNom);
+    const parLot = new Map();
+    const vues = new Set();
+    (DB.get('history') || []).forEach(h => {
+        if (getHistoryType(h) !== 'prod' || !Array.isArray(h.ingredients)) return;
+        h.ingredients.forEach(ing => {
+            if (normalizeName(ing.article) !== cible || !ing.numLot) return;
+            const cle = normLotFournisseur(ing.numLot);
+            if (numLot !== null && cle !== normLotFournisseur(numLot)) return;
+            if (!parLot.has(cle)) parLot.set(cle, []);
+            const liste = parLot.get(cle);
+            let u = liste.find(x => normLotNumero(x.numLot) === normLotNumero(h.numLot || h.lotId));
+            if (!u) {
+                u = { numLot: String(h.numLot || h.lotId), arome: h.arome || '', dateProduction: h.productionDate || '', formats: new Set(), quantite: 0, unite: ing.unite || '' };
+                liste.push(u);
+            }
+            if (h.format) u.formats.add(h.format);
+            const vue = `${cle}|${h.productionId || h.id}|${ing.numLot}`;
+            if (!vues.has(vue)) {
+                vues.add(vue);
+                u.quantite = arrondiInv(u.quantite + (Number(ing.quantite) || 0));
+            }
+        });
+    });
+    parLot.forEach(liste => liste.sort((a, b) => String(a.dateProduction).localeCompare(String(b.dateProduction))));
+    return parLot;
+};
+
+// Rappel fournisseur : lots de bouteilles produits avec un lot d'ingrédient,
+// et où ils sont partis (via le rappel de chaque lot)
+const showRappelFournisseurModal = (itemId, numLot) => {
+    const item = (DB.get('inventaire') || []).find(i => i.id === itemId);
+    if (!item) return;
+    const usages = getUsagesLotIngredient(item.nom, numLot).get(normLotFournisseur(numLot)) || [];
+    const lotIng = (item.lots || []).find(l => normLotFournisseur(l.numLot) === normLotFournisseur(numLot));
+    const lignes = usages.map(u => {
+        const r = getLotRappelData(u.numLot);
+        return `<tr>
+            <td><strong>#${escapeHtml(formatLotNumero(u.numLot))}</strong></td>
+            <td>${escapeHtml(u.arome || '?')}<br><span class="text-muted">${escapeHtml([...u.formats].join(', '))}</span></td>
+            <td>${u.dateProduction ? escapeHtml(formatDate(u.dateProduction)) : '—'}</td>
+            <td>${escapeHtml(invFmtQte(u.quantite, u.unite || item.unite))}</td>
+            <td>${r.totalLivre} bt · ${r.nbDestinataires} dest.<br><span class="text-muted">${r.enStock} bt en stock</span></td>
+            <td><button type="button" class="btn btn-sm btn-secondary" data-click="show-lot-rappel" data-num="${escapeHtml(u.numLot)}">Rappel du lot</button></td>
+        </tr>`;
+    }).join('');
+    modal.show(`Rappel fournisseur · ${item.nom} ${numLot}`, `
+        <div class="commande-details">
+            <p style="margin: 0 0 12px;">${lotIng ? escapeHtml([lotIng.fournisseur, lotIng.dateReception ? `reçu le ${formatDate(lotIng.dateReception)}` : '', lotIng.dateLimite ? `limite ${formatDate(lotIng.dateLimite)}` : ''].filter(Boolean).join(' · ')) : ''}</p>
+            ${usages.length === 0 ? '<p class="text-muted">Aucune production enregistrée avec ce lot.</p>' : `
+                <p class="trace-alert">${usages.length} lot${usages.length > 1 ? 's' : ''} de bouteilles produit${usages.length > 1 ? 's' : ''} avec ce lot. Ouvrez le rappel de chacun pour voir les clients livrés, l'exporter ou bloquer le stock restant.</p>
+                <div class="trace-scroll"><table class="details-table">
+                    <thead><tr><th>Lot</th><th>Arôme</th><th>Production</th><th>Utilisé</th><th>Parti</th><th></th></tr></thead>
+                    <tbody>${lignes}</tbody>
+                </table></div>`}
+        </div>
+    `, `
+        <button class="btn btn-secondary" data-click="inventaire-lots" data-id="${escapeHtml(itemId)}">Retour</button>
+    `, 'large');
+};
+
+// Ajouter ou modifier un article (nom, unité, seuil). La quantité d'un article
+// existant ne change que par Réception, Ajuster ou les lots.
+const showInventaireModal = (categorie, id = null) => {
+    const items = DB.get('inventaire') || [];
+    const item = id ? items.find(i => i.id === id) : null;
+    if (id && !item) return;
+    const cat = item?.categorie || categorie || 'consommable';
+    const unites = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
+    const uniteBloquee = !!item && invLotsEnStock(item).length > 0;
+
+    modal.show(item ? 'Modifier l\'article' : (cat === 'equipement' ? 'Nouvel équipement' : 'Nouvel article'), `
+        <form id="inventaireForm">
+            <input type="hidden" name="categorie" value="${escapeHtml(cat)}">
+            <div class="form-group">
+                <label for="invNom">Nom</label>
+                <input type="text" id="invNom" name="nom" value="${escapeHtml(item?.nom || '')}" maxlength="80" required>
+                ${cat === 'equipement' ? '' : '<small class="text-muted">Les ingrédients sont suivis par lot fournisseur ; les bouteilles, bouchons et étiquettes sont comptés sans lot.</small>'}
+            </div>
+            <div class="form-row">
+                ${item ? '' : `<div class="form-group">
+                    <label for="invQte">Quantité actuelle</label>
+                    <input type="number" id="invQte" name="quantite" value="0" min="0" step="any" required>
+                </div>`}
+                <div class="form-group">
+                    <label for="invUnite">Unité</label>
+                    <select id="invUnite" name="unite" required ${uniteBloquee ? 'disabled' : ''}>
+                        ${unites.map(u => `<option value="${u}" ${displayUnit(item?.unite) === displayUnit(u) ? 'selected' : ''}>${u}</option>`).join('')}
+                    </select>
+                    ${uniteBloquee ? '<small class="text-muted">Unité fixée tant que des lots sont en stock.</small>' : ''}
+                </div>
+            </div>
+            ${cat === 'equipement' ? '' : `<div class="form-group">
+                <label for="invSeuil">Seuil d'alerte</label>
+                <input type="number" id="invSeuil" name="seuilAlerte" value="${safeNumAttr(item?.seuilAlerte || 0)}" min="0" step="any">
+                <small class="text-muted">L'article passe « à commander » quand le stock, après la production prévue, descend sous ce seuil.</small>
+            </div>`}
+        </form>
+    `, `
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
         <button class="btn btn-primary" data-click="save-inventaire-item" data-id="${escapeHtml(id || '')}">Enregistrer</button>
     `);
 };
 
-// Save inventaire item
 const saveInventaireItem = (event, id) => {
     const reenable = disableSaveBtn(event);
     try {
         const form = document.getElementById('inventaireForm');
         if (!form?.reportValidity()) return;
         const formData = new FormData(form);
+        const nom = (formData.get('nom') || '').toString().trim();
+        if (!nom) {
+            showToast('Le nom est obligatoire', 'error');
+            return;
+        }
 
-        const item = {
-            id: id || generateId(),
-            categorie: formData.get('categorie'),
-            nom: formData.get('nom'),
-            quantite: parseFloat(formData.get('quantite')) || 0,
-            unite: displayUnit(formData.get('unite')),
-            seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0
-        };
+        const items = DB.get('inventaire') || [];
+        const doublon = items.find(i => i.id !== id && normalizeName(i.nom) === normalizeName(nom));
+        if (doublon) {
+            showToast(`« ${doublon.nom} » existe déjà dans l'inventaire`, 'error');
+            return;
+        }
 
-        const items = DB.get('inventaire');
         if (id) {
-            const index = items.findIndex(i => i.id === id);
-            items[index] = item;
+            const item = items.find(i => i.id === id);
+            if (!item) {
+                modal.hide();
+                showToast('Article introuvable : il a peut-être été supprimé sur un autre appareil', 'error');
+                renderCurrentView();
+                return;
+            }
+            item.nom = nom;
+            if (formData.has('unite')) item.unite = displayUnit(formData.get('unite'));
+            if (formData.has('seuilAlerte')) item.seuilAlerte = parseFloat(formData.get('seuilAlerte')) || 0;
         } else {
-            items.push(item);
+            items.push({
+                id: generateId(),
+                categorie: formData.get('categorie') || 'consommable',
+                nom,
+                quantite: Math.max(0, parseFloat(formData.get('quantite')) || 0),
+                unite: displayUnit(formData.get('unite')),
+                seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0
+            });
         }
         DB.set('inventaire', items);
 
         modal.hide();
-        showToast('Item enregistré');
+        showToast('Article enregistré');
         renderCurrentView();
     } catch (e) {
         console.error('Error saving inventaire item:', e);
-        showToast('Erreur lors de l\'enregistrement de l\'item', 'error');
+        showToast('Erreur lors de l\'enregistrement de l\'article', 'error');
     } finally {
         if (reenable) reenable();
     }
 };
 
-// Update inventaire quantity
+// Ajustement rapide (± du jumeau 3D). Une baisse d'un ingrédient suivi puise
+// dans ses lots dans l'ordre d'utilisation ; une hausse va au stock sans n° de lot.
 const updateInventaireQty = (id, delta) => {
     const items = DB.get('inventaire');
     const item = items.find(i => i.id === id);
     if (item) {
-        item.quantite = Math.max(0, (item.quantite || 0) + delta);
+        const avant = Number(item.quantite) || 0;
+        const apres = Math.max(0, avant + delta);
+        if (apres < avant && isLotSuiviArticle(item)) consommerLotsIngredient(item, avant - apres);
+        item.quantite = arrondiInv(apres);
         DB.set('inventaire', items);
         renderCurrentView();
     }
 };
 
-const setInventaireQty = (id, value) => {
-    const items = DB.get('inventaire');
-    const item = items.find(i => i.id === id);
-    if (!item) return;
-    const qty = parseFloat(value);
-    if (Number.isNaN(qty) || qty < 0) {
-        showToast('Quantité invalide', 'error');
-        renderInventaire();
-        return;
-    }
-    item.quantite = Math.round(qty * 100) / 100;
-    DB.set('inventaire', items);
-    showToast(`${item.nom}: stock ajusté à ${item.quantite} ${displayUnit(item.unite)}`);
-    renderInventaire();
-};
-
 // Delete inventaire item
 const deleteInventaireItem = (id) => {
-    confirmDialog('Supprimer cet item ?', { danger: true }).then(ok => {
+    const item = (DB.get('inventaire') || []).find(i => i.id === id);
+    if (!item) return;
+    const lots = invLotsEnStock(item).length;
+    confirmDialog(`Supprimer l'article « ${item.nom} » ?${lots ? ` Ses ${lots} lot${lots > 1 ? 's' : ''} en stock disparaîtront aussi ; la traçabilité des productions passées est conservée.` : ''}`, { danger: true }).then(ok => {
         if (!ok) return;
         const items = DB.get('inventaire').filter(i => i.id !== id);
         DB.set('inventaire', items);
-        showToast('Item supprimé');
+        modal.hide();
+        showToast('Article supprimé');
         renderCurrentView();
     });
 };
@@ -14893,11 +16364,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <span class="color-dot" style="background: var(--primary)"></span>
                                 <span>${escapeHtml(e.prenom)} ${escapeHtml(e.nom)}</span>
-                                <span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span>
+                                ${e.actif ? '' : '<span class="badge badge-default">Inactif</span>'}
                             </div>
                             <div class="settings-item-actions">
                                  <button class="btn btn-sm btn-secondary" data-click="show-employe-modal" data-id="${escapeHtml(e.id)}">Modifier</button>
-                                 <button class="btn btn-sm btn-danger" data-click="delete-employe" data-id="${escapeHtml(e.id)}">Supprimer</button>
+                                 ${rowMenuHtml(`${e.prenom || ''} ${e.nom || ''}`, `<button type="button" class="is-danger" data-click="delete-employe" data-id="${escapeHtml(e.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -14916,11 +16387,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <span class="color-dot" style="background: ${safeColor(a.couleur)}"></span>
                                 <span>${escapeHtml(a.nom)}</span>
-                                <span class="badge ${a.actif ? 'badge-success' : 'badge-default'}">${a.actif ? 'Actif' : 'Inactif'}</span>
+                                ${a.actif ? '' : '<span class="badge badge-default">Inactif</span>'}
                             </div>
                             <div class="settings-item-actions">
                                  <button class="btn btn-sm btn-secondary" data-click="show-arome-modal" data-id="${escapeHtml(a.id)}">Modifier</button>
-                                 <button class="btn btn-sm btn-danger" data-click="delete-arome" data-id="${escapeHtml(a.id)}">Supprimer</button>
+                                 ${rowMenuHtml(a.nom, `<button type="button" class="is-danger" data-click="delete-arome" data-id="${escapeHtml(a.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -14939,11 +16410,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <span>${escapeHtml(f.nom)}</span>
                                 <span class="text-muted">(${f.contenanceCl} cl)</span>
-                                <span class="badge ${f.actif ? 'badge-success' : 'badge-default'}">${f.actif ? 'Actif' : 'Inactif'}</span>
+                                ${f.actif ? '' : '<span class="badge badge-default">Inactif</span>'}
                             </div>
                             <div class="settings-item-actions">
                                  <button class="btn btn-sm btn-secondary" data-click="show-format-modal" data-id="${escapeHtml(f.id)}">Modifier</button>
-                                 <button class="btn btn-sm btn-danger" data-click="delete-format" data-id="${escapeHtml(f.id)}">Supprimer</button>
+                                 ${rowMenuHtml(f.nom, `<button type="button" class="is-danger" data-click="delete-format" data-id="${escapeHtml(f.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -14971,7 +16442,7 @@ const renderParametres = () => {
                                 </div>
                                 <div class="settings-item-actions">
                                     <button class="btn btn-sm btn-secondary" data-click="show-recette-modal" data-id="${escapeHtml(r.id)}">Modifier</button>
-                                    <button class="btn btn-sm btn-danger" data-click="delete-recette" data-id="${escapeHtml(r.id)}">Supprimer</button>
+                                    ${rowMenuHtml(r.nom, `<button type="button" class="is-danger" data-click="delete-recette" data-id="${escapeHtml(r.id)}">Supprimer</button>`)}
                                 </div>
                             </li>
                           `;
@@ -14982,12 +16453,13 @@ const renderParametres = () => {
             <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
                     <h3>Clients</h3>
-                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        <button class="btn btn-sm btn-secondary" data-click="export-clients-excel">Exporter Excel</button>
-                        <button class="btn btn-sm btn-secondary" data-click="trigger-import-clients">Importer Excel</button>
+                    <div style="display: flex; gap: 8px; align-items: center;">
                         <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" data-change="import-clients-excel">
                         <button class="btn btn-sm btn-primary" data-click="show-client-modal">+ Ajouter</button>
-                        <button class="btn btn-sm btn-danger" data-click="reset-clients">Effacer les clients sans commande</button>
+                        ${rowMenuHtml('tous les clients', `
+                            <button type="button" data-click="export-clients-excel">Exporter Excel</button>
+                            <button type="button" data-click="trigger-import-clients">Importer Excel</button>
+                            <button type="button" class="is-danger" data-click="reset-clients">Effacer les clients sans commande</button>`)}
                     </div>
                 </div>
                 <ul class="settings-list">
@@ -14997,11 +16469,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <div><strong>${escapeHtml(c.societe || '')}</strong> ${escapeHtml(c.nom || '')}</div>
                                 <div class="text-muted" style="font-size:12px;">${escapeHtml(c.adresse || '')} ${escapeHtml(c.npa || '')}</div>
-                                <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : (c.ponctuel ? 'Ponctuel' : 'Inactif')}</span>
+                                ${c.actif ? '' : `<span class="badge badge-default">${c.ponctuel ? 'Ponctuel' : 'Inactif'}</span>`}
                             </div>
                             <div class="settings-item-actions">
                                 <button class="btn btn-sm btn-secondary" data-click="show-client-modal" data-id="${escapeHtml(c.id)}">Modifier</button>
-                                <button class="btn btn-sm btn-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>
+                                ${rowMenuHtml(c.societe || c.nom || 'client', `<button type="button" class="is-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -15333,9 +16805,9 @@ const showRecetteModal = (id = null) => {
             <input type="text" name="ingredients[${idx}][nom]" value="${escapeHtml(ing.nom)}" placeholder="Ingrédient" list="${suggestionsId}" required>
             <input type="number" name="ingredients[${idx}][quantite]" value="${escapeHtml(safeNumAttr(ing.quantite))}" placeholder="Qté" step="0.01" min="0.01" required>
             <input type="text" name="ingredients[${idx}][unite]" value="${escapeHtml(displayUnit(ing.unite))}" placeholder="Unité" required>
-            <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
+            <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" onclick="this.parentElement.remove()" aria-label="Retirer cet ingrédient">×</button>
         </div>
-    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" min="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>`;
+    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" min="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" onclick="this.parentElement.remove()" aria-label="Retirer cet ingrédient">×</button></div>`;
 
     // Filter out aromes that already have a recipe (except the one being edited)
     const availableAromes = aromes.filter(a => {
@@ -15385,7 +16857,7 @@ const addIngredient = () => {
         <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" list="ingredientSuggestions" required>
         <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" min="0.01" required>
         <input type="text" name="ingredients[${index}][unite]" placeholder="Unité" required>
-        <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
+        <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" onclick="this.parentElement.remove()" aria-label="Retirer cet ingrédient">×</button>
     `;
     container.appendChild(div);
 };
@@ -15625,6 +17097,11 @@ const showClientModal = (id = null) => {
                 </div>
             </div>
             <div class="form-group">
+                <label for="clientDureeVie">Durée de vie minimale à la livraison (jours)</label>
+                <input type="number" id="clientDureeVie" name="dureeVieMinJours" min="0" step="1" inputmode="numeric" value="${clientDureeVieMin(client) || ''}" placeholder="Aucune exigence">
+                <small class="text-muted">Les lots dont la DLV arrive avant ce délai ne sont pas proposés pour ce client.</small>
+            </div>
+            <div class="form-group">
                 <label class="checkbox-label">
                     <input type="checkbox" name="actif" ${client?.actif !== false ? 'checked' : ''}>
                     Actif
@@ -15656,6 +17133,7 @@ const saveClient = (event, id) => {
             prix100cl: formData.get('prix100cl') || '',
             modeFact: formData.get('modeFact') || '',
             coord: formData.get('coord') || '',
+            dureeVieMinJours: Math.max(0, parseInt(formData.get('dureeVieMinJours'), 10) || 0),
             actif: form.querySelector('input[name="actif"]').checked
         };
         if (!client.societe.trim() && !client.nom.trim()) {
@@ -15666,7 +17144,14 @@ const saveClient = (event, id) => {
         const clients = DB.get('clients');
         if (id) {
             const index = clients.findIndex(c => c.id === id);
-            clients[index] = client;
+            if (index === -1) {
+                modal.hide();
+                showToast('Client introuvable : il a peut-être été supprimé sur un autre appareil', 'error');
+                renderCurrentView();
+                return;
+            }
+            // Fusion : garde les champs absents du formulaire (ponctuel, email…)
+            clients[index] = { ...clients[index], ...client };
         } else {
             clients.push(client);
         }
