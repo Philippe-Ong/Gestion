@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.9
+**Version:** v13.0
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -168,6 +168,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 }
 ```
 
+Champ client facultatif (v13.0) : `dureeVieMinJours` — durée de vie minimale exigée à la livraison, en jours avant la limite de vente du lot (`clientDureeVieMin`).
+
 ### Lots de production (Stock)
 ```json
 {
@@ -219,6 +221,8 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 ```
 
 `lotsUtilises`, `dateLivraisonEffective` et `clientLivraison` sont écrits par `deliverCommandeTransaction` (transaction Firestore). `dateLivraison` reste la date **prévue**. `numeroBL` est mémorisé par `generateBL` / `getOrCreateBL` : un BL supprimé puis régénéré pour la même livraison reprend son numéro. La restauration d'une commande livrée vide `lotsUtilises` et retire `dateLivraisonEffective`, `clientLivraison` et `numeroBL` (ces informations sont conservées dans les entrées `RESTAURE-`).
+
+**Champs v13.0.** Une ligne `items[]` livrée en plus de la commande porte `enPlus: true` (et `offert: true` si elle est gratuite : exclue du montant par `diagnoseCommandeMontant`, mais tracée). Une livraison partielle écrit `reliquatId` sur la commande livrée et crée le reliquat (`reliquatDe`, numéro `<n°>-2`, `-3`…, statut `en_attente`, mêmes client et date). Les lignes `enPlus` sont ignorées par la règle d'attribution, retirées à la restauration et non reprises par « Dupliquer ».
 
 ### Livraisons / Bulletins de livraison
 ```json
@@ -512,6 +516,16 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 **Suppression d'un lot** : la modale demande ce que deviennent les bouteilles restantes — destruction/péremption ou casse/perte (`SORTIE-`), ou lot créé par erreur (`AJUST-` négatif) — avant de supprimer l'enregistrement.
 
 **Modification d'un lot** : un changement de quantité crée un `AJUST-` signé (note facultative) ; un changement d'arôme, de format ou de dates est répercuté sur les entrées d'historique du lot. Le `numLot` ne change pas et les livraisons déjà effectuées gardent leurs informations d'origine.
+
+### Attribution des bouteilles aux commandes (v13.0)
+
+**Règle unique** (`planAttributionCommandes`) : commandes ouvertes, « produite » d'abord puis « en attente », par date de livraison ; chaque ligne prend les lots vendables à sa date de livraison dont la limite de vente laisse au moins `dureeVieMinJours` jours au client (`createStockPool(…).takeLots(key, qty, date, minJours)`), DLV la plus proche d'abord. Rien n'est réservé en base : c'est une prévision. Elle alimente la page Stock (réservé, à produire, « Prévu pour » sur chaque lot), la fenêtre de livraison et le contrôle avant « Marquer produite » ; « ✓ Stock », le planificateur et le jumeau appliquent la même durée de vie minimale et les mêmes noms normalisés.
+
+**Fenêtre « Livrer »** (`showLivraisonBouteillesModal`, `confirmerLivraison`) : lots pré-remplis, DLV la plus proche d'abord, parmi les lots vendables aujourd'hui, assez longs pour le client et non prévus pour d'autres commandes ; les lots trop courts sont affichés sans saisie, ceux prévus pour une autre commande sont signalés. Une ligne ne peut pas dépasser la commande, sauf via ⋯ « Ajouter des bouteilles en plus » (avec « offertes ») ; ⋯ en pied de fenêtre « Ajouter un article hors commande ». Moins que commandé : livraison partielle, le reste devient un reliquat.
+
+**Transaction** (`deliverCommandeTransaction(commandeId, allocations, { extras, partielle, reliquatId, reliquatNumero })`) : revalide côté serveur la part commandée (alloué − en plus ≤ commandé ; égal sauf livraison partielle), les bouteilles en plus déclarées, et comme avant lots, blocage, DLV/DLC et stock ; écrit la commande livrée (lignes livrées puis lignes `enPlus`), les lots et, le cas échéant, le reliquat, dans la même transaction. Renvoie `{ lotsUtilises, reliquat }`.
+
+**« Marquer produite »** : si le plan (commande traitée comme produite) laisse un manque, une confirmation détaille les bouteilles manquantes.
 
 ### Traçabilité amont : lots d'ingrédients (v12.9)
 

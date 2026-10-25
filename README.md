@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.9**
+**v13.0**
 
 ## Adresse
 
@@ -118,6 +118,18 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v13.0
+
+Attribution des bouteilles aux commandes.
+
+- **🎯 Une seule règle** — Les commandes « produite » d'abord, puis « en attente », par date de livraison ; chacune prend les lots vendables à sa date, assez longs pour le client, la DLV la plus proche d'abord. La page Stock (réservé, « Prévu pour » sur chaque lot), la livraison, « ✓ Stock », le planificateur et le jumeau suivent tous cette règle.
+- **🚚 Livraison pré-remplie** — La fenêtre « Livrer » propose déjà les lots, avec leur DLV et les jours restants, sans toucher aux bouteilles prévues pour d'autres commandes (signalées si on les prend). Tout reste modifiable.
+- **⏳ Durée de vie minimale par client** — Nouveau champ de la fiche client : les lots dont la DLV arrive trop tôt ne lui sont pas proposés.
+- **✂️ Livraison partielle** — S'il manque des bouteilles, on livre ce qui est prêt et le reste devient un reliquat (#00048-2, « en attente »), créé dans la même transaction.
+- **🎁 Bouteilles en plus** — Dans les menus ⋯ : ajouter des bouteilles sur une ligne ou un article hors commande, facturées ou offertes (les offertes sont tracées mais hors montant).
+- **✅ Contrôle avant « produite »** — « Marquer produite » prévient s'il manque des bouteilles libres pour la commande.
+- **🛡️ Fiche client** — L'enregistrement ne perd plus les champs que le formulaire n'affiche pas (client ponctuel, e-mail…).
 
 ### Nouveautés v12.9
 

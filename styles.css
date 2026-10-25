@@ -4557,6 +4557,65 @@ input[type="checkbox"] {
     .inv-row-prevu { grid-column: 2; grid-row: 2; }
 }
 
+/* --- Livraison d'une commande (v13.0) : lots proposés, partielle, en plus --- */
+.stock-lot-resa { margin-top: 4px; font-size: 12px; color: var(--info-dark); }
+.liv-intro { margin: 0 0 12px; }
+.liv-ligne {
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--white);
+}
+.liv-ligne-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.liv-ligne-nom { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.liv-statut { font-size: 13px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.liv-statut.is-ok { color: var(--success-dark); }
+.liv-statut.is-warning { color: var(--warning-dark); }
+.liv-statut.is-danger { color: var(--danger); }
+.liv-statut.is-plus { color: var(--info-dark); }
+.liv-lots { list-style: none; margin: 0; padding: 0; }
+.liv-lot {
+    display: grid;
+    grid-template-columns: 70px minmax(0, 1fr) 80px;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border-light);
+    font-size: 13px;
+}
+.liv-lot:first-child { border-top: none; }
+.liv-lot.is-off { grid-template-columns: 70px minmax(0, 1fr); color: var(--text-lighter); }
+.liv-lot-num { font-weight: 700; font-variant-numeric: tabular-nums; }
+.liv-lot-info { min-width: 0; color: var(--text-light); }
+.liv-lot-autres { display: block; font-size: 12px; color: var(--warning-dark); }
+.liv-lot-qte { width: 80px; text-align: right; }
+.liv-vide { margin: 4px 0; font-size: 13px; color: var(--text-light); }
+.liv-en-plus {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    background: var(--bg-info);
+    font-size: 13px;
+    color: var(--info-dark);
+}
+.liv-en-plus input[type="number"] { width: 80px; }
+.liv-offert { display: flex; align-items: center; gap: 6px; margin-left: auto; color: var(--text); }
+.liv-hors { margin-bottom: 12px; padding: 12px 14px; border: 1px dashed var(--border); border-radius: var(--radius-md); }
+.liv-hors label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+.liv-hors-row { display: flex; gap: 8px; }
+.liv-hors-row select { flex: 1; min-width: 0; }
+.liv-aide { margin: 4px 0 0; font-size: 12px; color: var(--text-light); }
+.liv-recap { margin-right: auto; font-size: 13px; color: var(--text-light); }
+@media (max-width: 480px) {
+    .liv-lot { grid-template-columns: 62px minmax(0, 1fr) 70px; }
+    .liv-lot-qte { width: 70px; }
+}
+
 /* Menu « ⋯ » d'une ligne (lots, articles, paramètres, BL…) */
 .row-menu { position: relative; }
 .row-menu > summary { list-style: none; cursor: pointer; }
@@ -6137,6 +6196,7 @@ input[type="checkbox"] {
     .stock-lot-actions .btn,
     .lot-card-actions .btn,
     .inv-row-actions .btn,
+    .liv-lot-qte,
     .row-menu-btn { height: auto; min-height: 40px; }
     .btn-sm { padding: 8px 12px; font-size: 13px; }
     .row-menu-btn { min-width: 40px; }
@@ -6150,6 +6210,7 @@ input[type="checkbox"] {
     .filters select { min-height: 40px; }
     .dash-todo-del { min-width: 40px; min-height: 40px; }
     .row-menu-list button { min-height: 40px; }
+    .modal-close { min-width: 40px; min-height: 40px; }
     .hist-entry-lot,
     .hist-entry-del { min-height: 36px; min-width: 36px; }
 }

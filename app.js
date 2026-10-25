@@ -50,6 +50,9 @@ const computePointageMinutes = (debutMin, finMin, pause = 0) => {
 // Null-safe accessor for command/order line items.
 const getItems = (cmd) => (cmd && Array.isArray(cmd.items)) ? cmd.items : [];
 
+// Mention des bouteilles livrées en plus de la commande (v13.0)
+const libelleEnPlus = (item) => (item?.enPlus ? (item.offert ? ' (en plus, offert)' : ' (en plus)') : '');
+
 // Returns active rows from a DB table (rows where actif !== false).
 const getActive = (tableName) => DB.get(tableName).filter(r => r.actif !== false);
 
@@ -977,6 +980,11 @@ CLICK_HANDLERS['duplicate-commande'] = (el) => duplicateCommande(el.getAttribute
 CLICK_HANDLERS['marquer-commande-produite'] = (el) => marquerCommandeProduite(el.getAttribute('data-id'));
 CLICK_HANDLERS['confirm-annuler-commande'] = (el) => confirmAnnulerCommande(el.getAttribute('data-id'));
 CLICK_HANDLERS['livrer-commande'] = (el) => showLivraisonBouteillesModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['livraison-en-plus'] = (el) => ouvrirEnPlusLivraison(el.getAttribute('data-ligne'));
+CLICK_HANDLERS['livraison-hors-commande'] = () => montrerHorsCommandeLivraison();
+CLICK_HANDLERS['livraison-hors-commande-ajouter'] = () => ajouterHorsCommandeLivraison();
+CLICK_HANDLERS['livraison-retirer-ligne'] = (el) => retirerLigneLivraison(el.getAttribute('data-ligne'));
+CLICK_HANDLERS['livraison-confirmer'] = () => confirmerLivraison();
 CLICK_HANDLERS['restaurer-commande'] = (el) => restaurerCommande(el.getAttribute('data-id'));
 CLICK_HANDLERS['commande-bl'] = (el) => prepareCommandeBLExport(el.getAttribute('data-id'));
 
@@ -1059,6 +1067,8 @@ const sortCommandesByDateLivraison = (commandes) => (commandes || [])
 // Chaque commande ne reçoit que des lots encore vendables à SA date de livraison
 // (une date passée ou invalide vaut aujourd'hui) : traiter les commandes par date
 // de livraison croissante évite de compter un lot qui expirera avant la livraison.
+// `minJours` (v13.0) : durée de vie minimale exigée par le client — la limite de
+// vente du lot doit tomber au moins ce nombre de jours après la livraison.
 const createStockPool = (lots, referenceDate = new Date(), keyOf = (lot) => `${lot.arome}-${lot.format}`) => {
     const today = dateOnly(referenceDate);
     const saleLimit = (lot) => {
@@ -1069,26 +1079,37 @@ const createStockPool = (lots, referenceDate = new Date(), keyOf = (lot) => `${l
         .filter(lot => isLotSellable(lot, today) && (lot.quantite || 0) > 0)
         .map(lot => ({ lot, key: keyOf(lot), reste: lot.quantite || 0 }))
         .sort((a, b) => saleLimit(a.lot) - saleLimit(b.lot));
-    const eligible = (key, dateLivraison) => {
+    const eligible = (key, dateLivraison, minJours = 0) => {
         const d = dateOnly(dateLivraison);
         const ref = Number.isNaN(d.getTime()) || d < today ? today : d;
-        return entries.filter(e => e.key === key && e.reste > 0 && isLotSellable(e.lot, ref));
+        const limiteMin = ref.getTime() + Math.max(0, minJours) * 86400000;
+        return entries.filter(e => e.key === key && e.reste > 0 && isLotSellable(e.lot, ref)
+            && (!minJours || saleLimit(e.lot) >= limiteMin));
+    };
+    // Consomme jusqu'à `qty` bouteilles ; renvoie les lots pris [{ lot, quantite }]
+    const takeLots = (key, qty, dateLivraison, minJours = 0) => {
+        const pris = [];
+        let reste = qty;
+        for (const e of eligible(key, dateLivraison, minJours)) {
+            if (reste <= 0) break;
+            const used = Math.min(e.reste, reste);
+            e.reste -= used;
+            reste -= used;
+            pris.push({ lot: e.lot, quantite: used });
+        }
+        return pris;
     };
     return {
-        available: (key, dateLivraison) => eligible(key, dateLivraison).reduce((sum, e) => sum + e.reste, 0),
+        available: (key, dateLivraison, minJours = 0) => eligible(key, dateLivraison, minJours).reduce((sum, e) => sum + e.reste, 0),
         // Consomme jusqu'à `qty` bouteilles ; renvoie la quantité effectivement couverte.
-        take: (key, qty, dateLivraison) => {
-            let reste = qty;
-            for (const e of eligible(key, dateLivraison)) {
-                if (reste <= 0) break;
-                const used = Math.min(e.reste, reste);
-                e.reste -= used;
-                reste -= used;
-            }
-            return qty - reste;
-        }
+        take: (key, qty, dateLivraison, minJours = 0) => takeLots(key, qty, dateLivraison, minJours).reduce((s, p) => s + p.quantite, 0),
+        takeLots
     };
 };
+
+// Durée de vie minimale exigée par un client à la livraison, en jours avant la
+// limite de vente du lot (fiche client, v13.0) ; 0 = aucune exigence
+const clientDureeVieMin = (client) => Math.max(0, parseInt(client?.dureeVieMinJours, 10) || 0);
 
 const getLotNumero = (lot) => String(lot?.numLot || lot?.id || '');
 
@@ -2925,7 +2946,8 @@ const diagnoseCommandeMontant = (commande, clients, formats) => {
         const priceUsed = (priceClient && priceClient > 0)
             ? priceClient
             : (pricePreset && pricePreset > 0 ? pricePreset : null);
-        const ligneTotal = (priceUsed != null) ? priceUsed * (item.quantite || 0) : 0;
+        // Bouteilles offertes (en plus de la commande) : tracées, jamais facturées
+        const ligneTotal = (priceUsed != null && !item.offert) ? priceUsed * (item.quantite || 0) : 0;
         report.items.push({
             idx,
             aromeId: item.aromeId,
@@ -4314,6 +4336,7 @@ const buildTwinModel = () => {
     // n'est PAS couverte par le stock (une commande couverte n'est pas urgente)
     const urgency = new Map();
     sortCommandesByDateLivraison(activeCommandes).forEach(({ commande: cmd }) => getItems(cmd).forEach(item => {
+        if (item.enPlus) return;
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = resolveCommandeFormat(item, formats)?.format;
         const qty = Number(item.quantite) || 0;
@@ -4321,7 +4344,7 @@ const buildTwinModel = () => {
         addName(aromeNames, arome.nom);
         addName(formatNames, format.nom);
         const key = `${normalizeName(arome.nom)}|${normalizeName(format.nom)}`;
-        const pris = stockPool.take(key, qty, cmd.dateLivraison);
+        const pris = stockPool.take(key, qty, cmd.dateLivraison, clientDureeVieMin(clients.find(c => c.id === cmd.clientId)));
         demand.set(key, (demand.get(key) || 0) + qty);
         covered.set(key, (covered.get(key) || 0) + pris);
         if (pris < qty) {
@@ -8596,10 +8619,8 @@ const stockFefo = (a, b) => (stockSaleLimit(a) - stockSaleLimit(b))
 // quantité invalide) sont rangés à part, « hors vente ».
 const buildStockOverview = (referenceDate = new Date()) => {
     const lots = DB.get('lots') || [];
-    const commandes = DB.get('commandes') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
-    const clients = DB.get('clients') || [];
     const today = dateOnly(referenceDate);
 
     const findArome = (nom) => aromes.find(a => normalizeName(a.nom) === normalizeName(nom));
@@ -8669,23 +8690,17 @@ const buildStockOverview = (referenceDate = new Date()) => {
         }
     });
 
-    const pool = createStockPool(lots, today, lot => stockCellKey(lot.arome, lot.format));
-    const ouvertes = sortCommandesByDateLivraison(commandes.filter(c => c.statut === 'produite' || c.statut === 'en_attente'))
-        .map(({ commande }) => commande);
-    [...ouvertes.filter(c => c.statut === 'produite'), ...ouvertes.filter(c => c.statut === 'en_attente')].forEach(cmd => {
-        getItems(cmd).forEach(item => {
-            const arome = aromes.find(a => a.id === item.aromeId);
-            const format = resolveCommandeFormat(item, formats)?.format;
-            const qty = Number(item.quantite);
-            if (!arome || !format || !Number.isFinite(qty) || qty <= 0) return;
-            addRow(arome.nom);
-            addCol(format.nom);
-            const cell = cellOf(arome.nom, format.nom);
-            const pris = pool.take(cell.key, qty, cmd.dateLivraison);
+    // Réservations : la règle d'attribution commune (planAttributionCommandes)
+    const { plan, parLot } = planAttributionCommandes(today);
+    plan.forEach(({ commande: cmd, client, lignes }) => {
+        lignes.forEach(l => {
+            addRow(l.arome.nom);
+            addCol(l.format.nom);
+            const cell = cellOf(l.arome.nom, l.format.nom);
+            const pris = l.demande - l.manque;
             cell.reserve += pris;
-            cell.aProduire += qty - pris;
+            cell.aProduire += l.manque;
             if (!cell.commandes.has(cmd.id)) {
-                const client = clients.find(c => c.id === cmd.clientId);
                 cell.commandes.set(cmd.id, {
                     commande: cmd,
                     numero: getCommandeNumero(cmd),
@@ -8696,7 +8711,7 @@ const buildStockOverview = (referenceDate = new Date()) => {
             }
             const resa = cell.commandes.get(cmd.id);
             resa.reserve += pris;
-            resa.aProduire += qty - pris;
+            resa.aProduire += l.manque;
         });
     });
 
@@ -8716,8 +8731,53 @@ const buildStockOverview = (referenceDate = new Date()) => {
     return {
         rows: [...rows.values()],
         cols: [...cols.values()].sort((a, b) => a.contenanceCl - b.contenanceCl || String(a.nom).localeCompare(String(b.nom), 'fr')),
-        cells, horsVente, ecouler, inconnus, totals, couleurDe
+        cells, horsVente, ecouler, inconnus, totals, couleurDe, parLot
     };
+};
+
+// Attribution prévisionnelle des lots aux commandes ouvertes (v13.0), règle unique
+// de l'app (page Stock, livraison, « ✓ Stock », contrôle avant « produite ») :
+// commandes « produite » d'abord, puis « en attente », par date de livraison ;
+// chaque ligne prend les lots vendables à sa date de livraison et assez longs pour
+// le client, la DLV la plus proche d'abord. Rien n'est réservé en base : la
+// livraison propose ces lots, modifiables. `forceProduite` traite une commande en
+// attente comme produite (contrôle avant « Marquer produite »).
+// Renvoie plan : Map(commandeId → { commande, client, minJours, lignes:
+// [{ key, item, arome, format, demande, lots: [{ lot, quantite }], manque }] })
+// et parLot : Map(lotId → [{ commande, quantite }]).
+const planAttributionCommandes = (referenceDate = new Date(), { forceProduite = null } = {}) => {
+    const lots = DB.get('lots') || [];
+    const commandes = DB.get('commandes') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const clients = DB.get('clients') || [];
+    const pool = createStockPool(lots, referenceDate, lot => stockCellKey(lot.arome, lot.format));
+    const prioritaire = (c) => c.statut === 'produite' || c.id === forceProduite;
+    const ouvertes = sortCommandesByDateLivraison(commandes.filter(c => c.statut === 'produite' || c.statut === 'en_attente'))
+        .map(({ commande }) => commande);
+    const plan = new Map();
+    const parLot = new Map();
+    [...ouvertes.filter(prioritaire), ...ouvertes.filter(c => !prioritaire(c))].forEach(cmd => {
+        const client = clients.find(c => c.id === cmd.clientId) || null;
+        const minJours = clientDureeVieMin(client);
+        const lignes = [];
+        getItems(cmd).forEach(item => {
+            if (item.enPlus) return;
+            const arome = aromes.find(a => a.id === item.aromeId);
+            const format = resolveCommandeFormat(item, formats)?.format;
+            const qty = Number(item.quantite);
+            if (!arome || !format || !Number.isFinite(qty) || qty <= 0) return;
+            const key = stockCellKey(arome.nom, format.nom);
+            const pris = pool.takeLots(key, qty, cmd.dateLivraison, minJours);
+            pris.forEach(p => {
+                if (!parLot.has(p.lot.id)) parLot.set(p.lot.id, []);
+                parLot.get(p.lot.id).push({ commande: cmd, quantite: p.quantite });
+            });
+            lignes.push({ key, item, arome, format, demande: qty, lots: pris, manque: qty - pris.reduce((s, p) => s + p.quantite, 0) });
+        });
+        plan.set(cmd.id, { commande: cmd, client, minJours, lignes });
+    });
+    return { plan, parLot };
 };
 
 // Nom affiché d'une case du tableau (repli sur le nom stocké dans ses lots)
@@ -8749,12 +8809,16 @@ const stockLotDates = (lot) => [
     ['Prod.', lot.dateProduction], ['DLV', lot.dlv], ['DLC', lot.dlc]
 ].filter(([, d]) => d && isValidDateOnly(d)).map(([label, d]) => `${label} ${formatDate(d)}`).join(' · ');
 
-const stockLotRowHtml = (lot, { premier = false, now = new Date() } = {}) => {
+// `reservations` : [{ commande, quantite }] de la règle d'attribution (v13.0)
+const stockLotRowHtml = (lot, { premier = false, now = new Date(), reservations = [] } = {}) => {
     const id = escapeHtml(lot.id);
     const num = escapeHtml(formatLotNumero(getLotNumero(lot)));
     const tag = getLotStatus(lot, now) === 'warning'
         ? `<span class="badge badge-bientot">À écouler d'abord</span>`
         : premier ? '<span class="stock-tag">À sortir en premier</span>' : '';
+    const prevu = reservations.length
+        ? `<div class="stock-lot-resa">Prévu pour ${reservations.map(r => `<button type="button" class="hist-entry-lot" data-click="show-commande-details" data-id="${escapeHtml(r.commande.id)}">#${escapeHtml(getCommandeNumero(r.commande))}</button> ${escapeHtml(twinFmtInt(r.quantite))} bt`).join(', ')}</div>`
+        : '';
     return `
         <li class="stock-lot">
             <div class="stock-lot-id">
@@ -8764,6 +8828,7 @@ const stockLotRowHtml = (lot, { premier = false, now = new Date() } = {}) => {
             <div class="stock-lot-life">
                 ${lotShelfLifeHtml(lot, now)}
                 <div class="stock-lot-dates">${escapeHtml(stockLotDates(lot))}${tag}</div>
+                ${prevu}
             </div>
             <div class="stock-lot-actions">
                 <button type="button" class="btn btn-sm btn-success" data-click="sell-lot" data-id="${id}" title="Vente directe, dégustation, casse ou destruction">Sortie</button>
@@ -8822,7 +8887,7 @@ const stockGroupHtml = (ov, cell, lots, now) => {
         </button>`).join('');
     const lotsHtml = lots.length === 0
         ? `<li class="stock-lot-empty">${cell.lots.length ? 'Aucun lot ne correspond aux filtres' : 'Aucun lot vendable'}</li>`
-        : lots.map(lot => stockLotRowHtml(lot, { premier: cell.lots.length > 1 && cell.lots[0] === lot, now })).join('');
+        : lots.map(lot => stockLotRowHtml(lot, { premier: cell.lots.length > 1 && cell.lots[0] === lot, now, reservations: ov.parLot?.get(lot.id) || [] })).join('');
     return `
         <div class="stock-group">
             <div class="stock-group-head">
@@ -11423,7 +11488,7 @@ const renderCommandes = () => {
             const articlesPreview = safeItems.slice(0, 3).map(i => {
                 const a = aromes.find(a => a.id === i.aromeId);
                 const f = formats.find(f => f.id === i.formatId);
-                return `${i.quantite}× ${a?.nom || '?'} ${f?.nom || '?'}`;
+                return `${i.quantite}× ${a?.nom || '?'} ${f?.nom || '?'}${libelleEnPlus(i)}`;
             }).join(' • ');
             const more = safeItems.length > 3 ? ` • +${safeItems.length - 3}` : '';
             const montant = getCommandeMontant(cmd, clients, formats);
@@ -11814,10 +11879,25 @@ const updateCommandeStatut = (id, statut, { fromLivraison = false } = {}) => {
     return false;
 };
 
-const marquerCommandeProduite = (id) => {
-    updateCommandeStatut(id, 'produite');
-    modal.hide();
-    showToast('Commande marquée comme produite');
+// Avant de passer « produite », la règle d'attribution vérifie que les bouteilles
+// libres (vendables à la date de livraison, assez longues pour le client) suffisent
+const marquerCommandeProduite = async (id) => {
+    const { plan } = planAttributionCommandes(new Date(), { forceProduite: id });
+    const p = plan.get(id);
+    const manques = (p?.lignes || []).filter(l => l.manque > 0);
+    if (manques.length > 0) {
+        const detail = manques.map(l => `${l.manque} bt ${l.arome.nom} ${l.format.nom}`).join(', ');
+        const ok = await confirmDialog(
+            `Pour #${getCommandeNumero(p.commande)} · ${p.client ? getClientLabel(p.client) : 'client inconnu'}, il manque ${detail} (bouteilles libres${p.minJours ? ` et assez longues pour ce client, ${p.minJours} j minimum` : ''}). La marquer produite quand même ?`,
+            { title: 'Stock insuffisant', confirmLabel: 'Marquer quand même' }
+        );
+        if (!ok) return;
+    }
+    // updateCommandeStatut relit les commandes : rien n'est gardé d'avant la confirmation
+    if (updateCommandeStatut(id, 'produite')) {
+        modal.hide();
+        showToast('Commande marquée comme produite');
+    }
 };
 
 const restaurerCommande = (id) => {
@@ -11900,6 +11980,9 @@ const restaurerCommande = (id) => {
             DB.set('lots', lots);
 
             cmd.lotsUtilises = [];
+            // Les bouteilles livrées en plus reviennent au stock avec le reste :
+            // la commande retrouve ses seules quantités commandées
+            cmd.items = getItems(cmd).filter(i => !i.enPlus);
             delete cmd.dateLivraisonEffective;
             delete cmd.clientLivraison;
             delete cmd.numeroBL;
@@ -11929,7 +12012,13 @@ const restaurerCommande = (id) => {
 //
 // allocations attend : [{ lotId, quantite, expectedArome, expectedFormat }]
 // Les quantités sont agrégées en interne par lotId pour éviter double décrément.
-const deliverCommandeTransaction = async (commandeId, allocations) => {
+// options (v13.0) : extras [{ aromeId, formatId, quantite, offert }] — bouteilles
+// livrées en plus de la commande, incluses dans les allocations ; partielle —
+// autorise à livrer moins que commandé, le reste devient un reliquat « en attente »
+// (reliquatId, reliquatNumero) écrit dans la même transaction.
+// Renvoie { lotsUtilises, reliquat }.
+const deliverCommandeTransaction = async (commandeId, allocations, options = {}) => {
+    const { extras = [], partielle = false, reliquatId = null, reliquatNumero = null } = options;
     // --- Guardes : exiger Firebase prêt, V11 prêt, authentifié ---
     if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) {
         throw new Error(
@@ -12010,6 +12099,17 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
         la.formats.add(normalize(a.expectedFormat));
     }
 
+    // Bouteilles en plus par article (comptées dans les allocations)
+    const extrasAgg = new Map();  // itemKey → { quantite, offert }
+    for (const x of extras) {
+        const q = Number(x.quantite);
+        if (!Number.isInteger(q) || q <= 0) throw new Error('Quantité de bouteilles en plus invalide. Livraison annulée.');
+        const k = `${x.aromeId}|${x.formatId}`;
+        const prev = extrasAgg.get(k);
+        extrasAgg.set(k, { quantite: (prev?.quantite || 0) + q, offert: !!x.offert });
+    }
+    if (partielle && !reliquatId) throw new Error('Identifiant de reliquat manquant. Livraison annulée.');
+
     // Vérification : un lot ne doit servir qu'à un seul couple (arome, format)
     for (const [lotId, la] of lotsAgg) {
         if (la.aromes.size > 1 || la.formats.size > 1) {
@@ -12045,33 +12145,60 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
             remoteItemsMap.set(key, (remoteItemsMap.get(key) || 0) + Number(item.quantite));
         }
 
-        // Vérifier que chaque article alloué existe dans la commande distante avec le bon total
+        // Vérifier chaque article alloué : la part « commandée » (alloué − en plus)
+        // ne dépasse jamais la commande distante ; un article hors commande n'est
+        // livrable qu'en bouteilles en plus déclarées
         for (const [itemKey, allocatedQty] of itemAgg) {
             const remoteQty = remoteItemsMap.get(itemKey);
-            if (remoteQty === undefined) {
+            const extraQty = extrasAgg.get(itemKey)?.quantite || 0;
+            if (remoteQty === undefined && !extraQty) {
                 throw new Error(
                     `L'article (${itemKey}) a été retiré de la commande distante. Livraison annulée.`
                 );
             }
-            if (allocatedQty !== remoteQty) {
+            const base = allocatedQty - extraQty;
+            if (base < 0 || base > (remoteQty || 0)) {
                 throw new Error(
                     `Quantité allouée incorrecte pour l'article (${itemKey}) : ` +
-                    `alloué ${allocatedQty}, requis ${remoteQty} d'après la commande distante. ` +
+                    `alloué ${allocatedQty} dont ${extraQty} en plus, requis ${remoteQty || 0} d'après la commande distante. ` +
                     'Livraison annulée.'
                 );
             }
         }
-        // Vérifier qu'aucun article distant n'est oublié
+        for (const itemKey of extrasAgg.keys()) {
+            if (!itemAgg.has(itemKey)) throw new Error(`Bouteilles en plus sans lot alloué (${itemKey}). Livraison annulée.`);
+        }
+        // Vérifier qu'aucun article distant n'est oublié (sauf livraison partielle)
+        const baseLivree = new Map();
         for (const [itemKey, remoteQty] of remoteItemsMap) {
-            const allocatedQty = itemAgg.get(itemKey) || 0;
-            if (allocatedQty !== remoteQty) {
+            const base = (itemAgg.get(itemKey) || 0) - (extrasAgg.get(itemKey)?.quantite || 0);
+            baseLivree.set(itemKey, base);
+            if (base !== remoteQty && !partielle) {
                 throw new Error(
                     `L'article (${itemKey}) est absent ou mal alloué dans cette livraison ` +
-                    `(alloué ${allocatedQty}, requis ${remoteQty} d'après la commande distante). ` +
+                    `(alloué ${base}, requis ${remoteQty} d'après la commande distante). ` +
                     'Livraison annulée.'
                 );
             }
         }
+
+        // Lignes livrées (part commandée, puis bouteilles en plus) et reliquat
+        const itemsLivres = [];
+        const itemsReliquat = [];
+        const resteBase = new Map(baseLivree);
+        remoteItems.forEach(item => {
+            const k = `${item.aromeId}|${item.formatId}`;
+            const q = Number(item.quantite) || 0;
+            const livre = Math.min(q, Math.max(0, resteBase.get(k) || 0));
+            resteBase.set(k, (resteBase.get(k) || 0) - livre);
+            if (livre > 0) itemsLivres.push({ ...item, quantite: livre });
+            if (q - livre > 0) itemsReliquat.push({ ...item, quantite: q - livre });
+        });
+        extrasAgg.forEach((x, k) => {
+            const [aromeId, formatId] = k.split('|');
+            itemsLivres.push({ aromeId, formatId, quantite: x.quantite, enPlus: true, ...(x.offert ? { offert: true } : {}) });
+        });
+        if (itemsLivres.length === 0) throw new Error('Aucune bouteille à livrer. Livraison annulée.');
 
         // --- 3. Lecture et validation de chaque lot distant ---
         const lotsUtilises = [];
@@ -12165,10 +12292,23 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
         const clientLocal = clientsLocaux.find(c => c.id === commande.clientId);
         const updatedCommande = {
             ...commande,
+            items: itemsLivres,
             statut: 'livrée',
             lotsUtilises,
             dateLivraisonEffective: now
         };
+        // Livraison partielle : le reste devient une commande « en attente » liée
+        let reliquat = null;
+        if (itemsReliquat.length > 0) {
+            reliquat = { ...commande, id: reliquatId, numero: reliquatNumero || `${getCommandeNumero(commande)}-2`, statut: 'en_attente', items: itemsReliquat, reliquatDe: commandeId };
+            ['lotsUtilises', 'dateLivraisonEffective', 'clientLivraison', 'numeroBL', 'reliquatId'].forEach(f => delete reliquat[f]);
+            updatedCommande.reliquatId = reliquatId;
+            transaction.set(v11GetRecordRef('commandes', reliquatId), {
+                record: reliquat,
+                updatedAt: now,
+                _version: txVersion
+            });
+        }
         if (clientLocal) {
             updatedCommande.clientLivraison = {
                 societe: clientLocal.societe || '',
@@ -12199,6 +12339,7 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
 
         return {
             updatedCommande,
+            reliquat,
             lotsUtilises,
             lotResults: updatedLots.map(u => ({
                 lotId: u.lot.id,
@@ -12217,11 +12358,13 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
     if (cmdIdx !== -1) {
         allCommandes[cmdIdx] = result.updatedCommande;
     }
+    if (result.reliquat) allCommandes.push(result.reliquat);
     DB._applyRemoteSnapshot('commandes', allCommandes);
 
     // Met à jour les versions commande
     if (!V11._versions['commandes']) V11._versions['commandes'] = {};
     V11._versions['commandes'][commandeId] = txVersion;
+    if (result.reliquat) V11._versions['commandes'][result.reliquat.id] = txVersion;
 
     // Met à jour / supprime les lots dans le cache local
     const allLots = DB.get('lots');
@@ -12248,12 +12391,282 @@ const deliverCommandeTransaction = async (commandeId, allocations) => {
     }
     v11SaveVersions();
 
-    return result.lotsUtilises;
+    return { lotsUtilises: result.lotsUtilises, reliquat: result.reliquat };
+};
+
+// --- Livraison d'une commande (v13.0) ---
+// Les lots sont pré-remplis selon la règle d'attribution : DLV la plus proche
+// d'abord, parmi les lots vendables aujourd'hui, assez longs pour le client et non
+// prévus pour d'autres commandes (planAttributionCommandes). Tout reste modifiable.
+// Livraison partielle : ce qui manque devient un reliquat « en attente ». Bouteilles
+// en plus (menus ⋯) : sur une ligne ou un article hors commande, facturées ou offertes.
+let livraisonState = null;
+
+// Lots vendables aujourd'hui pour un arôme × format (normalisés), DLV la plus
+// proche d'abord, avec la part prévue pour d'autres commandes
+const livraisonLotsPour = (key, minJours, autresParLot, today) => {
+    const limiteMin = today.getTime() + minJours * 86400000;
+    return (DB.get('lots') || [])
+        .filter(l => stockCellKey(l.arome, l.format) === key && Number(l.quantite) > 0 && isLotSellable(l, today))
+        .sort(stockFefo)
+        .map(lot => {
+            const autres = autresParLot.get(lot.id) || [];
+            const reserveAutres = autres.reduce((s, r) => s + r.quantite, 0);
+            return {
+                lot,
+                max: Number(lot.quantite),
+                libre: Math.max(0, Number(lot.quantite) - reserveAutres),
+                autres,
+                tropCourt: minJours > 0 && stockSaleLimit(lot) < limiteMin
+            };
+        });
+};
+
+// Répartit `cible` bouteilles sur les lots d'une ligne, DLV la plus proche
+// d'abord, sans toucher aux bouteilles prévues pour d'autres commandes
+const remplirLigneLivraison = (ligne, cible) => {
+    let reste = Math.max(0, cible);
+    ligne.lots.forEach(l => {
+        const pris = l.tropCourt ? 0 : Math.min(l.libre, reste);
+        ligne.qte[l.lot.id] = pris;
+        reste -= pris;
+    });
+};
+
+const livraisonTotalLigne = (ligne) => ligne.lots.reduce((s, l) => s + (ligne.qte[l.lot.id] || 0), 0);
+
+// État d'une ligne : alloué, livré au titre de la commande, en plus, reliquat
+const livraisonEtatLigne = (ligne) => {
+    const alloue = livraisonTotalLigne(ligne);
+    const base = Math.min(alloue, ligne.commande);
+    const enPlus = Math.max(0, alloue - ligne.commande);
+    return { alloue, base, enPlus, reliquat: ligne.commande - base, depasse: enPlus > 0 && !ligne.enPlusOuvert };
+};
+
+const livraisonStatutLigneHtml = (ligne) => {
+    const e = livraisonEtatLigne(ligne);
+    if (e.depasse) return `<span class="liv-statut is-danger">${e.alloue} / ${ligne.commande} · dépasse la commande</span>`;
+    if (ligne.horsCommande) return `<span class="liv-statut is-plus">${e.enPlus} en plus</span>`;
+    if (e.enPlus > 0) return `<span class="liv-statut is-plus">${e.alloue} / ${ligne.commande} · ${e.enPlus} en plus</span>`;
+    if (e.reliquat > 0) return `<span class="liv-statut is-warning">${e.alloue} / ${ligne.commande} · ${e.reliquat} en reliquat</span>`;
+    return `<span class="liv-statut is-ok">${e.alloue} / ${ligne.commande} ✓</span>`;
+};
+
+const livraisonLigneHtml = (ligne) => {
+    const e = livraisonEtatLigne(ligne);
+    const today = dateOnly(new Date()).getTime();
+    const jours = (lot) => {
+        const t = stockSaleLimit(lot);
+        return Number.isFinite(t) ? Math.round((t - today) / 86400000) : null;
+    };
+    const lotsHtml = ligne.lots.map(l => {
+        const j = jours(l.lot);
+        const dlv = l.lot.dlv || l.lot.dlc;
+        const info = `${twinFmtInt(l.max)} bt${dlv ? ` · DLV ${formatDate(dlv)}` : ''}${j !== null ? ` (${j} j)` : ''}`;
+        if (l.tropCourt) {
+            return `<li class="liv-lot is-off">
+                <span class="liv-lot-num">#${escapeHtml(formatLotNumero(getLotNumero(l.lot)))}</span>
+                <span class="liv-lot-info">${escapeHtml(info)} · trop court pour ce client (min ${livraisonState.minJours} j)</span>
+            </li>`;
+        }
+        const autres = l.autres.length
+            ? `<span class="liv-lot-autres">prévu pour ${l.autres.map(r => `#${escapeHtml(getCommandeNumero(r.commande))} (${r.quantite} bt, ${escapeHtml(stockLivraisonLabel(r.commande.dateLivraison))})`).join(', ')}</span>`
+            : '';
+        return `<li class="liv-lot">
+            <span class="liv-lot-num">#${escapeHtml(formatLotNumero(getLotNumero(l.lot)))}</span>
+            <span class="liv-lot-info">${escapeHtml(info)}${autres}</span>
+            <input type="number" class="liv-lot-qte" min="0" max="${safeNumAttr(l.max)}" step="1" inputmode="numeric"
+                   value="${safeNumAttr(ligne.qte[l.lot.id] || 0)}" data-ligne="${escapeHtml(ligne.id)}" data-lot="${escapeHtml(l.lot.id)}"
+                   aria-label="${escapeHtml(`Bouteilles du lot ${formatLotNumero(getLotNumero(l.lot))}`)}" oninput="majLivraisonQte(this)">
+        </li>`;
+    }).join('');
+    const enPlusHtml = (ligne.enPlusOuvert || ligne.horsCommande) ? `
+        <div class="liv-en-plus">
+            <label for="livPlus-${escapeHtml(ligne.id)}">${ligne.horsCommande ? 'Bouteilles livrées' : 'Bouteilles en plus'}</label>
+            <input type="number" id="livPlus-${escapeHtml(ligne.id)}" min="0" step="1" inputmode="numeric" value="${e.enPlus || ''}"
+                   data-ligne="${escapeHtml(ligne.id)}" oninput="majLivraisonEnPlus(this)">
+            <label class="liv-offert"><input type="checkbox" ${ligne.offert ? 'checked' : ''} data-ligne="${escapeHtml(ligne.id)}" onchange="majLivraisonOffert(this)"> offertes</label>
+        </div>` : '';
+    const menu = ligne.horsCommande
+        ? rowMenuHtml(`${ligne.aromeNom} ${ligne.formatNom}`, `<button type="button" class="is-danger" data-click="livraison-retirer-ligne" data-ligne="${escapeHtml(ligne.id)}">Retirer cet article</button>`)
+        : (ligne.enPlusOuvert ? '' : rowMenuHtml(`${ligne.aromeNom} ${ligne.formatNom}`, `<button type="button" data-click="livraison-en-plus" data-ligne="${escapeHtml(ligne.id)}">Ajouter des bouteilles en plus</button>`));
+    return `<section class="liv-ligne" data-ligne="${escapeHtml(ligne.id)}">
+        <div class="liv-ligne-head">
+            <span class="liv-ligne-nom">${escapeHtml(`${ligne.aromeNom} ${ligne.formatNom}`)}${ligne.horsCommande ? ' <span class="stock-tag">hors commande</span>' : ''}</span>
+            <span class="liv-ligne-statut" id="livStatut-${escapeHtml(ligne.id)}">${livraisonStatutLigneHtml(ligne)}</span>
+            ${menu}
+        </div>
+        ${ligne.lots.length ? `<ul class="liv-lots">${lotsHtml}</ul>` : '<p class="liv-vide">Aucun lot vendable pour cet article.</p>'}
+        ${enPlusHtml}
+    </section>`;
+};
+
+// Pied de fenêtre : récapitulatif et libellé du bouton
+const majPiedLivraison = () => {
+    if (!livraisonState) return;
+    let alloue = 0, reliquat = 0, enPlus = 0, offertes = 0, depasse = false;
+    livraisonState.lignes.forEach(l => {
+        const e = livraisonEtatLigne(l);
+        alloue += e.alloue;
+        reliquat += e.reliquat;
+        enPlus += e.enPlus;
+        if (l.offert) offertes += e.enPlus;
+        depasse = depasse || e.depasse;
+    });
+    const recap = document.getElementById('livRecap');
+    if (recap) {
+        recap.textContent = [
+            `${alloue} bt à livrer`,
+            enPlus ? `dont ${enPlus} en plus${offertes ? ` (${offertes} offerte${offertes > 1 ? 's' : ''})` : ''}` : '',
+            reliquat ? `reliquat de ${reliquat} bt` : ''
+        ].filter(Boolean).join(' · ');
+    }
+    const note = document.getElementById('livReliquatNote');
+    if (note) {
+        note.hidden = !(reliquat > 0 && alloue > 0);
+        note.textContent = `Il manque ${reliquat} bt : les bouteilles prêtes partent maintenant et un reliquat ${livraisonState.reliquatNumero} de ${reliquat} bt reste « en attente » (même client, même date).`;
+    }
+    const btn = document.getElementById('confirm-livraison-btn');
+    if (btn && !btn.disabled) btn.textContent = depasse ? 'Livrer' : reliquat > 0 && alloue > 0 ? `Livrer ${alloue} bt · reliquat de ${reliquat}` : `Livrer ${alloue} bt`;
+};
+
+const majLigneLivraisonDom = (ligne, { valeursLots = true, champEnPlus = true } = {}) => {
+    const statut = document.getElementById(`livStatut-${ligne.id}`);
+    if (statut) statut.innerHTML = livraisonStatutLigneHtml(ligne);
+    if (valeursLots) {
+        document.querySelectorAll(`.liv-lot-qte[data-ligne="${ligne.id}"]`).forEach(inp => {
+            inp.value = ligne.qte[inp.dataset.lot] || 0;
+        });
+    }
+    if (champEnPlus) {
+        const plus = document.getElementById(`livPlus-${ligne.id}`);
+        if (plus) plus.value = livraisonEtatLigne(ligne).enPlus || '';
+    }
+    majPiedLivraison();
+};
+
+const livraisonLigne = (id) => livraisonState?.lignes.find(l => l.id === id);
+
+const majLivraisonQte = (input) => {
+    const ligne = livraisonLigne(input.dataset.ligne);
+    if (!ligne) return;
+    const v = parseInt(input.value, 10);
+    ligne.qte[input.dataset.lot] = Number.isFinite(v) && v > 0 ? v : 0;
+    majLigneLivraisonDom(ligne, { valeursLots: false });
+};
+
+const majLivraisonEnPlus = (input) => {
+    const ligne = livraisonLigne(input.dataset.ligne);
+    if (!ligne) return;
+    const n = Math.max(0, parseInt(input.value, 10) || 0);
+    remplirLigneLivraison(ligne, ligne.commande + n);
+    majLigneLivraisonDom(ligne, { champEnPlus: false });
+};
+
+const majLivraisonOffert = (input) => {
+    const ligne = livraisonLigne(input.dataset.ligne);
+    if (!ligne) return;
+    ligne.offert = input.checked;
+    majPiedLivraison();
+};
+
+const rerenderLigneLivraison = (ligne) => {
+    const el = document.querySelector(`.liv-ligne[data-ligne="${ligne.id}"]`);
+    if (el) el.outerHTML = livraisonLigneHtml(ligne);
+    majPiedLivraison();
+};
+
+const ouvrirEnPlusLivraison = (id) => {
+    const ligne = livraisonLigne(id);
+    if (!ligne) return;
+    ligne.enPlusOuvert = true;
+    rerenderLigneLivraison(ligne);
+    document.getElementById(`livPlus-${ligne.id}`)?.focus();
+};
+
+// Articles hors commande proposables : arôme × format avec des bouteilles libres
+// (vendables aujourd'hui, assez longues pour le client), absents des lignes
+const livraisonArticlesHorsCommande = () => {
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
+    const today = dateOnly(new Date());
+    const dejaLa = new Set(livraisonState.lignes.map(l => l.key));
+    const parCle = new Map();
+    aromes.forEach(a => formats.forEach(f => {
+        const key = stockCellKey(a.nom, f.nom);
+        if (dejaLa.has(key) || parCle.has(key)) return;
+        const lots = livraisonLotsPour(key, livraisonState.minJours, livraisonState.autresParLot, today).filter(l => !l.tropCourt);
+        const libre = lots.reduce((s, l) => s + l.libre, 0);
+        if (libre > 0) parCle.set(key, { key, arome: a, format: f, libre });
+    }));
+    return [...parCle.values()].sort((x, y) => `${x.arome.nom} ${x.format.nom}`.localeCompare(`${y.arome.nom} ${y.format.nom}`, 'fr'));
+};
+
+const montrerHorsCommandeLivraison = () => {
+    const bloc = document.getElementById('livHorsCommande');
+    if (!bloc || !livraisonState) return;
+    const options = livraisonArticlesHorsCommande();
+    bloc.hidden = false;
+    bloc.innerHTML = options.length === 0
+        ? '<p class="liv-vide">Aucun autre article n\'a de bouteilles libres.</p>'
+        : `<label for="livHorsSelect">Article hors commande</label>
+           <div class="liv-hors-row">
+               <select id="livHorsSelect">${options.map(o => `<option value="${escapeHtml(o.key)}">${escapeHtml(`${o.arome.nom} ${o.format.nom} — ${o.libre} bt libres`)}</option>`).join('')}</select>
+               <button type="button" class="btn btn-secondary" data-click="livraison-hors-commande-ajouter">Ajouter</button>
+           </div>`;
+    document.getElementById('livHorsSelect')?.focus();
+};
+
+const ajouterHorsCommandeLivraison = () => {
+    const key = document.getElementById('livHorsSelect')?.value;
+    const choix = livraisonArticlesHorsCommande().find(o => o.key === key);
+    if (!choix) return;
+    const ligne = {
+        id: `h${Date.now()}`,
+        key,
+        aromeId: choix.arome.id,
+        formatId: choix.format.id,
+        aromeNom: choix.arome.nom,
+        formatNom: choix.format.nom,
+        commande: 0,
+        horsCommande: true,
+        enPlusOuvert: true,
+        offert: false,
+        lots: livraisonLotsPour(key, livraisonState.minJours, livraisonState.autresParLot, dateOnly(new Date())),
+        qte: {}
+    };
+    livraisonState.lignes.push(ligne);
+    const bloc = document.getElementById('livHorsCommande');
+    if (bloc) {
+        bloc.hidden = true;
+        bloc.innerHTML = '';
+    }
+    document.getElementById('livLignes')?.insertAdjacentHTML('beforeend', livraisonLigneHtml(ligne));
+    majPiedLivraison();
+    document.getElementById(`livPlus-${ligne.id}`)?.focus();
+};
+
+const retirerLigneLivraison = (id) => {
+    if (!livraisonState) return;
+    livraisonState.lignes = livraisonState.lignes.filter(l => l.id !== id || !l.horsCommande);
+    document.querySelector(`.liv-ligne[data-ligne="${id}"]`)?.remove();
+    majPiedLivraison();
+};
+
+// Numéro du reliquat : « 00048-2 », puis « -3 »… (parseInt l'ignore pour la
+// numérotation des commandes)
+const prochainNumeroReliquat = (numero) => {
+    const base = String(numero || '').split('-')[0];
+    let max = 1;
+    (DB.get('commandes') || []).forEach(c => {
+        const [b, suffixe] = String(c.numero || '').split('-');
+        if (b === base && /^\d+$/.test(suffixe || '')) max = Math.max(max, parseInt(suffixe, 10));
+    });
+    return `${base}-${max + 1}`;
 };
 
 const showLivraisonBouteillesModal = (commandeId) => {
     const commandes = DB.get('commandes') || [];
-    const lots = DB.get('lots') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
     const clients = DB.get('clients') || [];
@@ -12269,279 +12682,156 @@ const showLivraisonBouteillesModal = (commandeId) => {
     }
 
     const client = clients.find(cl => cl.id === cmd.clientId);
-    const clientName = client ? (client.societe || client.nom) : 'N/A';
-    const totalItems = (cmd.items || []).reduce((sum, i) => sum + i.quantite, 0);
+    const clientName = client ? getClientLabel(client) : 'Client inconnu';
+    const minJours = clientDureeVieMin(client);
+    const today = dateOnly(new Date());
 
-    const normalize = (s) => (s || '').toString().toLowerCase().trim();
-
-    const sortedLots = [...lots]
-        .filter(lot => isLotSellable(lot))
-        .sort((a, b) => new Date(a.dateProduction || '1970-01-01') - new Date(b.dateProduction || '1970-01-01'));
-
-    const lignesHtml = getItems(cmd).map(item => {
-        const arome = aromes.find(a => a.id === item.aromeId);
-        const format = formats.find(f => f.id === item.formatId);
-        const aromeNom = arome?.nom || '?';
-        const formatNom = format?.nom || '?';
-        const aromeNorm = normalize(aromeNom);
-        const formatNorm = normalize(formatNom);
-
-        const lotsDisponibles = sortedLots.filter(lot =>
-            normalize(lot.arome) === aromeNorm &&
-            normalize(lot.format) === formatNorm &&
-            lot.quantite > 0
-        );
-
-        const lotsRow = lotsDisponibles.length === 0
-            ? `<em class="text-muted">Aucun lot disponible</em>`
-            : lotsDisponibles.map(lot => {
-                return `<div class="flex-between" style="padding: 4px 0;">
-                    <span style="font-size: 12px;">#${escapeHtml(formatLotNumero(getLotNumero(lot)))} — ${escapeHtml(lot.arome)} ${escapeHtml(lot.format)} <em style="color: var(--text-muted);">(Stock: ${escapeHtml(String(lot.quantite))})</em></span>
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        <input type="number" class="lot-qty-input" data-lot="${escapeHtml(lot.id)}" data-item="${escapeHtml(item.aromeId)}|${escapeHtml(item.formatId)}" value="0" min="0" max="${Number.isFinite(lot.quantite) ? lot.quantite : 0}" style="width: 60px;">
-                        <span style="font-size: 12px; color: var(--text-muted);">/ ${escapeHtml(String(lot.quantite))}</span>
-                    </div>
-                </div>`;
-            }).join('');
-
-        const itemKey = `${item.aromeId}|${item.formatId}`;
-        const filledTotal = 0;
-        const totalId = `item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_');
-
-        return `<div style="margin-bottom: 16px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius);">
-            <div class="flex-between" style="margin-bottom: 8px;">
-                <strong>${escapeHtml(aromeNom)} ${escapeHtml(formatNom)}</strong>
-                <span style="color: var(--text-muted); font-size: 12px;">${escapeHtml(String(item.quantite))} commandées</span>
-            </div>
-            <div id="${totalId}" class="item-total-display" data-required="${Number.isFinite(item.quantite) ? item.quantite : 0}">
-                <span style="font-size: 12px;">Alloué: <strong id="${totalId}-count">${escapeHtml(String(filledTotal))}</strong> / ${escapeHtml(String(item.quantite))}</span>
-            </div>
-            <div style="margin-top: 8px;">${lotsRow}</div>
-        </div>`;
-    }).join('');
-
-    const validateAndDeliver = async () => {
-        const inputs = document.querySelectorAll('.lot-qty-input');
-        const allocations = {};
-        const allocationsParLot = new Map();
-        let allocationInvalide = false;
-
-        inputs.forEach(input => {
-            const valeur = input.value.trim();
-            const quantite = valeur === '' ? 0 : Number(valeur);
-            const maximum = Number(input.max);
-            const lotId = String(input.dataset.lot || '');
-            const itemKey = input.dataset.item || '';
-
-            if (!Number.isInteger(quantite) || quantite < 0 || !Number.isInteger(maximum) || maximum < 0 || quantite > maximum) {
-                allocationInvalide = true;
-                return;
-            }
-            if (quantite === 0) return;
-            if (!lotId || !itemKey) {
-                allocationInvalide = true;
-                return;
-            }
-
-            if (!allocations[itemKey]) allocations[itemKey] = [];
-            allocations[itemKey].push({ lotId, quantite });
-            allocationsParLot.set(lotId, (allocationsParLot.get(lotId) || 0) + quantite);
-        });
-
-        if (allocationInvalide) {
-            showToast('Les quantités allouées doivent être des entiers compris dans le stock disponible', 'error');
-            return;
-        }
-
-        const commandesActuelles = DB.get('commandes') || [];
-        const cmdIndex = commandesActuelles.findIndex(c => c.id === commandeId);
-        const commandeActuelle = commandesActuelles[cmdIndex];
-        if (!commandeActuelle || commandeActuelle.statut !== 'produite') {
-            showToast('Cette commande ne peut plus être livrée', 'error');
-            return;
-        }
-
-        const itemsCommande = getItems(commandeActuelle);
-        if (itemsCommande.length === 0) {
-            showToast('La commande ne contient aucun article à livrer', 'error');
-            return;
-        }
-
-        for (const item of itemsCommande) {
-            const quantiteDemandee = Number(item.quantite);
-            if (!Number.isInteger(quantiteDemandee) || quantiteDemandee <= 0) {
-                showToast('La commande contient une quantité invalide', 'error');
-                return;
-            }
-
-            const key = `${item.aromeId}|${item.formatId}`;
-            const alloue = allocations[key]?.reduce((s, allocation) => s + allocation.quantite, 0) || 0;
-            if (alloue !== quantiteDemandee) {
-                const arome = aromes.find(a => a.id === item.aromeId);
-                const format = formats.find(f => f.id === item.formatId);
-                showToast(`Quantité incorrecte pour ${arome?.nom || '?'} ${format?.nom || '?'} : alloué ${alloue} / ${quantiteDemandee}`, 'error');
-                return;
-            }
-        }
-
-        const allLots = DB.get('lots') || [];
-        const lotsParId = new Map(allLots.map(lot => [String(lot.id), lot]));
-        for (const [itemKey, group] of Object.entries(allocations)) {
-            const [aromeId, formatId] = itemKey.split('|');
-            const arome = aromes.find(item => item.id === aromeId);
-            const format = formats.find(item => item.id === formatId);
-            const aromeAttendu = normalize(arome?.nom || aromeId);
-            const formatAttendu = normalize(format?.nom || formatId);
-
-            for (const { lotId } of group) {
-                const lot = lotsParId.get(String(lotId));
-                if (!lot || normalize(lot.arome) !== aromeAttendu || normalize(lot.format) !== formatAttendu) {
-                    showToast('Un lot alloué ne correspond pas à l\'article commandé', 'error');
-                    return;
-                }
-            }
-        }
-        for (const [lotId, quantite] of allocationsParLot) {
-            const lot = lotsParId.get(lotId);
-            const disponible = Number(lot?.quantite);
-            if (!lot || !isLotSellable(lot) || !Number.isFinite(disponible) || disponible < quantite) {
-                showToast(`Lot indisponible ou stock insuffisant sur #${formatLotNumero(lot ? getLotNumero(lot) : lotId)}. Livraison non effectuée.`, 'error');
-                return;
-            }
-        }
-
-        // --- Validation locale réussie → exécution atomique distante ---
-
-        // État busy : désactiver le bouton Confirmer (anti-double-clic)
-        const btn = document.getElementById('confirm-livraison-btn');
-        if (btn) {
-            btn.disabled = true;
-            btn.textContent = 'Livraison en cours…';
-        }
-
-        try {
-            // Construire le tableau d'allocations pour la transaction
-            // Chaque entrée porte l'itemKey (aromeId|formatId) pour la validation distante des articles
-            const allocationsForTx = [];
-            for (const [itemKey, group] of Object.entries(allocations)) {
-                const [aromeId, formatId] = itemKey.split('|');
-                const arome = aromes.find(a => a.id === aromeId);
-                const format = formats.find(f => f.id === formatId);
-                const expectedArome = arome?.nom || aromeId;
-                const expectedFormat = format?.nom || formatId;
-                for (const { lotId, quantite } of group) {
-                    allocationsForTx.push({ lotId, quantite, itemKey, expectedArome, expectedFormat });
-                }
-            }
-
-            // UNE transaction Firestore multi-documents atomique
-            await deliverCommandeTransaction(commandeId, allocationsForTx);
-
-            // Succès
-            modal.hide();
-            showToast('Commande livrée et stock déduit avec succès');
-
-            // Prompt de génération BL (préservé)
-            confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
-                if (!ok) return;
-                prepareCommandeBLExport(commandeId);
-            });
-        } catch (e) {
-            console.error('Échec de la transaction de livraison :', e);
-            // Détecter les erreurs réseau Firebase pour message utilisateur clair
-            const isNetworkError = e && (
-                e.code === 'unavailable' ||
-                e.code === 'deadline-exceeded' ||
-                /firestore.*(network|unavailable|timeout)/i.test(e.message || '') ||
-                /ERR_NETWORK|ERR_CONNECTION|fetch/i.test(e.message || '')
-            );
-            const isAuthError = e && (e.code === 'permission-denied' || e.code === 'unauthenticated');
-            const isConcurrencyError = e && (e.code === 'aborted' || e.code === 'failed-precondition');
-            if (isAuthError) {
-                showToast(
-                    'Session expirée ou refusée par le serveur. ' +
-                    'Veuillez vous reconnecter puis réessayer la livraison. ' +
-                    'Aucun stock n\'a été déduit.',
-                    'error'
-                );
-            } else if (isConcurrencyError) {
-                showToast(
-                    'La commande ou les lots ont été modifiés sur un autre appareil. ' +
-                    'Rechargez la page et réessayez. Aucun stock n\'a été déduit.',
-                    'error'
-                );
-            } else if (isNetworkError) {
-                showToast(
-                    'Erreur réseau : la transaction n\'a pas pu aboutir. ' +
-                    'Vérifiez votre connexion et réessayez. Aucun stock n\'a été déduit.',
-                    'error'
-                );
-            } else {
-                showToast(e.message || 'Erreur lors de la livraison. Aucune modification effectuée.', 'error');
-            }
-            // Restaurer le bouton en cas d'échec
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = 'Confirmer la livraison';
-            }
-        }
-    };
-
-    const inputsByItemKey = () => {
-        const all = Array.from(document.querySelectorAll('.lot-qty-input'));
-        const map = {};
-        for (const inp of all) {
-            const key = inp.dataset.item;
-            if (key === undefined) continue;
-            if (!map[key]) map[key] = [];
-            map[key].push(inp);
-        }
-        return map;
-    };
-
-    const computeTotals = () => {
-        let totalAlloueGlobal = 0;
-        let ecarts = 0;
-        const byKey = inputsByItemKey();
-        for (const [itemKey, itemInputs] of Object.entries(byKey)) {
-            const total = itemInputs.reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
-            const totalEl = document.getElementById(`item-total-${itemKey}`.replace(/[^a-zA-Z0-9]/g, '_') + '-count');
-            if (totalEl) totalEl.textContent = total;
-        }
-        getItems(cmd).forEach(item => {
-            const itemKey = `${item.aromeId}|${item.formatId}`;
-            const itemInputs = byKey[itemKey] || [];
-            const total = itemInputs.reduce((s, inp) => s + (parseInt(inp.value, 10) || 0), 0);
-            totalAlloueGlobal += total;
-            if (total !== item.quantite) ecarts++;
-        });
-        const totalEl = document.getElementById('livraison-total-alloue');
-        const ecartsEl = document.getElementById('livraison-ecarts');
-        if (totalEl) totalEl.textContent = totalAlloueGlobal;
-        if (ecartsEl) ecartsEl.textContent = ecarts === 0 ? 'Aucun écart' : `${ecarts} écart(s)`;
-    };
-
-    modal.show(`Livrer commande #${getCommandeNumero(cmd)} — ${clientName}`, `
-        <div style="max-height: 65vh; overflow-y: auto;">
-            <div class="workflow-summary">
-                <div><span>Client</span><strong>${escapeHtml(clientName)}</strong></div>
-                <div><span>Commandé</span><strong>${totalItems}</strong></div>
-                <div><span>Alloué</span><strong id="livraison-total-alloue">0</strong></div>
-                <div><span>Écarts</span><strong id="livraison-ecarts">Calcul...</strong></div>
-            </div>
-            ${lignesHtml}
-        </div>
-    `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-success" id="confirm-livraison-btn">Confirmer la livraison</button>
-    `, 'large');
-
-    document.querySelectorAll('.lot-qty-input').forEach(input => {
-        input.addEventListener('input', computeTotals);
+    // Bouteilles prévues pour les AUTRES commandes (règle d'attribution commune)
+    const { parLot } = planAttributionCommandes(today);
+    const autresParLot = new Map();
+    parLot.forEach((liste, lotId) => {
+        const autres = liste.filter(r => r.commande.id !== commandeId);
+        if (autres.length) autresParLot.set(lotId, autres);
     });
 
-    document.getElementById('confirm-livraison-btn')?.addEventListener('click', validateAndDeliver);
-    computeTotals();
+    // Une ligne par arôme × format commandé (quantités cumulées)
+    const parCle = new Map();
+    getItems(cmd).forEach(item => {
+        if (item.enPlus) return;
+        const itemKey = `${item.aromeId}|${item.formatId}`;
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = resolveCommandeFormat(item, formats)?.format;
+        if (!parCle.has(itemKey)) {
+            parCle.set(itemKey, {
+                id: `l${parCle.size}`,
+                aromeId: item.aromeId,
+                formatId: item.formatId,
+                aromeNom: arome?.nom || '?',
+                formatNom: format?.nom || '?',
+                key: stockCellKey(arome?.nom || '', format?.nom || ''),
+                commande: 0,
+                horsCommande: false,
+                enPlusOuvert: false,
+                offert: false,
+                lots: [],
+                qte: {}
+            });
+        }
+        parCle.get(itemKey).commande += Number(item.quantite) || 0;
+    });
+    const lignes = [...parCle.values()];
+    lignes.forEach(l => {
+        l.lots = livraisonLotsPour(l.key, minJours, autresParLot, today);
+        remplirLigneLivraison(l, l.commande);
+    });
+
+    livraisonState = { commandeId, minJours, autresParLot, lignes, reliquatNumero: `#${prochainNumeroReliquat(getCommandeNumero(cmd))}` };
+
+    modal.show(`Livrer #${getCommandeNumero(cmd)} · ${clientName}`, `
+        <div class="liv-modal">
+            <p class="text-muted liv-intro">Livraison prévue ${escapeHtml(formatDate(cmd.dateLivraison))}${minJours ? ` · durée de vie minimale du client : ${minJours} j` : ''}</p>
+            <div id="livLignes">${lignes.map(livraisonLigneHtml).join('')}</div>
+            <div id="livHorsCommande" class="liv-hors" hidden></div>
+            <p id="livReliquatNote" class="trace-alert" hidden></p>
+            <p class="liv-aide">Proposé : DLV la plus proche d'abord, sans toucher aux bouteilles prévues pour d'autres commandes. Modifiable.</p>
+        </div>
+    `, `
+        ${rowMenuHtml('livraison', '<button type="button" data-click="livraison-hors-commande">Ajouter un article hors commande</button>')}
+        <span id="livRecap" class="liv-recap"></span>
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button class="btn btn-success" id="confirm-livraison-btn" data-click="livraison-confirmer">Livrer</button>
+    `, 'large');
+    majPiedLivraison();
+};
+
+const confirmerLivraison = async () => {
+    const state = livraisonState;
+    if (!state) return;
+    const btn = document.getElementById('confirm-livraison-btn');
+    if (btn?.disabled) return;
+
+    const allocations = [];
+    const extras = [];
+    let total = 0;
+    let partielle = false;
+    for (const ligne of state.lignes) {
+        const e = livraisonEtatLigne(ligne);
+        if (e.depasse) {
+            showToast(`${ligne.aromeNom} ${ligne.formatNom} : ${e.alloue} bt pour ${ligne.commande} commandées. Pour livrer plus, passez par ⋯ → « Ajouter des bouteilles en plus ».`, 'error');
+            return;
+        }
+        for (const l of ligne.lots) {
+            const q = ligne.qte[l.lot.id] || 0;
+            if (!q) continue;
+            if (!Number.isInteger(q) || q < 0 || q > l.max || l.tropCourt) {
+                showToast(`Quantité invalide sur le lot #${formatLotNumero(getLotNumero(l.lot))}`, 'error');
+                return;
+            }
+            allocations.push({
+                lotId: l.lot.id,
+                quantite: q,
+                itemKey: `${ligne.aromeId}|${ligne.formatId}`,
+                expectedArome: ligne.aromeNom,
+                expectedFormat: ligne.formatNom
+            });
+        }
+        if (e.enPlus > 0) extras.push({ aromeId: ligne.aromeId, formatId: ligne.formatId, quantite: e.enPlus, offert: !!ligne.offert });
+        if (e.reliquat > 0) partielle = true;
+        total += e.alloue;
+    }
+    if (total === 0) {
+        showToast('Aucune bouteille à livrer : saisissez au moins une quantité', 'error');
+        return;
+    }
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Livraison en cours…';
+    }
+    try {
+        const commande = (DB.get('commandes') || []).find(c => c.id === state.commandeId);
+        const options = { extras, partielle };
+        if (partielle) {
+            options.reliquatId = generateId();
+            options.reliquatNumero = prochainNumeroReliquat(getCommandeNumero(commande || {}));
+        }
+        // UNE transaction Firestore multi-documents atomique
+        const resultat = await deliverCommandeTransaction(state.commandeId, allocations, options);
+        livraisonState = null;
+        modal.hide();
+        showToast(`Commande livrée : ${total} bt, stock déduit`);
+        if (resultat?.reliquat) {
+            showToast(`Reliquat #${resultat.reliquat.numero} créé : ${getItems(resultat.reliquat).reduce((s, i) => s + (Number(i.quantite) || 0), 0)} bt en attente`, 'warning');
+        }
+        renderCurrentView();
+        confirmDialog('Générer un bulletin de livraison maintenant ?').then(ok => {
+            if (!ok) return;
+            prepareCommandeBLExport(state.commandeId);
+        });
+    } catch (e) {
+        console.error('Échec de la transaction de livraison :', e);
+        const isNetworkError = e && (
+            e.code === 'unavailable' ||
+            e.code === 'deadline-exceeded' ||
+            /firestore.*(network|unavailable|timeout)/i.test(e.message || '') ||
+            /ERR_NETWORK|ERR_CONNECTION|fetch/i.test(e.message || '')
+        );
+        const isAuthError = e && (e.code === 'permission-denied' || e.code === 'unauthenticated');
+        const isConcurrencyError = e && (e.code === 'aborted' || e.code === 'failed-precondition');
+        if (isAuthError) {
+            showToast('Session expirée ou refusée par le serveur. Reconnectez-vous puis réessayez la livraison. Aucun stock n\'a été déduit.', 'error');
+        } else if (isConcurrencyError) {
+            showToast('La commande ou les lots ont été modifiés sur un autre appareil. Rechargez la page et réessayez. Aucun stock n\'a été déduit.', 'error');
+        } else if (isNetworkError) {
+            showToast('Erreur réseau : la transaction n\'a pas pu aboutir. Vérifiez votre connexion et réessayez. Aucun stock n\'a été déduit.', 'error');
+        } else {
+            showToast(e.message || 'Erreur lors de la livraison. Aucune modification effectuée.', 'error');
+        }
+        if (btn) {
+            btn.disabled = false;
+            majPiedLivraison();
+        }
+    }
 };
 
 const checkStockAndUpdateCommandes = () => {
@@ -12549,8 +12839,12 @@ const checkStockAndUpdateCommandes = () => {
     const lots = DB.get('lots') || [];
     const formats = DB.get('formats') || [];
     const aromes = DB.get('aromes') || [];
+    const clients = DB.get('clients') || [];
     const now = new Date();
-    const stockPool = createStockPool(lots, now);
+    // Même rapprochement que la règle d'attribution : noms normalisés, durée de
+    // vie minimale du client, bouteilles « en plus » ignorées
+    const stockPool = createStockPool(lots, now, lot => stockCellKey(lot.arome, lot.format));
+    const minJoursDe = (cmd) => clientDureeVieMin(clients.find(c => c.id === cmd.clientId));
     let updatedCount = 0;
 
     const commandesTriees = sortCommandesByDateLivraison(commandes);
@@ -12560,11 +12854,12 @@ const checkStockAndUpdateCommandes = () => {
     const besoinsDe = (cmd) => {
         const needed = {};
         for (const item of getItems(cmd)) {
+            if (item.enPlus) continue;
             const quantite = Number(item.quantite);
             if (!Number.isInteger(quantite) || quantite <= 0) return null;
-            const format = formats.find(f => f.id === item.formatId);
+            const format = resolveCommandeFormat(item, formats)?.format;
             const arome = aromes.find(a => a.id === item.aromeId);
-            const key = `${arome?.nom || item.aromeId}-${format?.nom || item.formatId}`;
+            const key = stockCellKey(arome?.nom || item.aromeId, format?.nom || item.formatId);
             needed[key] = (needed[key] || 0) + quantite;
         }
         return needed;
@@ -12575,7 +12870,7 @@ const checkStockAndUpdateCommandes = () => {
     commandesTriees.forEach(({ commande: cmd }) => {
         if (cmd.statut !== 'produite') return;
         Object.entries(besoinsDe(cmd) || {}).forEach(([key, qty]) => {
-            stockPool.take(key, qty, cmd.dateLivraison);
+            stockPool.take(key, qty, cmd.dateLivraison, minJoursDe(cmd));
         });
     });
 
@@ -12583,10 +12878,11 @@ const checkStockAndUpdateCommandes = () => {
         if (cmd.statut !== 'en_attente' || getItems(cmd).length === 0) return;
         const needed = besoinsDe(cmd);
         if (!needed) return;
-        const canProduce = Object.entries(needed).every(([key, qty]) => stockPool.available(key, cmd.dateLivraison) >= qty);
+        const minJours = minJoursDe(cmd);
+        const canProduce = Object.entries(needed).every(([key, qty]) => stockPool.available(key, cmd.dateLivraison, minJours) >= qty);
         if (!canProduce) return;
         Object.entries(needed).forEach(([key, qty]) => {
-            stockPool.take(key, qty, cmd.dateLivraison);
+            stockPool.take(key, qty, cmd.dateLivraison, minJours);
         });
         updatedCount++;
         updatedCommandes[index] = { ...cmd, statut: 'produite' };
@@ -12620,11 +12916,16 @@ const showCommandeDetails = (id) => {
         const arome = aromes.find(a => a.id === item.aromeId);
         const format = formats.find(f => f.id === item.formatId);
         return `<tr>
-            <td>${escapeHtml(arome?.nom || '?')}</td>
+            <td>${escapeHtml(arome?.nom || '?')}${item.enPlus ? ` <span class="stock-tag">${item.offert ? 'en plus · offert' : 'en plus'}</span>` : ''}</td>
             <td>${escapeHtml(format?.nom || '?')}</td>
-            <td>${escapeHtml(String(item.quantite))}</td>
+            <td>${item.enPlus ? '+' : ''}${escapeHtml(String(item.quantite))}</td>
         </tr>`;
     }).join('');
+    // Livraison partielle : liens entre la commande livrée et son reliquat
+    const lienCommande = (cid) => {
+        const c = commandes.find(x => x.id === cid);
+        return c ? `<a href="#" data-click="show-commande-details" data-id="${escapeHtml(c.id)}" data-prevent>#${escapeHtml(getCommandeNumero(c))}</a> (${escapeHtml(getCommandeStatutLabel(c.statut).toLowerCase())})` : '—';
+    };
 
     const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0
         ? commande.lotsUtilises.map(lot => `
@@ -12650,6 +12951,8 @@ const showCommandeDetails = (id) => {
             <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
             ${commande.dateLivraisonEffective ? `<p><strong>Livrée le:</strong> ${formatDateTime(commande.dateLivraisonEffective)}</p>` : ''}
             <p><strong>Statut:</strong> ${escapeHtml(getCommandeStatutLabel(commande.statut))}</p>
+            ${commande.reliquatDe ? `<p><strong>Reliquat de:</strong> ${lienCommande(commande.reliquatDe)}</p>` : ''}
+            ${commande.reliquatId ? `<p><strong>Reliquat:</strong> ${lienCommande(commande.reliquatId)}</p>` : ''}
             ${renderStepTracker(commande.statut)}
             <p><strong>Total:</strong> ${totalItems} articles</p>
             <table class="details-table">
@@ -12735,9 +13038,10 @@ const duplicateCommande = (id) => {
     if (!original) return;
     // Rien n'est enregistré ici : la copie n'existe qu'au clic sur Enregistrer
     modal.hide();
+    // Seules les quantités commandées sont reprises (pas les bouteilles livrées en plus)
     showCommandeModal(null, {
         clientId: original.clientId,
-        items: (original.items || []).map(i => ({ ...i }))
+        items: getItems(original).filter(i => !i.enPlus).map(({ enPlus, offert, ...i }) => ({ ...i }))
     });
 };
 
@@ -12822,7 +13126,7 @@ const renderArchives = () => {
                                 const articlesPreview = safeItems.slice(0, 2).map(i => {
                                     const a = aromes.find(a => a.id === i.aromeId);
                                     const f = formats.find(f => f.id === i.formatId);
-                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`);
+                                    return escapeHtml(`${i.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}${libelleEnPlus(i)}`);
                                 }).join(', ');
 
                                 return `
@@ -12860,7 +13164,7 @@ const exportArchivesExcel = () => {
         const items = getItems(cmd).map(item => {
             const a = aromes.find(a => a.id === item.aromeId);
             const f = formats.find(f => f.id === item.formatId);
-            return `${item.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}`;
+            return `${item.quantite}x ${a?.nom || '?'} ${f?.nom || '?'}${libelleEnPlus(item)}`;
         }).join(', ');
 
         return {
@@ -14028,8 +14332,11 @@ const computeProductionPlan = () => {
     const recettes = DB.get('recettes');
     const lots = DB.get('lots') || [];
 
+    const clients = DB.get('clients') || [];
     const now = new Date();
-    const stockPool = createStockPool(lots, now);
+    // Réserve rapprochée par noms normalisés, comme la règle d'attribution
+    const stockPool = createStockPool(lots, now, lot => stockCellKey(lot.arome, lot.format));
+    const cleStock = (b) => stockCellKey(b.aromeNom, b.formatNom);
 
     const besoins = {};
     let commandesAInclure = [];
@@ -14069,7 +14376,9 @@ const computeProductionPlan = () => {
         // Par date de livraison croissante : chaque commande ne consomme que les
         // lots encore vendables à sa date de livraison (DLV croissante).
         sortCommandesByDateLivraison(commandesAInclure).forEach(({ commande: cmd }) => {
+            const minJours = clientDureeVieMin(clients.find(c => c.id === cmd.clientId));
             (cmd.items || []).forEach(item => {
+                if (item.enPlus) return;
                 const arome = aromes.find(a => a.id === item.aromeId);
                 const format = formats.find(f => f.id === item.formatId);
                 const key = `${arome?.nom || ''}-${format?.nom || ''}`;
@@ -14077,7 +14386,7 @@ const computeProductionPlan = () => {
                     besoins[key] = { aromeId: item.aromeId, formatId: item.formatId, aromeNom: arome?.nom || '', formatNom: format?.nom || '', quantite: 0, disponible: 0 };
                 }
                 besoins[key].quantite += item.quantite;
-                besoins[key].disponible += stockPool.take(key, Number(item.quantite) || 0, cmd.dateLivraison);
+                besoins[key].disponible += stockPool.take(cleStock(besoins[key]), Number(item.quantite) || 0, cmd.dateLivraison, minJours);
             });
         });
     }
@@ -14086,7 +14395,7 @@ const computeProductionPlan = () => {
     // saisie ; en mode auto on déduit le stock vendable à la date de livraison.
     const productionNecesaire = {};
     Object.entries(besoins).forEach(([key, b]) => {
-        const disponible = productionMode === 'manuel' ? stockPool.available(key) : b.disponible;
+        const disponible = productionMode === 'manuel' ? stockPool.available(cleStock(b)) : b.disponible;
         const aProduire = productionMode === 'manuel' ? b.quantite : Math.max(0, b.quantite - disponible);
         productionNecesaire[key] = { ...b, disponible, aProduire };
     });
@@ -16788,6 +17097,11 @@ const showClientModal = (id = null) => {
                 </div>
             </div>
             <div class="form-group">
+                <label for="clientDureeVie">Durée de vie minimale à la livraison (jours)</label>
+                <input type="number" id="clientDureeVie" name="dureeVieMinJours" min="0" step="1" inputmode="numeric" value="${clientDureeVieMin(client) || ''}" placeholder="Aucune exigence">
+                <small class="text-muted">Les lots dont la DLV arrive avant ce délai ne sont pas proposés pour ce client.</small>
+            </div>
+            <div class="form-group">
                 <label class="checkbox-label">
                     <input type="checkbox" name="actif" ${client?.actif !== false ? 'checked' : ''}>
                     Actif
@@ -16819,6 +17133,7 @@ const saveClient = (event, id) => {
             prix100cl: formData.get('prix100cl') || '',
             modeFact: formData.get('modeFact') || '',
             coord: formData.get('coord') || '',
+            dureeVieMinJours: Math.max(0, parseInt(formData.get('dureeVieMinJours'), 10) || 0),
             actif: form.querySelector('input[name="actif"]').checked
         };
         if (!client.societe.trim() && !client.nom.trim()) {
@@ -16829,7 +17144,14 @@ const saveClient = (event, id) => {
         const clients = DB.get('clients');
         if (id) {
             const index = clients.findIndex(c => c.id === id);
-            clients[index] = client;
+            if (index === -1) {
+                modal.hide();
+                showToast('Client introuvable : il a peut-être été supprimé sur un autre appareil', 'error');
+                renderCurrentView();
+                return;
+            }
+            // Fusion : garde les champs absents du formulaire (ponctuel, email…)
+            clients[index] = { ...clients[index], ...client };
         } else {
             clients.push(client);
         }

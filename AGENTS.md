@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.9
+**Current Version:** v13.0
 
 ## 1. Build, Lint, and Test Commands
 
@@ -58,7 +58,7 @@ The `navigateTo(page)` function looks up the page name in a views map and calls 
 - `dashboard` - Cockpit du jour (v12.6) : tuiles cliquables, priorités, livraisons sur 7 jours, production à lancer sur les postes de l'atelier, équipe, tâches ; puis « Chiffres & tendances » (CA ou bouteilles livrés sur 12 semaines / 12 mois, meilleurs clients, ventes par arôme). Lecture seule, réutilise `buildTwinModel()`
 - `stock` - Stock (v12.7) : bandeau « À traiter », tableau arôme × format des bouteilles libres / réservées / à produire (`buildStockOverview`), lots groupés par arôme × format triés par DLV, lots hors vente à part ; historique de production, statuts DLV/DLC
 - `pointage` - Saisie des heures employés avec tabs: pointage, historique, stats, employés
-- `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée)
+- `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée) ; livraison v13.0 : lots pré-remplis par la règle d'attribution commune (`planAttributionCommandes`, durée de vie minimale par client), livraison partielle avec reliquat, bouteilles en plus (⋯) facturées ou offertes, contrôle du stock avant « Marquer produite »
 - `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF (design fidèle au template depuis v11.10)
 - `production` - Planificateur de production avec calcul automatique des ingrédients et gestion des cuves
 - `inventaire` - Inventaire (v12.9) : « À commander » d'après les commandes à produire et les seuils, ingrédients suivis par lot fournisseur (réception, ordre d'utilisation, rappel fournisseur), contenants, équipement
