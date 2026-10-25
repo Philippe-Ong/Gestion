@@ -879,6 +879,8 @@ const initEventDelegation = () => {
     window.__delegationReady = true;
     document.addEventListener('click', _onClick);
     document.addEventListener('change', _onChange);
+    initRowMenus();
+    initLiveSearch();
 };
 
 // ---------------------------------------------------------------------------
@@ -2819,6 +2821,57 @@ const renderEmptyState = (message, actionHtml = '') => `
     </div>
 `;
 
+// En-tête de page (v12.8) : le titre est celui de la barre du haut (#pageTitle) ;
+// la page n'affiche qu'une barre d'outils — à gauche des onglets ou un sélecteur
+// de mode, à droite ses actions (l'action principale en dernier).
+const pageToolbar = (actionsHtml = '', leadHtml = '') => (actionsHtml || leadHtml) ? `
+    <div class="page-toolbar">
+        ${leadHtml ? `<div class="page-toolbar-lead">${leadHtml}</div>` : ''}
+        ${actionsHtml ? `<div class="page-toolbar-actions">${actionsHtml}</div>` : ''}
+    </div>` : '';
+
+const ROW_MENU_ICON ='<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+
+// Menu « ⋯ » d'une ligne : actions secondaires, dont les suppressions (v12.8).
+// `label` (texte brut) nomme la ligne pour les lecteurs d'écran.
+const rowMenuHtml = (label, itemsHtml) => `
+    <details class="row-menu">
+        <summary class="btn btn-sm btn-secondary row-menu-btn" aria-label="${escapeHtml(`Autres actions : ${label}`)}">${ROW_MENU_ICON}</summary>
+        <div class="row-menu-list">${itemsHtml}</div>
+    </details>`;
+
+// Menus « ⋯ » : un seul ouvert à la fois, fermé par un clic ailleurs, par Échap
+// ou après le choix d'une action.
+const initRowMenus = () => {
+    if (window.__rowMenusReady) return;
+    window.__rowMenusReady = true;
+    document.addEventListener('click', (e) => {
+        const inside = e.target.closest?.('.row-menu');
+        const choix = e.target.closest?.('.row-menu-list button');
+        document.querySelectorAll('.row-menu[open]').forEach(menu => {
+            if (menu !== inside || choix) menu.removeAttribute('open');
+        });
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        const open = document.querySelector('.row-menu[open]');
+        if (!open) return;
+        open.removeAttribute('open');
+        open.querySelector('summary')?.focus();
+    });
+    // Ouvrir vers le haut quand le bas de l'écran (barre d'onglets mobile) masquerait
+    // le menu ; « toggle » ne remonte pas, d'où la capture.
+    document.addEventListener('toggle', (e) => {
+        const menu = e.target;
+        if (!menu.classList?.contains('row-menu') || !menu.open) return;
+        menu.classList.remove('is-up');
+        const list = menu.querySelector('.row-menu-list');
+        const rect = menu.getBoundingClientRect();
+        const marge = list ? list.offsetHeight + 90 : 0;
+        if (list && window.innerHeight - rect.bottom < marge && rect.top > marge) menu.classList.add('is-up');
+    }, true);
+};
+
 const formatChf = (n) => {
     if (n === null || n === undefined || isNaN(n)) return 'CHF \u2014';
     if (n === 0) return 'CHF 0.\u2013';
@@ -3275,13 +3328,13 @@ const navigateTo = (page) => {
     const titles = {
         jumeau: 'Jumeau numérique',
         dashboard: 'Tableau de bord',
-        stock: 'Gestion du stock',
+        stock: 'Stock',
         pointage: 'Pointage',
         commandes: 'Commandes',
         livraisons: 'Livraisons',
         archives: 'Archives',
-        production: 'Planificateur de production',
-        historique: 'Historique de production',
+        production: 'Production',
+        historique: 'Historique',
         inventaire: 'Inventaire',
         parametres: 'Paramètres'
     };
@@ -8471,7 +8524,9 @@ const stockSubTabs = (active) => `
 // Champ : <input data-live-search="<filtre>">, filtre déclaré ci-dessous.
 const LIVE_SEARCH_RENDERS = {
     stockQuery: () => renderStockLots(),
-    histQuery: () => renderHistorique()
+    histQuery: () => renderHistorique(),
+    livraison_search: () => renderLivraisons(),
+    inventaire_search: () => renderInventaire()
 };
 let liveSearchTimer = null;
 const onLiveSearchInput = (el) => {
@@ -8683,47 +8738,6 @@ const stockLotDates = (lot) => [
     ['Prod.', lot.dateProduction], ['DLV', lot.dlv], ['DLC', lot.dlc]
 ].filter(([, d]) => d && isValidDateOnly(d)).map(([label, d]) => `${label} ${formatDate(d)}`).join(' · ');
 
-const STOCK_DOTS_ICON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
-
-// Menu « ⋯ » d'un lot (actions secondaires)
-const lotMenuHtml = (numLot, itemsHtml) => `
-    <details class="lot-menu">
-        <summary class="btn btn-sm btn-secondary lot-menu-btn" aria-label="Autres actions pour le lot #${numLot}">${STOCK_DOTS_ICON}</summary>
-        <div class="lot-menu-list">${itemsHtml}</div>
-    </details>`;
-
-// Menus « ⋯ » : un seul ouvert à la fois, fermé par un clic ailleurs, par Échap
-// ou après le choix d'une action.
-const initLotMenus = () => {
-    if (window.__lotMenusReady) return;
-    window.__lotMenusReady = true;
-    document.addEventListener('click', (e) => {
-        const inside = e.target.closest?.('.lot-menu');
-        const choix = e.target.closest?.('.lot-menu-list button');
-        document.querySelectorAll('.lot-menu[open]').forEach(menu => {
-            if (menu !== inside || choix) menu.removeAttribute('open');
-        });
-    });
-    document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        const open = document.querySelector('.lot-menu[open]');
-        if (!open) return;
-        open.removeAttribute('open');
-        open.querySelector('summary')?.focus();
-    });
-    // Ouvrir vers le haut quand le bas de l'écran (barre d'onglets mobile) masquerait
-    // le menu ; « toggle » ne remonte pas, d'où la capture.
-    document.addEventListener('toggle', (e) => {
-        const menu = e.target;
-        if (!menu.classList?.contains('lot-menu') || !menu.open) return;
-        menu.classList.remove('is-up');
-        const list = menu.querySelector('.lot-menu-list');
-        const rect = menu.getBoundingClientRect();
-        const marge = list ? list.offsetHeight + 90 : 0;
-        if (list && window.innerHeight - rect.bottom < marge && rect.top > marge) menu.classList.add('is-up');
-    }, true);
-};
-
 const stockLotRowHtml = (lot, { premier = false, now = new Date() } = {}) => {
     const id = escapeHtml(lot.id);
     const num = escapeHtml(formatLotNumero(getLotNumero(lot)));
@@ -8742,7 +8756,7 @@ const stockLotRowHtml = (lot, { premier = false, now = new Date() } = {}) => {
             </div>
             <div class="stock-lot-actions">
                 <button type="button" class="btn btn-sm btn-success" data-click="sell-lot" data-id="${id}" title="Vente directe, dégustation, casse ou destruction">Sortie</button>
-                ${lotMenuHtml(num, `
+                ${rowMenuHtml(`lot #${formatLotNumero(getLotNumero(lot))}`, `
                     <button type="button" data-click="show-lot-trace" data-id="${id}">Tracer</button>
                     <button type="button" data-click="edit-lot" data-id="${id}">Modifier</button>
                     <button type="button" class="is-danger" data-click="delete-lot" data-id="${id}">Supprimer</button>`)}
@@ -8764,7 +8778,7 @@ const stockHorsVenteRowHtml = (ov, lot, now) => {
         : lot.bloque
             ? `<button type="button" class="btn btn-sm btn-secondary" data-click="show-lot-rappel" data-num="${escapeHtml(getLotNumero(lot))}">Rappel</button>`
             : `<button type="button" class="btn btn-sm btn-secondary" data-click="sell-lot" data-id="${id}" title="Destruction, casse ou dégustation">Sortir</button>`;
-    const menu = lotMenuHtml(num, `
+    const menu = rowMenuHtml(`lot #${formatLotNumero(getLotNumero(lot))}`, `
         ${lot.bloque && !qtyInvalide ? `<button type="button" data-click="sell-lot" data-id="${id}">Sortie</button>` : ''}
         <button type="button" data-click="show-lot-trace" data-id="${id}">Tracer</button>
         ${qtyInvalide ? '' : `<button type="button" data-click="edit-lot" data-id="${id}">Modifier</button>`}
@@ -9067,12 +9081,7 @@ const renderStock = () => {
     const selected = DB.getFilter('stockCell') || '';
 
     const html = `
-        <div class="commandes-toolbar">
-            <h1>Stock</h1>
-            <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
-        </div>
-
-        ${stockSubTabs('lots')}
+        ${pageToolbar('<button type="button" class="btn btn-primary" onclick="showNouveauLotModal()">+ Lot</button>', stockSubTabs('lots'))}
 
         <div class="stock-search">
             <svg class="stock-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -9089,8 +9098,6 @@ const renderStock = () => {
     `;
 
     safeRender(html);
-    initLotMenus();
-    initLiveSearch();
     // Re-rendu pendant la saisie (synchro d'un autre appareil) : garder le focus
     if (search) {
         const input = document.getElementById('stockSearch');
@@ -9415,12 +9422,7 @@ const renderHistorique = () => {
         }).join('');
 
     const html = `
-        <div class="commandes-toolbar">
-            <h1>Historique</h1>
-            <button class="btn btn-primary btn-sm" onclick="showNouveauLotModal()">+ Lot</button>
-        </div>
-
-        ${stockSubTabs('historique')}
+        ${pageToolbar('<button type="button" class="btn btn-primary" onclick="showNouveauLotModal()">+ Lot</button>', stockSubTabs('historique'))}
 
         <div class="hist-summary">
             <button type="button" class="hist-summary-stat hist-summary-stat-btn" onclick="showProductionStatsModal()" aria-label="Voir les statistiques de production">
@@ -9483,7 +9485,6 @@ const renderHistorique = () => {
     `;
 
     safeRender(html);
-    initLiveSearch();
 };
 
 const showProductionStatsModal = () => {
@@ -10849,10 +10850,6 @@ const renderPointage = (_tabIgnored) => {
         .sort((a, b) => (a.heureDebut || '').localeCompare(b.heureDebut || ''));
 
     safeRender(`
-        <div class="page-header-big">
-            <h1>Pointage</h1>
-        </div>
-
         <div class="pointage-hero">
             <div class="section-label">${selectedEmp ? escapeHtml(selectedEmp.prenom + ' ' + (selectedEmp.nom || '')) : 'Aucun employé sélectionné'}</div>
             <div class="pointage-clock-big current-time">${currentTime}</div>
@@ -10940,7 +10937,7 @@ const renderPointage = (_tabIgnored) => {
                     </div>
                     <div class="history-row-total">
                         <button type="button" class="btn btn-sm btn-secondary" data-click="cloturer-pointage" data-id="${escapeHtml(p.id)}">Clôturer</button>
-                        <button type="button" class="btn btn-sm btn-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
+                        ${rowMenuHtml(`pointage du ${formatDate(p.date)}`, `<button type="button" class="is-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>`)}
                     </div>
                 </div>`;
             }).join('')}
@@ -11036,7 +11033,7 @@ const renderHistoriqueTable = (pointages, employes) => {
                 <td>${p.pause || 0} min</td>
                 <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
                 <td>
-                    <button class="btn btn-sm btn-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
+                    <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
                 </td>
             </tr>
         `;
@@ -11308,6 +11305,9 @@ const renderCommandes = () => {
     const savedFilterStatut = DB.getFilter('statut') || '';
     const savedFilterClient = DB.getFilter('commandeClient') || '';
     const showArchives = localStorage.getItem('thecol_show_archives') === 'true';
+    // Le titre de la barre du haut suit le mode (commandes actives ou archives)
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = showArchives ? 'Archives' : 'Commandes';
 
     const allCommandes = DB.get('commandes') || [];
     const commandesScope = showArchives
@@ -11381,18 +11381,15 @@ const renderCommandes = () => {
         }).join('');
 
     const html = `
-        <div class="commandes-toolbar">
-            <h1>${showArchives ? 'Archives' : 'Commandes'}</h1>
-            <div class="header-actions" style="display:flex; gap:8px;">
-                <button class="btn btn-ghost btn-sm" onclick="toggleArchives()" title="${showArchives ? 'Voir commandes actives' : 'Voir archives'}">
-                    ${showArchives ? '← Actives' : 'Archives'}
-                </button>
-                ${showArchives
-                    ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
-                    : `<button class="btn btn-ghost btn-sm" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock libre (hors bouteilles réservées aux commandes déjà produites)">✓ Stock</button>
-                       <button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
-            </div>
-        </div>
+        ${pageToolbar(`
+            <button type="button" class="btn btn-secondary" onclick="toggleArchives()" title="${showArchives ? 'Voir commandes actives' : 'Voir archives'}">
+                ${showArchives ? '← Actives' : 'Archives'}
+            </button>
+            ${showArchives
+                ? `<button type="button" class="btn btn-secondary" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
+                : `<button type="button" class="btn btn-secondary" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock libre (hors bouteilles réservées aux commandes déjà produites)">✓ Stock</button>
+                   <button type="button" class="btn btn-primary" onclick="showCommandeModal()">+ Créer</button>`}
+        `)}
 
         ${!showArchives ? renderWeekCalendar(commandesByDate) : ''}
 
@@ -12711,14 +12708,12 @@ const renderArchives = () => {
     const filteredCommandes = getArchivesFiltrees(commandes);
 
     let html = `
+        ${pageToolbar(`
+            <button type="button" class="btn btn-secondary" onclick="exportArchivesExcel()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Exporter Excel
+            </button>`)}
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Archives des commandes</h3>
-                <button class="btn btn-secondary" onclick="exportArchivesExcel()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    Exporter Excel
-                </button>
-            </div>
 
             <div class="filters">
                 <select id="filterArchiveYear" onchange="DB.setFilter('archive_year', this.value); renderArchives()">
@@ -12865,12 +12860,8 @@ const renderLivraisons = () => {
 
     let html = `
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Bulletins de Livraison</h3>
-            </div>
-
             <div class="filters">
-                <input type="search" id="filterLivraisonSearch" placeholder="Rechercher BL, client, commande, n° de lot..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('livraison_search', this.value); window.__focusLivraisonSearch = true; renderLivraisons()">
+                <input type="search" id="filterLivraisonSearch" placeholder="Rechercher BL, client, commande, n° de lot..." value="${escapeHtml(savedSearch)}" aria-label="Rechercher un bulletin de livraison" data-live-search="livraison_search">
                 <select id="filterLivraisonYear" onchange="DB.setFilter('livraison_year', this.value); renderLivraisons()">
                     <option value="">Toutes les années</option>
                     ${years.map(y => `<option value="${y}" ${savedFilterYear === y ? 'selected' : ''}>${y}</option>`).join('')}
@@ -12911,9 +12902,9 @@ const renderLivraisons = () => {
                                 <span class="text-muted" style="font-size: 11px;">${escapeHtml(lastExport)}</span>
                             </div>
                             <div class="lot-card-actions" style="margin-top: 10px;">
-                                <button class="btn btn-sm btn-secondary" data-click="show-livraison-details" data-id="${escapeHtml(liv.id)}">Détails</button>
                                 <button class="btn btn-sm btn-primary" data-click="prepare-bl-export" data-id="${escapeHtml(liv.id)}">Préparer / Exporter</button>
-                                <button class="btn btn-sm btn-danger" data-click="delete-livraison" data-id="${escapeHtml(liv.id)}">Supprimer</button>
+                                <button class="btn btn-sm btn-secondary" data-click="show-livraison-details" data-id="${escapeHtml(liv.id)}">Détails</button>
+                                ${rowMenuHtml(`BL-${getBLNumero(liv)}`, `<button type="button" class="is-danger" data-click="delete-livraison" data-id="${escapeHtml(liv.id)}">Supprimer</button>`)}
                             </div>
                         </div>`;
                     }).join('')}
@@ -12922,15 +12913,6 @@ const renderLivraisons = () => {
     `;
 
     safeRender(html);
-
-    if (window.__focusLivraisonSearch) {
-        const input = document.getElementById('filterLivraisonSearch');
-        if (input) {
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-        }
-        window.__focusLivraisonSearch = false;
-    }
 };
 
 const showLivraisonDetails = (id) => {
@@ -13437,10 +13419,10 @@ const exportBLPDF = (livraisonId) => {
             .pdf-cell { display: flex; align-items: center; min-width: 0; padding: 0 1mm; overflow: hidden; white-space: nowrap; }
             .pdf-qtt { justify-content: center; font-weight: 600; }
             .pdf-format { justify-content: flex-end; text-align: right; }
-            .pdf-ifco { left: 25.4mm; width: 13mm; font-size: 10.5px; font-weight: 700; text-align: center; }
+            .pdf-ifco { left: 25.4mm; width: 13mm; font-size: 11px; font-weight: 700; text-align: center; }
             .pdf-ifco-green { top: 154.7mm; }
             .pdf-ifco-black { top: 160mm; }
-            .pdf-fact-mark { left: 115.5mm; width: 8mm; font-size: 10.5px; font-weight: 700; text-align: center; }
+            .pdf-fact-mark { left: 115.5mm; width: 8mm; font-size: 11px; font-weight: 700; text-align: center; }
             .pdf-fact-email { top: 149mm; }
             .pdf-fact-poste { top: 154.35mm; }
             .pdf-fact-other { top: 159.7mm; }
@@ -14394,12 +14376,9 @@ const renderProduction = () => {
     }
 
     const html = `
+        ${pageToolbar('', modeToggleHtml)}
         <div id="productionKpi">${buildProductionKpiHtml(plan)}</div>
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Planificateur de production</h3>
-                ${modeToggleHtml}
-            </div>
             ${toolbarHtml}
             <div id="productionResults">${buildProductionResultsHtml(plan)}</div>
         </div>
@@ -15096,6 +15075,29 @@ const ensureContainerConsommables = (items) => {
     return items;
 };
 
+// Carte d'un article : quantité modifiable, alerte de seuil dans la carte,
+// Modifier et Supprimer dans le menu ⋯
+const inventaireItemHtml = (item, type) => {
+    const id = escapeHtml(item.id);
+    const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
+    return `
+        <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
+            <div class="inventaire-item-head">
+                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
+                ${rowMenuHtml(item.nom, `
+                    <button type="button" data-click="show-inventaire-modal" data-type="${type}" data-id="${id}">Modifier</button>
+                    <button type="button" class="is-danger" data-click="delete-inventaire-item" data-id="${id}">Supprimer</button>`)}
+            </div>
+            <div class="inventaire-qty-controls">
+                <button type="button" class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${id}" data-delta="-1" aria-label="${escapeHtml(`Retirer 1 ${item.unite || ''} de ${item.nom}`)}">−</button>
+                <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${id}" aria-label="${escapeHtml(`Quantité de ${item.nom}`)}">
+                <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
+                <button type="button" class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${id}" data-delta="1" aria-label="${escapeHtml(`Ajouter 1 ${item.unite || ''} à ${item.nom}`)}">+</button>
+            </div>
+            ${isAlerte ? `<div class="inventaire-alerte-text">Sous le seuil de ${escapeHtml(String(item.seuilAlerte))} ${escapeHtml(displayUnit(item.unite))}</div>` : ''}
+        </div>`;
+};
+
 // Inventaire
 const renderInventaire = () => {
     // Initialize default consumables if list is empty
@@ -15149,6 +15151,9 @@ const renderInventaire = () => {
     const unités = ['pcs', 'kg', 'L', 'mL', 'g', 'm', 'caisse(s)'];
 
     let html = `
+        ${pageToolbar(`
+            <button type="button" class="btn btn-secondary" onclick="showInventaireModal('equipement')">+ Équipement</button>
+            <button type="button" class="btn btn-primary" onclick="showInventaireModal('consommable')">+ Consommable</button>`)}
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-icon blue">
@@ -15189,14 +15194,6 @@ const renderInventaire = () => {
         ` : ''}
 
         <div class="card">
-            <div class="card-header">
-                <h3 class="card-title">Inventaire</h3>
-                <div class="card-actions">
-                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('consommable')">+ Consommable</button>
-                    <button class="btn btn-sm btn-secondary" onclick="showInventaireModal('equipement')">+ Équipement</button>
-                </div>
-            </div>
-
             <div class="filters">
                 ${renderSegmentedFilter('inventaire_type', savedType, [
                     { value: 'tous', label: 'Tous' },
@@ -15204,7 +15201,7 @@ const renderInventaire = () => {
                     { value: 'consommable', label: 'Consommables' },
                     { value: 'equipement', label: 'Équipement' }
                 ], 'renderInventaire')}
-                <input type="search" id="filterInventaireSearch" placeholder="Rechercher un item..." value="${escapeHtml(savedSearch)}" oninput="DB.setFilter('inventaire_search', this.value); window.__focusInventaireSearch = true; renderInventaire()">
+                <input type="search" id="filterInventaireSearch" placeholder="Rechercher un item..." value="${escapeHtml(savedSearch)}" aria-label="Rechercher un article" data-live-search="inventaire_search">
             </div>
 
             <!-- Consommables Section -->
@@ -15212,25 +15209,7 @@ const renderInventaire = () => {
                 <h4>Consommables</h4>
                 <div class="inventaire-grid">
                     ${consommables.length === 0 ? renderEmptyState('Aucun consommable trouvé.', '<button class="btn btn-primary" onclick="showInventaireModal(\'consommable\')">Ajouter un consommable</button>') :
-                        consommables.map(item => {
-                            const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-                            return `
-                            <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
-                                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
-                                <div class="inventaire-qty-controls">
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="-1">−</button>
-                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${escapeHtml(item.id)}">
-                                    <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="1">+</button>
-                                </div>
-                                <div class="inventaire-item-actions">
-                                    <button class="btn btn-sm btn-secondary" data-click="show-inventaire-modal" data-type="consommable" data-id="${escapeHtml(item.id)}">✏️</button>
-                                    <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
-                                </div>
-                            </div>
-                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
-                          `;
-                      }).join('')}
+                        consommables.map(item => inventaireItemHtml(item, 'consommable')).join('')}
                 </div>
             </div>
 
@@ -15244,39 +15223,13 @@ const renderInventaire = () => {
                 </h4>
                 <div class="inventaire-grid collapse-content" id="equipementContent">
                     ${equipement.length === 0 ? renderEmptyState('Aucun équipement trouvé.', '<button class="btn btn-primary" onclick="showInventaireModal(\'equipement\')">Ajouter un équipement</button>') :
-                      equipement.map(item => {
-                            const isAlerte = item.seuilAlerte && item.quantite <= item.seuilAlerte;
-                            return `
-                            <div class="inventaire-item ${isAlerte ? 'alerte' : ''}">
-                                <span class="inventaire-item-name">${escapeHtml(item.nom)}</span>
-                                <div class="inventaire-qty-controls">
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="-1">−</button>
-                                    <input class="inventaire-qty-input" type="number" step="0.01" value="${escapeHtml(safeNumAttr(item.quantite))}" data-change="set-inventaire-qty" data-id="${escapeHtml(item.id)}">
-                                    <span class="inventaire-unit">${escapeHtml(item.unite)}</span>
-                                    <button class="btn btn-sm btn-secondary" data-click="update-inventaire-qty" data-id="${escapeHtml(item.id)}" data-delta="1">+</button>
-                                </div>
-                                <div class="inventaire-item-actions">
-                                    <button class="btn btn-sm btn-secondary" data-click="show-inventaire-modal" data-type="equipement" data-id="${escapeHtml(item.id)}">✏️</button>
-                                    <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
-                                </div>
-                            </div>
-                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
-                          `;
-                      }).join('')}
+                        equipement.map(item => inventaireItemHtml(item, 'equipement')).join('')}
                 </div>
             </div>
         </div>
     `;
 
     safeRender(html);
-    if (window.__focusInventaireSearch) {
-        const input = document.getElementById('filterInventaireSearch');
-        if (input) {
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-        }
-        window.__focusInventaireSearch = false;
-    }
 };
 
 // Toggle equipement section
@@ -15423,11 +15376,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <span class="color-dot" style="background: var(--primary)"></span>
                                 <span>${escapeHtml(e.prenom)} ${escapeHtml(e.nom)}</span>
-                                <span class="badge ${e.actif ? 'badge-success' : 'badge-default'}">${e.actif ? 'Actif' : 'Inactif'}</span>
+                                ${e.actif ? '' : '<span class="badge badge-default">Inactif</span>'}
                             </div>
                             <div class="settings-item-actions">
                                  <button class="btn btn-sm btn-secondary" data-click="show-employe-modal" data-id="${escapeHtml(e.id)}">Modifier</button>
-                                 <button class="btn btn-sm btn-danger" data-click="delete-employe" data-id="${escapeHtml(e.id)}">Supprimer</button>
+                                 ${rowMenuHtml(`${e.prenom || ''} ${e.nom || ''}`, `<button type="button" class="is-danger" data-click="delete-employe" data-id="${escapeHtml(e.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -15446,11 +15399,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <span class="color-dot" style="background: ${safeColor(a.couleur)}"></span>
                                 <span>${escapeHtml(a.nom)}</span>
-                                <span class="badge ${a.actif ? 'badge-success' : 'badge-default'}">${a.actif ? 'Actif' : 'Inactif'}</span>
+                                ${a.actif ? '' : '<span class="badge badge-default">Inactif</span>'}
                             </div>
                             <div class="settings-item-actions">
                                  <button class="btn btn-sm btn-secondary" data-click="show-arome-modal" data-id="${escapeHtml(a.id)}">Modifier</button>
-                                 <button class="btn btn-sm btn-danger" data-click="delete-arome" data-id="${escapeHtml(a.id)}">Supprimer</button>
+                                 ${rowMenuHtml(a.nom, `<button type="button" class="is-danger" data-click="delete-arome" data-id="${escapeHtml(a.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -15469,11 +15422,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <span>${escapeHtml(f.nom)}</span>
                                 <span class="text-muted">(${f.contenanceCl} cl)</span>
-                                <span class="badge ${f.actif ? 'badge-success' : 'badge-default'}">${f.actif ? 'Actif' : 'Inactif'}</span>
+                                ${f.actif ? '' : '<span class="badge badge-default">Inactif</span>'}
                             </div>
                             <div class="settings-item-actions">
                                  <button class="btn btn-sm btn-secondary" data-click="show-format-modal" data-id="${escapeHtml(f.id)}">Modifier</button>
-                                 <button class="btn btn-sm btn-danger" data-click="delete-format" data-id="${escapeHtml(f.id)}">Supprimer</button>
+                                 ${rowMenuHtml(f.nom, `<button type="button" class="is-danger" data-click="delete-format" data-id="${escapeHtml(f.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -15501,7 +15454,7 @@ const renderParametres = () => {
                                 </div>
                                 <div class="settings-item-actions">
                                     <button class="btn btn-sm btn-secondary" data-click="show-recette-modal" data-id="${escapeHtml(r.id)}">Modifier</button>
-                                    <button class="btn btn-sm btn-danger" data-click="delete-recette" data-id="${escapeHtml(r.id)}">Supprimer</button>
+                                    ${rowMenuHtml(r.nom, `<button type="button" class="is-danger" data-click="delete-recette" data-id="${escapeHtml(r.id)}">Supprimer</button>`)}
                                 </div>
                             </li>
                           `;
@@ -15512,12 +15465,13 @@ const renderParametres = () => {
             <div class="settings-card" style="grid-column: 1 / -1;">
                 <div class="settings-card-header">
                     <h3>Clients</h3>
-                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        <button class="btn btn-sm btn-secondary" data-click="export-clients-excel">Exporter Excel</button>
-                        <button class="btn btn-sm btn-secondary" data-click="trigger-import-clients">Importer Excel</button>
+                    <div style="display: flex; gap: 8px; align-items: center;">
                         <input type="file" id="importClientsFile" accept=".xlsx,.xls" style="display:none" data-change="import-clients-excel">
                         <button class="btn btn-sm btn-primary" data-click="show-client-modal">+ Ajouter</button>
-                        <button class="btn btn-sm btn-danger" data-click="reset-clients">Effacer les clients sans commande</button>
+                        ${rowMenuHtml('tous les clients', `
+                            <button type="button" data-click="export-clients-excel">Exporter Excel</button>
+                            <button type="button" data-click="trigger-import-clients">Importer Excel</button>
+                            <button type="button" class="is-danger" data-click="reset-clients">Effacer les clients sans commande</button>`)}
                     </div>
                 </div>
                 <ul class="settings-list">
@@ -15527,11 +15481,11 @@ const renderParametres = () => {
                             <div class="settings-item-info">
                                 <div><strong>${escapeHtml(c.societe || '')}</strong> ${escapeHtml(c.nom || '')}</div>
                                 <div class="text-muted" style="font-size:12px;">${escapeHtml(c.adresse || '')} ${escapeHtml(c.npa || '')}</div>
-                                <span class="badge ${c.actif ? 'badge-success' : 'badge-default'}">${c.actif ? 'Actif' : (c.ponctuel ? 'Ponctuel' : 'Inactif')}</span>
+                                ${c.actif ? '' : `<span class="badge badge-default">${c.ponctuel ? 'Ponctuel' : 'Inactif'}</span>`}
                             </div>
                             <div class="settings-item-actions">
                                 <button class="btn btn-sm btn-secondary" data-click="show-client-modal" data-id="${escapeHtml(c.id)}">Modifier</button>
-                                <button class="btn btn-sm btn-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>
+                                ${rowMenuHtml(c.societe || c.nom || 'client', `<button type="button" class="is-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -15863,9 +15817,9 @@ const showRecetteModal = (id = null) => {
             <input type="text" name="ingredients[${idx}][nom]" value="${escapeHtml(ing.nom)}" placeholder="Ingrédient" list="${suggestionsId}" required>
             <input type="number" name="ingredients[${idx}][quantite]" value="${escapeHtml(safeNumAttr(ing.quantite))}" placeholder="Qté" step="0.01" min="0.01" required>
             <input type="text" name="ingredients[${idx}][unite]" value="${escapeHtml(displayUnit(ing.unite))}" placeholder="Unité" required>
-            <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
+            <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" onclick="this.parentElement.remove()" aria-label="Retirer cet ingrédient">×</button>
         </div>
-    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" min="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button></div>`;
+    `).join('') : `<div class="ingredient-row"><input type="text" name="ingredients[0][nom]" placeholder="Ingrédient" list="${suggestionsId}" required><input type="number" name="ingredients[0][quantite]" placeholder="Qté" step="0.01" min="0.01" required><input type="text" name="ingredients[0][unite]" placeholder="Unité" required><button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" onclick="this.parentElement.remove()" aria-label="Retirer cet ingrédient">×</button></div>`;
 
     // Filter out aromes that already have a recipe (except the one being edited)
     const availableAromes = aromes.filter(a => {
@@ -15915,7 +15869,7 @@ const addIngredient = () => {
         <input type="text" name="ingredients[${index}][nom]" placeholder="Ingrédient" list="ingredientSuggestions" required>
         <input type="number" name="ingredients[${index}][quantite]" placeholder="Qté" step="0.01" min="0.01" required>
         <input type="text" name="ingredients[${index}][unite]" placeholder="Unité" required>
-        <button type="button" class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">×</button>
+        <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" onclick="this.parentElement.remove()" aria-label="Retirer cet ingrédient">×</button>
     `;
     container.appendChild(div);
 };

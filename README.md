@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.7**
+**v12.8**
 
 ## Adresse
 
@@ -118,6 +118,18 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.8
+
+Fondations communes à toutes les pages : une interface plus calme et plus lisible, surtout sur téléphone.
+
+- **🧭 Un seul titre par page** — Le titre est celui de la barre du haut (Stock, Production, Historique…) ; les pages n'affichent plus de grand titre ni de carte qui le répète, seulement une barre d'outils : onglets ou mode à gauche, actions à droite.
+- **⋯ Suppressions rangées** — Paramètres (employés, arômes, formats, recettes, clients), Inventaire, Livraisons et pointages non clôturés : « Supprimer » passe dans le menu ⋯ de la ligne, comme sur la page Stock. Les exports et l'effacement des clients sans commande sont dans le menu ⋯ des clients. Le rouge est réservé aux confirmations.
+- **🏷️ Moins de bruit** — L'étiquette « Actif » n'apparaît plus ; seuls les éléments inactifs (ou ponctuels) sont signalés.
+- **👆 Cibles tactiles** — Sur téléphone et écran tactile, boutons, onglets, filtres et champs font au moins 40 px.
+- **🔤 Lisibilité** — Plus aucun texte sous 11 px ni libellé en majuscules (sauf le logo, le badge « LIVE » et le jumeau 3D).
+- **📦 Inventaire** — L'alerte de seuil s'affiche dans la carte de l'article (elle occupait une case vide de la grille) ; Modifier et Supprimer passent dans le menu ⋯ ; la section Équipement dépliée garde sa grille.
+- **🔎 Recherche** — Livraisons et Inventaire : même recherche que Stock et Historique (pas d'interruption du clavier prédictif, curseur conservé).
 
 ### Nouveautés v12.7
 

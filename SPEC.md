@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.7
+**Version:** v12.8
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -440,6 +440,9 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - Tables responsives
 
 ### Composants
+- En-tête de page (v12.8) : le titre est celui de la barre du haut ; la page n'affiche qu'une barre d'outils (`pageToolbar`) — onglets ou sélecteur de mode à gauche, actions à droite, l'action principale en dernier
+- Actions secondaires d'une ligne dans un menu « ⋯ » (`rowMenuHtml`) ; les suppressions y sont rangées. Le rouge est réservé aux boîtes de confirmation
+- Textes ≥ 11 px, pas de libellés en majuscules (sauf logo, badge « LIVE » et jumeau 3D) ; cibles tactiles ≥ 40 px sur téléphone et écrans tactiles
 - Boutons: vert olive, border-radius 8px
 - Inputs: border gris, focus vert
 - Cards: fond blanc, shadow léger

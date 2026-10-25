@@ -73,6 +73,10 @@ Top-of-file utilities to prefer over ad-hoc patterns:
 - `getItems(cmd)` — null-safe `cmd.items || []` accessor
 - `getActive(table)` — equivalent to `DB.get(table).filter(r => r.actif)`
 - `parseHHMM(str)` — parse `"HH:MM"` to minutes-since-midnight, returns `null` if invalid
+- `pageToolbar(actionsHtml, leadHtml)` — the page's only header row (v12.8): the title lives in the top bar (`#pageTitle`, set by `navigateTo`), so pages never render their own `<h1>` or a card title repeating it; tabs or a mode selector go on the left, actions on the right (primary last)
+- `rowMenuHtml(label, itemsHtml)` — « ⋯ » menu for a row's secondary actions; deletions go here (item `class="is-danger"`), never as a red button in a list. Red `btn-danger` is for confirmation dialogs only; in a table inside a modal use `btn-ghost btn-ghost-danger`
+- `data-live-search="<filter>"` on a search input (filter declared in `LIVE_SEARCH_RENDERS`) — keeps the raw text, re-renders after a pause and never during IME composition, restores focus and caret
+- UI floor (v12.8): no text under 11px, no `text-transform: uppercase` (except the logo, the « LIVE » badge and the 3D twin), touch targets ≥ 40px under 768px or on coarse pointers (block at the end of `styles.css`)
 - `CONSTANTS` — central object holding production buffers (`PRODUCTION_LOSS`, `BOUCHON_MARGIN`), `CUVE_MAX_L`, `STOCK_WARN_DAYS` (seuil DLC des lots legacy sans DLV), `DLV_WARN_DAYS` (seuil « DLV proche », 7 j), and the workshop equipment shown by the 3D twin (`ATELIER_CUVES` = 4, `ATELIER_CASSEROLES_L` = [9, 4])
 
 ### Data Schemas
