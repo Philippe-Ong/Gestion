@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.8**
+**v12.9**
 
 ## Adresse
 
@@ -118,6 +118,17 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.9
+
+Nouvelle page Inventaire et suivi des lots d'ingrédients.
+
+- **🛒 À commander** — La liste de courses : chaque article qui, après la production prévue par les commandes, passe sous son seuil (ou manque), avec la quantité à commander arrondie au-dessus. Elle signale aussi ce qui fausse le calcul (arôme sans recette, ingrédient absent). « Copier la liste » pour l'envoyer à un fournisseur.
+- **🌿 Ingrédients suivis par lot** — À la réception, on saisit le n° de lot du fournisseur (obligatoire), et si on veut le fournisseur et la date limite. La production consomme d'abord le stock sans n° de lot (antérieur au suivi), puis le lot dont la date limite arrive en premier, et note quels lots ont servi.
+- **🔗 Traçabilité dans les deux sens** — Tracer et Rappel du lot (et leur export Excel) montrent les lots d'ingrédients utilisés ; la fenêtre d'un ingrédient montre, pour chaque lot, les lots de bouteilles produits avec, et « Rappel fournisseur » retrouve où ils sont partis.
+- **📋 Listes claires** — Ingrédients, contenants (bouteilles, bouchons, étiquettes) et équipement (replié) en listes séparées : stock, seuil, consommation prévue et reste après production, avec une barre par rapport au seuil. Les tuiles de comptage et les boutons ±1 disparaissent.
+- **✏️ Ajuster** — Réception, recomptage ou sortie avec aperçu du résultat ; un ingrédient se corrige lot par lot, et un lot périmé ou perdu se retire. La modification d'un article ne touche plus à sa quantité ni à ses lots.
+- **🛡️ Plus de doublons** — Un inventaire vide n'est plus rempli automatiquement à l'affichage (cela créait des doublons sur un appareil neuf) : un bouton « Créer les articles de base » le fait sur demande. Un nom déjà utilisé est refusé.
 
 ### Nouveautés v12.8
 

@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v12.8
+**Current Version:** v12.9
 
 ## 1. Build, Lint, and Test Commands
 
@@ -61,7 +61,7 @@ The `navigateTo(page)` function looks up the page name in a views map and calls 
 - `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée)
 - `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF (design fidèle au template depuis v11.10)
 - `production` - Planificateur de production avec calcul automatique des ingrédients et gestion des cuves
-- `inventaire` - Gestion des consommables et équipements avec seuils d'alerte
+- `inventaire` - Inventaire (v12.9) : « À commander » d'après les commandes à produire et les seuils, ingrédients suivis par lot fournisseur (réception, ordre d'utilisation, rappel fournisseur), contenants, équipement
 - `parametres` - Configuration employés, arômes, formats, recettes, clients
 - `archives` - Historique des commandes livrées avec filtres
 
@@ -198,8 +198,9 @@ Standardized unit handling for ingredients and inventory:
 Dual-category inventory system:
 - **Consommables:** Raw materials, ingredients, packaging (bottles, capsules, labels)
 - **Équipement:** Tools and devices with tracking
-- **Alert thresholds:** `seuilAlerte` triggers visual warning when `quantite <= seuilAlerte`
-- **Quick controls:** +/- buttons for rapid quantity adjustments
+- **To order (v12.9):** `computeInventairePrevu()` simulates the consumption of the orders still to produce (`buildStockOverview` + `deduireInventaireProduction` on a copy); an item is « à commander » when its stock after that production falls under `seuilAlerte` (`invACommander`, rounded up)
+- **Ingredient lots (v12.9):** ingredients (not containers, not water) carry `lots[]` with the supplier lot number; production consumes them oldest-expiry first and records them on its `PROD-` entries (`ingredients`, `productionId`) — see SPEC « Traçabilité amont »
+- **Adjust:** Réception / Recomptage / Sortie dialog for containers and equipment; ingredients are adjusted lot by lot. Rendering never writes (empty inventory → explicit « Créer les articles de base » button)
 - **Recipe sync:** `syncRecettesInventaire()` auto-adds missing ingredients from recipes
 
 ### Bulletins de Livraison (BL) (`#livraisons`)

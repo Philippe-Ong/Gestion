@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v12.8
+**Version:** v12.9
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -512,6 +512,18 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 **Suppression d'un lot** : la modale demande ce que deviennent les bouteilles restantes — destruction/péremption ou casse/perte (`SORTIE-`), ou lot créé par erreur (`AJUST-` négatif) — avant de supprimer l'enregistrement.
 
 **Modification d'un lot** : un changement de quantité crée un `AJUST-` signé (note facultative) ; un changement d'arôme, de format ou de dates est répercuté sur les entrées d'historique du lot. Le `numLot` ne change pas et les livraisons déjà effectuées gardent leurs informations d'origine.
+
+### Traçabilité amont : lots d'ingrédients (v12.9)
+
+**Articles suivis.** Les ingrédients de l'inventaire (`isLotSuiviArticle` : consommables qui ne sont pas des contenants — bouteilles, bouchons, étiquettes… — ni de l'eau) portent `lots: [{ id, numLot, quantite, quantiteRecue, dateReception, fournisseur?, dateLimite?, dateRetrait? }]`. `quantite` de l'article reste le total ; la part non couverte par les lots est le stock « sans n° de lot » (`invSansLot`), antérieur au suivi.
+
+**Réception** (`showReceptionModal` / `saveReception`) : quantité, n° de lot du fournisseur (obligatoire pour un ingrédient), fournisseur et date limite facultatifs. Un n° déjà connu complète le lot existant.
+
+**Consommation** (`consommerLotsIngredient`) : d'abord le stock sans n° de lot, puis les lots par date limite croissante (repli : date de réception). Appelée par `deduireInventaireProduction` (production confirmée), qui renvoie `ingredients: [{ article, unite, numLot, fournisseur, quantite }]`, et par le ± du jumeau (`updateInventaireQty`). Chaque entrée `PROD-` d'une production porte `productionId` et ces `ingredients` (quantités pour toute la production, tous formats).
+
+**Lecture.** Tracer et Rappel du lot affichent « Ingrédients utilisés » (dédoublonnés par `productionId`) ; l'export Excel ajoute la feuille Ingrédients. Côté inventaire, la fenêtre d'un ingrédient liste les lots en stock dans l'ordre d'utilisation, le stock sans n° de lot, les lots épuisés ou retirés, et pour chacun les lots de bouteilles produits avec (`getUsagesLotIngredient`) ; « Rappel fournisseur » ouvre la liste de ces lots de bouteilles avec l'accès à leur rappel. Chaque lot se corrige (recomptage) ou se retire (périmé, perdu : `dateRetrait`).
+
+**Limites.** Les lots de bouteilles créés avec « + Lot » ne déduisent pas l'inventaire et n'ont donc pas d'ingrédients rattachés ; les productions antérieures à v12.9 non plus.
 
 ## 6. Déploiement GitHub Pages
 
