@@ -119,14 +119,97 @@ const csvCell = (v) => {
     return neutralized;
 };
 
-const getNextCommandeNumero = () => {
-    const commandes = DB.get('commandes');
-    let maxNum = 0;
-    commandes.forEach(cmd => {
-        const num = parseInt(cmd.numero || '0', 10);
-        if (num > maxNum) maxNum = num;
-    });
-    return String(maxNum + 1).padStart(5, '0');
+const requireNumberingConnection = () => {
+    if (!navigator.onLine || !window.firebaseReady || !window.firebaseDb || !window.firebaseApi || !V11._isReady || V11._bootstrapping || V11._migrating || !window.firebaseAuth?.isAuthenticated()) {
+        throw new Error('La création d’une commande ou d’un BL nécessite une connexion et une synchronisation active.');
+    }
+};
+
+const checkNumberingContext = (table, candidate, recordId, session) => {
+    requireNumberingConnection();
+    if (session !== _appSessionGen) {
+        const error = new Error('La session a changé. Rouvrez le document avant de réessayer.');
+        error.numbering = true;
+        throw error;
+    }
+    const pending = v11GetQueue().some(op => op.table === table && (
+        op.recordId === candidate.id || op.recordId === recordId ||
+        (table === 'livraisons' && (op.record?.commandeId === candidate.commandeId || op.base?.commandeId === candidate.commandeId))
+    ));
+    if (pending) {
+        const error = new Error('Synchronisez les modifications de ce document avant de le créer ou de l’exporter.');
+        error.numbering = true;
+        throw error;
+    }
+};
+
+const createNumberedRecord = async (table, candidate) => {
+    if (!['commandes', 'livraisons'].includes(table)) throw new Error('Type de document invalide.');
+    requireNumberingConnection();
+    const session = _appSessionGen;
+    try {
+        checkNumberingContext(table, candidate, candidate.id, session);
+        const { doc, collection, getDocs, runTransaction } = window.firebaseApi;
+        const snapshot = await getDocs(collection(window.firebaseDb, V11.TABLES_COLLECTION, table, V11.RECORDS_SUBCOLLECTION));
+        const docs = [];
+        snapshot.forEach(entry => docs.push(entry));
+        const validation = v11ValidateSnapshotBuffer(docs, table);
+        if (!validation.valid) throw new Error(validation.reason);
+        const field = table === 'commandes' ? 'numero' : 'numeroBL';
+        const records = [...validation.records, ...DB.get(table)];
+        const maximum = records.reduce((max, record) => {
+            const number = Number(record[field]);
+            return Number.isSafeInteger(number) && number > max ? number : max;
+        }, 0);
+        const existing = table === 'livraisons' ? validation.records.find(record => record.commandeId === candidate.commandeId) : null;
+        checkNumberingContext(table, candidate, existing?.id || candidate.id, session);
+        const key = table === 'livraisons' ? candidate.commandeId : candidate.id;
+        const counterRef = doc(window.firebaseDb, V11.SYNC_META_COLLECTION, `numbering-${table}`);
+        const reservationRef = doc(window.firebaseDb, V11.SYNC_META_COLLECTION, `number-${table}-${key}`);
+        const result = await runTransaction(window.firebaseDb, async transaction => {
+            const reservation = await transaction.get(reservationRef);
+            const counter = await transaction.get(counterRef);
+            const reserved = reservation.exists() ? reservation.data() : null;
+            const recordId = reserved?.recordId || existing?.id || candidate.id;
+            const recordRef = doc(window.firebaseDb, V11.TABLES_COLLECTION, table, V11.RECORDS_SUBCOLLECTION, recordId);
+            const current = await transaction.get(recordRef);
+            checkNumberingContext(table, candidate, recordId, session);
+            if (current.exists()) {
+                const data = current.data();
+                if (!data.record || data.record.id !== recordId || !data.record[field]) throw new Error('Document distant invalide.');
+                if (!reserved) transaction.set(reservationRef, { recordId, numero: data.record[field] });
+                return { record: data.record, version: data._version };
+            }
+            const lastNumber = counter.exists() ? counter.data().lastNumber : 0;
+            if (!Number.isSafeInteger(lastNumber) || lastNumber < 0) throw new Error('Compteur distant invalide.');
+            const nextNumber = Math.max(lastNumber, maximum) + 1;
+            if (!Number.isSafeInteger(nextNumber)) throw new Error('Limite de numérotation atteinte.');
+            const numero = reserved?.numero || String(nextNumber).padStart(5, '0');
+            if (!/^\d+$/.test(String(numero))) throw new Error('Numéro réservé invalide.');
+            const record = { ...candidate, id: recordId, [field]: String(numero) };
+            const version = Date.now();
+            transaction.set(counterRef, { lastNumber: Math.max(lastNumber, maximum, Number(numero)) });
+            transaction.set(reservationRef, { recordId, numero: String(numero) });
+            transaction.set(recordRef, { record, updatedAt: new Date().toISOString(), _version: version });
+            return { record, version };
+        });
+        if (session !== _appSessionGen || !window.firebaseReady) return null;
+        checkNumberingContext(table, candidate, result.record.id, session);
+        const current = DB.get(table);
+        const index = current.findIndex(record => record.id === result.record.id);
+        if (index === -1) current.push(result.record);
+        else current[index] = result.record;
+        v11SetBase(table, result.record.id, result.record);
+        if (!V11._versions[table]) V11._versions[table] = {};
+        V11._versions[table][result.record.id] = result.version;
+        v11SaveVersions();
+        DB._applyRemoteSnapshot(table, current);
+        return result.record;
+    } catch (e) {
+        console.error('Attribution du numéro impossible :', e);
+        if (e.numbering) throw e;
+        throw new Error('Création impossible : vérifiez votre connexion et réessayez. Aucun nouveau numéro local n’a été attribué.');
+    }
 };
 
 const getCommandeNumero = (commande) => {
@@ -140,16 +223,6 @@ const getCommandeStatutLabel = (statut) => ({
     livrée: 'Livrée',
     annulee: 'Annulée'
 }[statut] || statut || '');
-
-const getNextBLNumero = () => {
-    const livraisons = DB.get('livraisons');
-    let maxNum = 0;
-    livraisons.forEach(liv => {
-        const num = parseInt(liv.numeroBL || '0', 10);
-        if (num > maxNum) maxNum = num;
-    });
-    return String(maxNum + 1).padStart(5, '0');
-};
 
 const getBLNumero = (livraison) => {
     return livraison.numeroBL || livraison.id.slice(-5);
@@ -461,11 +534,16 @@ const v11MergeOp = (queue, newOp) => {
     const idx = queue.findIndex(op => op.table === newOp.table && op.recordId === newOp.recordId);
     if (idx !== -1) {
         const existing = queue[idx];
+        const existingHasBase = Object.prototype.hasOwnProperty.call(existing, 'base');
+        const originalBase = existingHasBase ? existing.base : null;
+        const baseCaptured = existing.baseCaptured === true || !!existing.base;
+        if (existing.blockedReason) newOp.blockedReason = existing.blockedReason;
         // delete after upsert → keep the delete, preserve knownVersion + base
         if (newOp.type === 'delete' && existing.type === 'upsert') {
             newOp.id = generateId(); // fresh id so flush removal is safe
             newOp.knownVersion = existing.knownVersion;
-            newOp.base = existing.base ?? newOp.base ?? null;
+            newOp.base = originalBase;
+            newOp.baseCaptured = baseCaptured;
             queue[idx] = newOp;
             return;
         }
@@ -473,7 +551,8 @@ const v11MergeOp = (queue, newOp) => {
         if (newOp.type === 'upsert' && existing.type === 'delete') {
             newOp.id = generateId(); // fresh id so flush removal is safe
             newOp.knownVersion = existing.knownVersion;
-            newOp.base = existing.base ?? newOp.base ?? null;
+            newOp.base = originalBase;
+            newOp.baseCaptured = baseCaptured;
             queue[idx] = newOp;
             return;
         }
@@ -484,7 +563,8 @@ const v11MergeOp = (queue, newOp) => {
             const oldestKnownVersion = existing.knownVersion !== null ? existing.knownVersion : newOp.knownVersion;
             newOp.id = generateId(); // fresh id so flush removal is safe
             newOp.knownVersion = oldestKnownVersion;
-            newOp.base = existing.base ?? newOp.base ?? null;
+            newOp.base = originalBase;
+            newOp.baseCaptured = baseCaptured;
             queue[idx] = newOp;
             return;
         }
@@ -600,7 +680,7 @@ const v11EnqueueOp = (table, type, recordId, record, base) => {
     const knownVersion = V11._versions[table]?.[recordId] ?? null;
     // Base de fusion : dernier état serveur connu au moment de la modification locale.
     const baseRecord = base !== undefined ? base : v11GetBase(table, recordId);
-    v11MergeOp(queue, { id: generateId(), table, type, recordId, record, timestamp: Date.now(), knownVersion, base: baseRecord || null });
+    v11MergeOp(queue, { id: generateId(), table, type, recordId, record, timestamp: Date.now(), knownVersion, base: baseRecord || null, baseCaptured: true });
     const persisted = v11SetQueue(queue);
     if (!persisted) {
         // Queue could NOT be persisted to localStorage — mark table as memory-protected.
@@ -790,30 +870,30 @@ const DB = {
 
             try {
                 const validRecords = data.filter(r => r.id && typeof r.id === 'string' && r.id.trim() !== '');
+                const prevMap = new Map(prev.map(r => [r.id, r]));
 
                 if (wasInvalid) {
                     // Full resync: upsert ALL valid records, NEVER deletes derived from invalid state.
                     // This guarantees no data loss from a previous invalid save.
                     for (const record of validRecords) {
-                        v11EnqueueOp(key, 'upsert', record.id, record);
+                        v11EnqueueOp(key, 'upsert', record.id, record, v11GetBase(key, record.id) || prevMap.get(record.id) || null);
                     }
                 } else {
                     // Normal differential sync
-                    const prevMap = new Map(prev.map(r => [r.id, r]));
                     const currentIds = new Set(validRecords.map(r => r.id));
 
                     // Upserts: valid records that are new or changed
                     for (const record of validRecords) {
                         const prevRec = prevMap.get(record.id);
                         if (!prevRec || JSON.stringify(prevRec) !== JSON.stringify(record)) {
-                            v11EnqueueOp(key, 'upsert', record.id, record);
+                            v11EnqueueOp(key, 'upsert', record.id, record, v11GetBase(key, record.id) || prevRec || null);
                         }
                     }
                     // Deletes: records in prev that are no longer in current data
                     for (const prevRec of prev) {
                         if (!prevRec.id || typeof prevRec.id !== 'string' || prevRec.id.trim() === '') continue;
                         if (!currentIds.has(prevRec.id)) {
-                            v11EnqueueOp(key, 'delete', prevRec.id, null);
+                            v11EnqueueOp(key, 'delete', prevRec.id, null, v11GetBase(key, prevRec.id) || prevRec);
                         }
                     }
                 }
@@ -1056,7 +1136,7 @@ CLICK_HANDLERS['toggle-pill-statut'] = (el) => togglePillStatut(el.getAttribute(
 CLICK_HANDLERS['show-commande-details'] = (el) => showCommandeDetails(el.getAttribute('data-id'));
 CLICK_HANDLERS['save-commande'] = (el, e) => saveCommande(e, el.getAttribute('data-id') || '');
 CLICK_HANDLERS['edit-commande'] = (el) => editCommande(el.getAttribute('data-id'));
-CLICK_HANDLERS['duplicate-commande'] = (el) => duplicateCommande(el.getAttribute('data-id'));
+CLICK_HANDLERS['duplicate-commande'] = (el, e) => duplicateCommande(el.getAttribute('data-id'), e);
 CLICK_HANDLERS['marquer-commande-produite'] = (el) => marquerCommandeProduite(el.getAttribute('data-id'));
 CLICK_HANDLERS['confirm-annuler-commande'] = (el) => confirmAnnulerCommande(el.getAttribute('data-id'));
 CLICK_HANDLERS['livrer-commande'] = (el) => showLivraisonBouteillesModal(el.getAttribute('data-id'));
@@ -1355,6 +1435,18 @@ window.forceFirebaseSync = async () => {
 // --- Queue flush (transactional per-record with conflict detection) ---
 // Serialized: only one flush promise at a time. After each success, removes
 // ONLY the successful op by op.id from the latest queue snapshot.
+const v11NotifyBlockedOp = (op) => {
+    const conflictKey = `blocked/${op.table}/${op.recordId}`;
+    if (V11._conflictNotified.has(conflictKey)) return;
+    V11._conflictNotified.add(conflictKey);
+    const reason = op.blockedReason === 'remote-deleted'
+        ? "l'enregistrement a été supprimé sur un autre appareil"
+        : op.blockedReason === 'id-collision'
+            ? "un autre enregistrement utilise déjà cet identifiant"
+            : "l'état d'origine de la modification est inconnu";
+    showToast(`Conflit sur « ${op.table} » : ${reason}. Vos modifications restent conservées dans la file d'attente, sans modifier les données cloud.`, 'warning');
+};
+
 const v11FlushQueue = async () => {
     if (!window.firebaseReady || !window.firebaseDb || !window.firebaseApi) return;
     if (!V11._isReady) return;
@@ -1365,11 +1457,13 @@ const v11FlushQueue = async () => {
     const rawQueue = v11GetQueue();
     // Strip operations for memory-protected tables (queue persistence failed)
     const protectedCount = rawQueue.filter(op => V11._memoryProtectedTables.has(op.table)).length;
-    const startQueue = rawQueue.filter(op => !V11._memoryProtectedTables.has(op.table));
+    const unprotectedQueue = rawQueue.filter(op => !V11._memoryProtectedTables.has(op.table));
     if (protectedCount > 0) {
         console.warn('[V11]', protectedCount, 'opération(s) ignorée(s) pour table(s) protégée(s) en mémoire');
-        v11SetQueue(startQueue);
+        v11SetQueue(unprotectedQueue);
     }
+    unprotectedQueue.filter(op => op.blockedReason).forEach(v11NotifyBlockedOp);
+    const startQueue = unprotectedQueue.filter(op => !op.blockedReason);
     if (startQueue.length === 0) return;
 
     const promise = (async () => {
@@ -1382,13 +1476,12 @@ const v11FlushQueue = async () => {
                 const result = await runTransaction(window.firebaseDb, async (transaction) => {
                     const snap = await transaction.get(ref);
                     const remoteRecord = snap.exists() && snap.data().record ? snap.data().record : null;
-                    // Base : état serveur au moment de la modification locale. Repli sur la
-                    // base chargée au démarrage si l'opération a été créée avant le premier pull.
-                    const base = op.base || v11GetBase(op.table, op.recordId) || null;
+                    const base = op.base || null;
+                    const hasCapturedBase = op.baseCaptured === true || !!base;
 
                     if (op.type === 'delete') {
                         if (!snap.exists()) return { action: 'noop', conflicts: [] };
-                        if (base && remoteRecord && !v11Equal(remoteRecord, base)) {
+                        if (!base || (remoteRecord && !v11Equal(remoteRecord, base))) {
                             // Modifié ailleurs depuis notre base : ne pas détruire ces modifications.
                             return { action: 'blocked-delete', conflicts: [], merged: remoteRecord };
                         }
@@ -1399,16 +1492,17 @@ const v11FlushQueue = async () => {
                     if (!op.record) return { action: 'noop', conflicts: [] };
 
                     if (!snap.exists()) {
+                        if (base || !hasCapturedBase) {
+                            return { action: 'blocked-upsert', reason: base ? 'remote-deleted' : 'base-unknown', merged: null };
+                        }
                         const record = v11Clone(op.record);
                         transaction.set(ref, { record, updatedAt: new Date().toISOString(), _version: newVersion });
                         return { action: 'created', conflicts: [], merged: record };
                     }
 
                     if (!base) {
-                        // Aucune base connue (première synchronisation) : comportement historique.
-                        const record = v11Clone(op.record);
-                        transaction.set(ref, { record, updatedAt: new Date().toISOString(), _version: newVersion });
-                        return { action: 'overwrote', conflicts: [], merged: record };
+                        if (v11Equal(op.record, remoteRecord)) return { action: 'noop', conflicts: [] };
+                        return { action: 'blocked-upsert', reason: hasCapturedBase ? 'id-collision' : 'base-unknown', merged: remoteRecord };
                     }
 
                     const merge = v11MergeRecord(base, op.record, remoteRecord);
@@ -1417,6 +1511,28 @@ const v11FlushQueue = async () => {
                 });
 
                 const conflictKey = `${op.table}/${op.recordId}`;
+
+                if (result.action === 'blocked-upsert') {
+                    const latestQueue = v11GetQueue();
+                    const pending = latestQueue.find(item => item.table === op.table && item.recordId === op.recordId);
+                    if (pending && pending.type === 'upsert') {
+                        pending.blockedReason = result.reason;
+                        pending.blockedAt = new Date().toISOString();
+                        if (!v11SetQueue(latestQueue)) {
+                            V11._memoryProtectedTables.add(op.table);
+                            showToast(`Le conflit sur « ${op.table} » n'a pas pu être sauvegardé. Exportez vos données avant de recharger la page.`, 'error');
+                            continue;
+                        }
+                        const current = DB.get(op.table).filter(record => record.id !== op.recordId);
+                        if (result.merged) current.push(v11Clone(result.merged));
+                        DB._applyRemoteSnapshot(op.table, current);
+                        v11SetBase(op.table, op.recordId, result.merged);
+                        if (!result.merged) delete V11._versions[op.table]?.[op.recordId];
+                        V11._conflicts.push({ table: op.table, recordId: op.recordId, fields: [result.reason], at: pending.blockedAt });
+                        v11NotifyBlockedOp(pending);
+                    }
+                    continue;
+                }
 
                 if (result.action === 'blocked-delete') {
                     v11SetBase(op.table, op.recordId, result.merged);
@@ -1438,6 +1554,29 @@ const v11FlushQueue = async () => {
                 if (result.action === 'noop') {
                     successfulIds.add(op.id);
                     continue;
+                }
+
+                const pendingQueue = v11GetQueue();
+                const pending = pendingQueue.find(item => item.table === op.table && item.recordId === op.recordId && item.id !== op.id);
+                if (pending && pending.type === 'upsert' && !pending.blockedReason) {
+                    const localBefore = v11Clone(pending.record);
+                    if (result.merged) {
+                        pending.record = op.type === 'upsert'
+                            ? v11MergeRecord(op.record, pending.record, result.merged).record
+                            : pending.record;
+                        pending.base = v11Clone(result.merged);
+                        pending.knownVersion = newVersion;
+                    } else {
+                        pending.base = null;
+                        pending.knownVersion = null;
+                    }
+                    pending.baseCaptured = true;
+                    if (v11SetQueue(pendingQueue)) {
+                        v11ApplyMergedLocal(op.table, op.recordId, localBefore, pending.record);
+                    } else {
+                        V11._memoryProtectedTables.add(op.table);
+                        showToast(`Les modifications récentes de « ${op.table} » n'ont pas pu être préparées pour la synchronisation. Exportez vos données avant de recharger la page.`, 'error');
+                    }
                 }
 
                 if (result.conflicts && result.conflicts.length > 0) {
@@ -1478,12 +1617,13 @@ const v11FlushQueue = async () => {
         // from the LATEST queue (ops added/merged during await survive).
         const latestQueue = v11GetQueue();
         const remaining = latestQueue.filter(op => !successfulIds.has(op.id));
+        const pendingCount = remaining.filter(op => !op.blockedReason).length;
         if (remaining.length > 0) {
             v11SetQueue(remaining);
-            if (successfulIds.size === 0) {
+            if (pendingCount > 0 && successfulIds.size === 0) {
                 showToast('Échec de la synchronisation : la file d\'attente attend la reconnexion.', 'warning');
-            } else {
-                showToast(`${remaining.length} opération(s) en attente de reconnexion`, 'warning');
+            } else if (pendingCount > 0) {
+                showToast(`${pendingCount} opération(s) en attente de reconnexion`, 'warning');
             }
         } else {
             v11SetQueue([]);
@@ -1503,7 +1643,7 @@ const v11FlushQueue = async () => {
         // si nécessaire — jamais de retry serré des mêmes opérations en échec.
         const latestQueue = v11GetQueue();
         const startIds = new Set(startQueue.map(op => op.id));
-        const hasNewOps = latestQueue.some(op => !startIds.has(op.id));
+        const hasNewOps = latestQueue.some(op => !op.blockedReason && !startIds.has(op.id));
         if (hasNewOps && window.firebaseReady && window.firebaseDb && V11._isReady) {
             setTimeout(() => v11FlushQueue(), 0);
         }
@@ -2201,6 +2341,7 @@ const v11StartListener = (table) => {
             const pendingNow = v11GetQueue().filter(op => op.table === table);
             const working = new Map(records.map(r => [r.id, r]));
             for (const op of pendingNow) {
+                if (op.blockedReason) continue;
                 if (op.type === 'delete') { working.delete(op.recordId); continue; }
                 if (!op.record) continue;
                 const remoteRec = working.get(op.recordId) || null;
@@ -2343,13 +2484,19 @@ const v11OverlayQueueOnCache = () => {
         const current = DB.get(table);
         const resultMap = new Map(current.map(r => [r.id, r]));
         for (const op of ops) {
+            if (op.blockedReason) {
+                const remoteRecord = v11GetBase(table, op.recordId);
+                if (remoteRecord) resultMap.set(op.recordId, v11Clone(remoteRecord));
+                else resultMap.delete(op.recordId);
+                continue;
+            }
             if (op.type === 'delete') { resultMap.delete(op.recordId); continue; }
             if (!op.record || !op.record.id) continue;
             const remoteRec = resultMap.get(op.recordId) || null;
             if (!remoteRec) { resultMap.set(op.recordId, v11Clone(op.record)); continue; }
             // Fusion champ par champ avec la base distante : ne réécrase pas
             // les modifications faites entre-temps sur un autre appareil.
-            const base = op.base || v11GetBase(table, op.recordId) || null;
+            const base = op.base || null;
             resultMap.set(op.recordId, v11MergeRecord(base, op.record, remoteRec).record);
         }
         DB._applyRemoteSnapshot(table, Array.from(resultMap.values()));
@@ -2570,6 +2717,7 @@ window.v11Debug = {
     saveVersions: v11SaveVersions,
     conflictNotified: () => V11._conflictNotified,
     conflicts: () => V11._conflicts,
+    blocked: () => v11GetQueue().filter(op => op.blockedReason),
     base: () => V11._base,
     mergeRecord: v11MergeRecord,
     equal: v11Equal,
@@ -2578,6 +2726,7 @@ window.v11Debug = {
         bootstrapping: V11._bootstrapping,
         sessionId: V11._sessionId,
         queueLength: v11GetQueue().length,
+        blockedCount: v11GetQueue().filter(op => op.blockedReason).length,
         listeners: Object.keys(V11._listeners).length,
         hasFlushPromise: V11._flushPromise !== null
     })
@@ -3062,7 +3211,7 @@ const initGlobalSearch = () => {
 // UI Lock helper (Anti-Double Clic)
 const disableSaveBtn = (event) => {
     if (!event || !event.target) return null;
-    const btn = event.target;
+    const btn = event.target.closest?.('button') || event.target;
     if (btn.tagName !== 'BUTTON') return null;
     const originalText = btn.innerHTML;
     btn.disabled = true;
@@ -4041,8 +4190,8 @@ const saveLot = (event) => {
         const format = formData.get('format');
         const quantite = Number(formData.get('quantite'));
         const dateProduction = formData.get('dateProduction');
-        const dlv = formData.get('dlv');
-        const dlc = formData.get('dlc');
+        let dlv = formData.get('dlv');
+        let dlc = formData.get('dlc');
 
         if (!arome || !format || !Number.isInteger(quantite) || quantite <= 0) {
             showToast('Veuillez remplir tous les champs obligatoires', 'error');
@@ -4296,7 +4445,7 @@ const showLotTraceModal = (lotId) => {
                         <td>${escapeHtml(l.clientNom)}</td>
                         <td>#${escapeHtml(String(l.commandeNumero || '—'))}</td>
                         <td>${l.numeroBL ? escapeHtml(String(l.numeroBL)) : '—'}</td>
-                        <td><strong>${l.quantite} bt</strong></td>
+                        <td><strong>${escapeHtml(l.quantite)} bt</strong></td>
                     </tr>
                 `).join('')}
             </tbody>
@@ -4307,7 +4456,7 @@ const showLotTraceModal = (lotId) => {
         ${t.ventes.map(v => `
             <div class="flex-between" style="padding: 6px 0; border-bottom: 1px solid var(--border-light); font-size: 13px;">
                 <span>${v.dateAdded ? new Date(v.dateAdded).toLocaleDateString('fr-CH') : '—'}</span>
-                <strong>${v.quantity} bt</strong>
+                <strong>${escapeHtml(v.quantity)} bt</strong>
             </div>
         `).join('')}`;
 
@@ -4316,11 +4465,11 @@ const showLotTraceModal = (lotId) => {
             ${ligne('Arôme / Format', `${escapeHtml(t.arome || '?')} • ${escapeHtml(t.format || '?')}`)}
             ${t.dateProduction ? ligne('Date de production', formatDate(t.dateProduction)) : ''}
             ${t.dlc ? ligne('DLC', formatDate(t.dlc)) : ''}
-            ${t.totalProduit > 0 ? ligne('Produit', `${t.totalProduit} bt`) : ''}
-            ${ligne('Livré aux clients', `${t.totalLivre} bt`)}
-            ${t.totalVenteDirecte > 0 ? ligne('Ventes directes', `${t.totalVenteDirecte} bt`) : ''}
-            ${ligne('En stock', t.lot ? `${t.enStock} bt` : '<span class="badge badge-default">Épuisé</span>')}
-            ${ecart !== null && ecart !== 0 ? ligne('Écart (pertes / ajustements)', `${ecart} bt`) : ''}
+            ${t.totalProduit > 0 ? ligne('Produit', `${escapeHtml(t.totalProduit)} bt`) : ''}
+            ${ligne('Livré aux clients', `${escapeHtml(t.totalLivre)} bt`)}
+            ${t.totalVenteDirecte > 0 ? ligne('Ventes directes', `${escapeHtml(t.totalVenteDirecte)} bt`) : ''}
+            ${ligne('En stock', t.lot ? `${escapeHtml(t.enStock)} bt` : '<span class="badge badge-default">Épuisé</span>')}
+            ${ecart !== null && ecart !== 0 ? ligne('Écart (pertes / ajustements)', `${escapeHtml(ecart)} bt`) : ''}
 
             <h4 style="margin-top: 16px;">Livraisons clients</h4>
             ${livraisonsHtml}
@@ -4453,6 +4602,21 @@ const pointageSelectEmployee = (empId) => {
     renderPointage();
 };
 
+const getPointagesForDay = (pointages, day = new Date()) => {
+    const today = toLocalDayKey(day.getTime());
+    const previousDay = new Date(day);
+    previousDay.setDate(previousDay.getDate() - 1);
+    const yesterday = toLocalDayKey(previousDay.getTime());
+    return pointages.filter(p => {
+        if (p.date === today) return true;
+        if (p.date !== yesterday) return false;
+        if (!p.heureFin) return true;
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = parseHHMM(p.heureFin);
+        return debutMin !== null && finMin !== null && finMin < debutMin;
+    });
+};
+
 const pointageQuickArrivee = () => {
     if (!pointageSelectedEmployeId) {
         showToast('Sélectionne un employé', 'error');
@@ -4464,7 +4628,7 @@ const pointageQuickArrivee = () => {
     const heureDebut = `${hh}:${mm}`;
     const today = getLocalDateISOString();
     const pointages = DB.get('pointages') || [];
-    const enCours = pointages.find(p => p.date === today && p.employeId === pointageSelectedEmployeId && !p.heureFin);
+    const enCours = getPointagesForDay(pointages, now).find(p => p.employeId === pointageSelectedEmployeId && !p.heureFin);
     if (enCours) {
         showToast('Pointage déjà en cours pour cet employé', 'error');
         return;
@@ -4487,14 +4651,13 @@ const pointageQuickDepart = () => {
         showToast('Sélectionne un employé', 'error');
         return;
     }
-    const today = getLocalDateISOString();
+    const now = new Date();
     const pointages = DB.get('pointages') || [];
-    const enCours = pointages.find(p => p.date === today && p.employeId === pointageSelectedEmployeId && !p.heureFin);
+    const enCours = getPointagesForDay(pointages, now).find(p => p.employeId === pointageSelectedEmployeId && !p.heureFin);
     if (!enCours) {
         showToast('Aucun pointage en cours pour cet employé', 'error');
         return;
     }
-    const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
     enCours.heureFin = `${hh}:${mm}`;
@@ -4636,7 +4799,7 @@ const renderPointage = (_tabIgnored) => {
     }
 
     // Pointages du jour, indexés par employé pour détecter le "live" (pas de heureFin) ou état du jour
-    const pointagesAujourdhui = pointages.filter(p => p.date === today);
+    const pointagesAujourdhui = getPointagesForDay(pointages);
     const pointageEnCoursParEmp = {};
     pointagesAujourdhui.forEach(p => {
         if (!p.heureFin) pointageEnCoursParEmp[p.employeId] = p;
@@ -4778,6 +4941,10 @@ const renderPointage = (_tabIgnored) => {
     pointageClockInterval = setInterval(() => {
         const timeEl = document.querySelector('.pointage-hero .current-time');
         if (timeEl) {
+            if (getLocalDateISOString() !== today) {
+                renderPointage();
+                return;
+            }
             timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
         } else {
             // L'élément n'est plus dans le DOM → l'utilisateur a navigué ailleurs, on arrête
@@ -4822,7 +4989,7 @@ const renderHistoriqueTable = (pointages, employes) => {
                 <td>${emp ? escapeHtml(emp.prenom + ' ' + emp.nom) : 'N/A'}</td>
                 <td>${escapeHtml(p.heureDebut || '-')}</td>
                 <td>${escapeHtml(p.heureFin || '-')}</td>
-                <td>${p.pause || 0} min</td>
+                <td>${escapeHtml(p.pause || 0)} min</td>
                 <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
                 <td>
                     <button class="btn btn-sm btn-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
@@ -4913,20 +5080,27 @@ const saveQuickPointage = (event) => {
     const reenable = disableSaveBtn(event);
     try {
         const form = document.getElementById('quickPointageForm');
+        if (!form?.reportValidity()) return;
         const formData = new FormData(form);
 
         const employeId = formData.get('employeId');
         const date = formData.get('date');
         const heureDebut = formData.get('heureDebut');
         const heureFin = formData.get('heureFin');
-        const pause = parseInt(formData.get('pause')) || 0;
+        const pause = Number(formData.get('pause') || 0);
 
         if (!employeId || !date || !heureDebut || !heureFin) {
             showToast('Veuillez remplir tous les champs', 'error');
             return;
         }
-        if (parseHHMM(heureDebut) === null || parseHHMM(heureFin) === null) {
+        const debutMin = parseHHMM(heureDebut);
+        const finMin = parseHHMM(heureFin);
+        if (debutMin === null || finMin === null) {
             showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
+            return;
+        }
+        if (!Number.isInteger(pause) || pause < 0 || computePointageMinutes(debutMin, finMin, pause) === null) {
+            showToast('La pause doit être un nombre entier positif ou nul et ne pas dépasser la durée du pointage', 'error');
             return;
         }
 
@@ -5177,7 +5351,7 @@ const renderCommandes = () => {
                     ${showArchives ? '← Actives' : 'Archives'}
                 </button>
                 ${showArchives
-                    ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel()" title="Exporter Excel">📤 Excel</button>`
+                    ? `<button class="btn btn-ghost btn-sm" onclick="exportArchivesExcel(false)" title="Exporter Excel">📤 Excel</button>`
                     : `<button class="btn btn-ghost btn-sm" onclick="checkStockAndUpdateCommandes()" title="Marquer produites les commandes en attente réalisables avec le stock actuel">✓ Stock</button>
                        <button class="btn btn-primary btn-sm" onclick="showCommandeModal()">+ Créer</button>`}
             </div>
@@ -5297,7 +5471,7 @@ const showCommandeModal = (id = null) => {
     _commandeModalClientOptions = clientOptions.map(c => ({ id: c.id, label: c.societe || c.nom }));
 
     modal.show(id ? 'Modifier commande' : 'Nouvelle commande', `
-        <form id="commandeForm">
+        <form id="commandeForm" data-record-id="${escapeHtml(commande?.id || generateId())}">
             <div class="form-row">
                 <div class="form-group">
                     <label>Client</label>
@@ -5381,7 +5555,7 @@ const showCommandeModal = (id = null) => {
     }
 };
 
-const saveCommande = (event, id) => {
+const saveCommande = async (event, id) => {
     const reenable = disableSaveBtn(event);
     try {
         const form = document.getElementById('commandeForm');
@@ -5430,6 +5604,13 @@ const saveCommande = (event, id) => {
             return;
         }
 
+        const dateLivraison = formData.get('dateLivraison');
+        if (!dateLivraison || Number.isNaN(new Date(dateLivraison).getTime())) {
+            showToast('Date de livraison invalide', 'error');
+            return;
+        }
+        if (!id) requireNumberingConnection();
+
         if (clientId === '__ponctuel__') {
             const nom = String(formData.get('ponctuelNom') || '').trim();
             if (!nom) {
@@ -5438,7 +5619,7 @@ const saveCommande = (event, id) => {
             }
             // actif: false → n'apparaît pas dans les prochaines commandes ni les filtres
             const nouveauClient = {
-                id: generateId(),
+                id: form.dataset.ponctuelClientId || generateId(),
                 societe: '',
                 nom,
                 adresse: String(formData.get('ponctuelAdresse') || '').trim(),
@@ -5452,21 +5633,20 @@ const saveCommande = (event, id) => {
                 actif: false,
                 ponctuel: true
             };
+            form.dataset.ponctuelClientId = nouveauClient.id;
             const clientsDb = DB.get('clients');
-            clientsDb.push(nouveauClient);
-            DB.set('clients', clientsDb);
+            const clientIndex = clientsDb.findIndex(client => client.id === nouveauClient.id);
+            if (clientIndex === -1) clientsDb.push(nouveauClient);
+            else clientsDb[clientIndex] = nouveauClient;
+            if (!DB.set('clients', clientsDb)) return;
             clientId = nouveauClient.id;
         }
 
-        const dateLivraison = formData.get('dateLivraison');
-        if (!dateLivraison || Number.isNaN(new Date(dateLivraison).getTime())) {
-            showToast('Date de livraison invalide', 'error');
-            return;
-        }
-
+        const recordId = id || form.dataset.recordId || generateId();
+        form.dataset.recordId = recordId;
         const commande = {
-            id: id || generateId(),
-            numero: id ? commandeExistante.numero : getNextCommandeNumero(),
+            id: recordId,
+            ...(id ? { numero: commandeExistante.numero } : {}),
             clientId,
             dateCommande: id ? commandeExistante.dateCommande : getLocalDateISOString(),
             dateLivraison,
@@ -5481,10 +5661,26 @@ const saveCommande = (event, id) => {
             } else {
                 commandes.push(commande);
             }
+            if (!DB.set('commandes', commandes)) return;
         } else {
-            commandes.push(commande);
+            if (!form._numberingAttempt) form._numberingAttempt = v11Clone(commande);
+            const created = await createNumberedRecord('commandes', commande);
+            if (!created) return;
+            if (created.statut === 'livrée') {
+                modal.hide();
+                showToast('Cette commande a déjà été livrée sur un autre appareil et ne peut plus être modifiée.', 'warning');
+                renderCommandes();
+                return;
+            }
+            const updated = v11MergeRecord(form._numberingAttempt, commande, created).record;
+            if (!v11Equal(created, updated)) {
+                const current = DB.get('commandes');
+                const index = current.findIndex(record => record.id === created.id);
+                if (index === -1) return;
+                current[index] = updated;
+                if (!DB.set('commandes', current)) return;
+            }
         }
-        DB.set('commandes', commandes);
         if (commande.statut === 'annulee') {
             deleteBLForCommande(commande.id);
         }
@@ -5494,7 +5690,7 @@ const saveCommande = (event, id) => {
         renderCommandes();
     } catch (e) {
         console.error('Error saving commande:', e);
-        showToast('Erreur lors de l\'enregistrement de la commande', 'error');
+        showToast(id ? 'Erreur lors de l\'enregistrement de la commande' : (e.message || 'Création de la commande impossible.'), 'error');
     } finally {
         if (reenable) reenable();
     }
@@ -6403,24 +6599,32 @@ const confirmAnnulerCommande = (id) => {
     });
 };
 
-const duplicateCommande = (id) => {
-    const commandes = DB.get('commandes') || [];
-    const original = commandes.find(c => c.id === id);
-    if (!original) return;
-    const copy = {
-        id: generateId(),
-        numero: getNextCommandeNumero(),
-        clientId: original.clientId,
-        dateCommande: getLocalDateISOString(),
-        dateLivraison: '',
-        statut: 'en_attente',
-        items: (original.items || []).map(i => ({ ...i }))
-    };
-    commandes.push(copy);
-    DB.set('commandes', commandes);
-    modal.hide();
-    showToast(`Commande dupliquée → #${copy.numero}`);
-    showCommandeModal(copy.id);
+const duplicateCommande = async (id, event) => {
+    const reenable = disableSaveBtn(event);
+    try {
+        const original = DB.get('commandes').find(c => c.id === id);
+        if (!original) return;
+        const button = event?.target?.closest('button');
+        const recordId = button?.dataset.copyId || generateId();
+        if (button) button.dataset.copyId = recordId;
+        const copy = await createNumberedRecord('commandes', {
+            id: recordId,
+            clientId: original.clientId,
+            dateCommande: getLocalDateISOString(),
+            dateLivraison: '',
+            statut: 'en_attente',
+            items: getItems(original).map(i => ({ ...i }))
+        });
+        if (!copy) return;
+        modal.hide();
+        showToast(`Commande dupliquée → #${copy.numero}`);
+        showCommandeModal(copy.id);
+    } catch (e) {
+        console.error('Duplication de commande impossible :', e);
+        showToast(e.message || 'Duplication de la commande impossible.', 'error');
+    } finally {
+        if (reenable) reenable();
+    }
 };
 
 const toggleArchives = () => {
@@ -6430,25 +6634,32 @@ const toggleArchives = () => {
 };
 
 // Archives
+const filterArchivedCommandes = (commandes, applyFilters = true) => {
+    const filterYear = applyFilters ? DB.getFilter('archive_year') : '';
+    const filterClient = applyFilters ? DB.getFilter('archive_client') : '';
+    const filterStatut = applyFilters ? DB.getFilter('archive_statut') : '';
+    return commandes.filter(c => {
+        if (c.statut !== 'livrée' && c.statut !== 'annulee') return false;
+        const year = c.dateCommande ? c.dateCommande.substring(0, 4) : '2024';
+        return (!filterYear || year === filterYear)
+            && (!filterClient || c.clientId === filterClient)
+            && (!filterStatut || c.statut === filterStatut);
+    }).sort((a, b) => new Date(b.dateCommande) - new Date(a.dateCommande));
+};
+
 const renderArchives = () => {
     const savedFilterYear = DB.getFilter('archive_year');
     const savedFilterClient = DB.getFilter('archive_client');
     const savedFilterStatut = DB.getFilter('archive_statut') || '';
 
-    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée' || c.statut === 'annulee');
+    const commandes = filterArchivedCommandes(DB.get('commandes'), false);
     const clients = DB.get('clients') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
 
     const years = [...new Set(commandes.map(c => c.dateCommande ? c.dateCommande.substring(0, 4) : '2024'))].sort().reverse();
 
-    const filteredCommandes = commandes.filter(c => {
-        const year = c.dateCommande ? c.dateCommande.substring(0, 4) : '2024';
-        const matchesYear = !savedFilterYear || year === savedFilterYear;
-        const matchesClient = !savedFilterClient || c.clientId === savedFilterClient;
-        const matchesStatut = !savedFilterStatut || c.statut === savedFilterStatut;
-        return matchesYear && matchesClient && matchesStatut;
-    });
+    const filteredCommandes = filterArchivedCommandes(commandes);
 
     let html = `
         <div class="card">
@@ -6525,8 +6736,8 @@ const renderArchives = () => {
     safeRender(html);
 };
 
-const exportArchivesExcel = () => {
-    const commandes = DB.get('commandes').filter(c => c.statut === 'livrée' || c.statut === 'annulee');
+const exportArchivesExcel = (applyFilters = true) => {
+    const commandes = filterArchivedCommandes(DB.get('commandes'), applyFilters);
     const clients = DB.get('clients');
     const aromes = DB.get('aromes');
     const formats = DB.get('formats');
@@ -6689,7 +6900,7 @@ const showLivraisonDetails = (id) => {
         return `<tr>
             <td>${escapeHtml(a?.nom || l.aromeNom || '?')}</td>
             <td>${escapeHtml(f?.nom || l.formatNom || '?')}</td>
-            <td>${l.quantite}</td>
+            <td>${escapeHtml(l.quantite)}</td>
         </tr>`;
     }).join('');
 
@@ -6702,7 +6913,7 @@ const showLivraisonDetails = (id) => {
             <td>${escapeHtml(lot.arome || '?')}</td>
             <td>${escapeHtml(lot.format || '?')}</td>
             <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
-            <td>${lot.quantite || 0}</td>
+            <td>${escapeHtml(lot.quantite || 0)}</td>
         </tr>
     `).join('');
     const forcedTraceCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
@@ -6809,7 +7020,7 @@ const syncBLTraceFromCommande = (livraison, commande) => {
     };
 };
 
-const getOrCreateBL = (commandeId) => {
+const getOrCreateBL = async (commandeId) => {
     const commandes = DB.get('commandes') || [];
     const livraisons = DB.get('livraisons') || [];
     const commande = commandes.find(c => c.id === commandeId);
@@ -6829,10 +7040,15 @@ const getOrCreateBL = (commandeId) => {
     return generateBL(commandeId);
 };
 
-const prepareCommandeBLExport = (commandeId) => {
-    const livraison = getOrCreateBL(commandeId);
-    if (!livraison) return;
-    showPrepareBLExportModal(livraison.id);
+const prepareCommandeBLExport = async (commandeId) => {
+    try {
+        const livraison = await getOrCreateBL(commandeId);
+        if (!livraison) return;
+        showPrepareBLExportModal(livraison.id);
+    } catch (e) {
+        console.error('Création du BL impossible :', e);
+        showToast(e.message || 'Création du bulletin de livraison impossible.', 'error');
+    }
 };
 
 const saveBLPreparation = (livraisonId) => {
@@ -6891,7 +7107,7 @@ const showPrepareBLExportModal = (livraisonId) => {
             <td>${escapeHtml(lot.arome || '?')}</td>
             <td>${escapeHtml(lot.format || '?')}</td>
             <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
-            <td>${lot.quantite || 0}</td>
+            <td>${escapeHtml(lot.quantite || 0)}</td>
         </tr>
     `).join('');
 
@@ -6942,7 +7158,7 @@ const showPrepareBLExportModal = (livraisonId) => {
     `, 'large');
 };
 
-const generateBL = (commandeId) => {
+const generateBL = async (commandeId) => {
     const commandes = DB.get('commandes') || [];
     const aromes = DB.get('aromes') || [];
     const formats = DB.get('formats') || [];
@@ -6967,7 +7183,6 @@ const generateBL = (commandeId) => {
 
     const livraison = {
         id: generateId(),
-        numeroBL: getNextBLNumero(),
         commandeId: commandeId,
         clientId: commande.clientId,
         dateBL: getLocalDateISOString(),
@@ -6982,11 +7197,7 @@ const generateBL = (commandeId) => {
         lotsTraces: buildLotsTracesForCommande(commande)
     };
 
-    const livraisons = DB.get('livraisons') || [];
-    livraisons.push(livraison);
-    DB.set('livraisons', livraisons);
-
-    return livraison;
+    return createNumberedRecord('livraisons', livraison);
 };
 
 const exportPreparedBL = (livraisonId, format) => {
@@ -8338,7 +8549,7 @@ const mettreAJourRecipientsUI = (aromeNom) => {
                 ingList.innerHTML = recipient.ingredients.map(ing => `
                     <li>
                         <span>${escapeHtml(ing.nom)}</span>
-                        <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
+                        <strong>${escapeHtml(ing.quantite)} ${escapeHtml(displayUnit(ing.unite))}</strong>
                     </li>
                 `).join('');
             }
@@ -8361,7 +8572,7 @@ const findInventaireItemByName = (items, nom) => {
 
 const isWaterIngredient = (nom) => {
     const normalized = normalizeName(nom);
-    return normalized.includes('eau');
+    return normalized === 'eau';
 };
 
 const getBottleInventoryItem = (items, format) => {
@@ -8439,7 +8650,7 @@ const confirmerProduction = (aromeNom, recipientIndex) => {
                         ${recipient.ingredients.map(ing => `
                             <li>
                                 <span>${escapeHtml(ing.nom)}</span>
-                                <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
+                                <strong>${escapeHtml(ing.quantite)} ${escapeHtml(displayUnit(ing.unite))}</strong>
                             </li>
                         `).join('')}
                     </ul>
@@ -8504,7 +8715,7 @@ const confirmerProductionArome = (aromeNom) => {
                         ${ingredients.map(ing => `
                             <li>
                                 <span>${escapeHtml(ing.nom)}</span>
-                                <strong>${ing.quantite} ${displayUnit(ing.unite)}</strong>
+                                <strong>${escapeHtml(ing.quantite)} ${escapeHtml(displayUnit(ing.unite))}</strong>
                             </li>
                         `).join('')}
                     </ul>
@@ -8601,8 +8812,8 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
         else btGrandBouchon += quantite;
     });
 
-    const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.CAPSULE_LOSS);
-    const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.CAPSULE_LOSS);
+    const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.BOUCHON_MARGIN);
+    const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.BOUCHON_MARGIN);
 
     if (bouchonsPetitsNecessaires > 0) {
         const bouchonPetitItem = findInventaireItemByName(inventaire, 'Bouchons 25cl');
@@ -8936,7 +9147,7 @@ const renderInventaire = () => {
                                     <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
                                 </div>
                             </div>
-                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
+                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${escapeHtml(item.seuilAlerte)} ${escapeHtml(item.unite)}</div>` : ''}
                           `;
                       }).join('')}
                 </div>
@@ -8968,7 +9179,7 @@ const renderInventaire = () => {
                                     <button class="btn btn-sm btn-danger" data-click="delete-inventaire-item" data-id="${escapeHtml(item.id)}">×</button>
                                 </div>
                             </div>
-                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${item.seuilAlerte} ${item.unite}</div>` : ''}
+                            ${isAlerte ? `<div class="inventaire-alerte-text">Stock bas! Seuil: ${escapeHtml(item.seuilAlerte)} ${escapeHtml(item.unite)}</div>` : ''}
                           `;
                       }).join('')}
                 </div>
@@ -9024,7 +9235,7 @@ const showInventaireModal = (categorie, id = null) => {
             </div>
             <div class="form-group">
                 <label>Seuil d'alerte (stock bas)</label>
-                <input type="number" name="seuilAlerte" value="${item?.seuilAlerte || 0}" min="0">
+                <input type="number" name="seuilAlerte" value="${escapeHtml(safeNumAttr(item?.seuilAlerte))}" min="0">
                 <small class="text-muted">Alerte quand la quantité est en dessous de ce seuil</small>
             </div>
         </form>
@@ -9132,6 +9343,7 @@ const renderParametres = () => {
     const formats = DB.get('formats') || [];
     const recettes = DB.get('recettes') || [];
     const clients = DB.get('clients') || [];
+    const syncConflicts = v11GetQueue().filter(op => op.blockedReason);
 
     let html = `
         <div class="settings-grid">
@@ -9192,7 +9404,7 @@ const renderParametres = () => {
                         <li class="settings-item">
                             <div class="settings-item-info">
                                 <span>${escapeHtml(f.nom)}</span>
-                                <span class="text-muted">(${f.contenanceCl} cl)</span>
+                                <span class="text-muted">(${escapeHtml(f.contenanceCl)} cl)</span>
                                 <span class="badge ${f.actif ? 'badge-success' : 'badge-default'}">${f.actif ? 'Actif' : 'Inactif'}</span>
                             </div>
                             <div class="settings-item-actions">
@@ -9216,12 +9428,13 @@ const renderParametres = () => {
                     ${recettes.length === 0 ? '<li class="settings-item text-muted">Aucune recette</li>' :
                       recettes.map(r => {
                           const arome = aromes.find(a => a.id === r.aromeId);
+                          const ingredientCount = Array.isArray(r.ingredients) ? r.ingredients.length : 0;
                           return `
                             <li class="settings-item">
                                 <div class="settings-item-info">
                                     <span class="color-dot" style="background: ${safeColor(arome?.couleur)}"></span>
                                     <span>${escapeHtml(r.nom)}</span>
-                                    <span class="text-muted">(${r.ingredients.length} ingrédient${r.ingredients.length > 1 ? 's' : ''})</span>
+                                    <span class="text-muted">(${ingredientCount} ingrédient${ingredientCount > 1 ? 's' : ''})</span>
                                 </div>
                                 <div class="settings-item-actions">
                                     <button class="btn btn-sm btn-secondary" data-click="show-recette-modal" data-id="${escapeHtml(r.id)}">Modifier</button>
@@ -9275,8 +9488,9 @@ const renderParametres = () => {
                     <input type="file" id="importDataFile" accept=".json" style="display:none" onchange="importAllData(event)">
                 </div>
                 <p class="text-muted" style="font-size: 12px; padding: 0 12px 12px;">
-                    La sauvegarde inclut: employés, aromes, formats, recettes, clients, lots, commandes et pointages.
+                    La sauvegarde inclut les 12 tables et les modifications en conflit conservées pour vérification.
                 </p>
+                ${syncConflicts.length > 0 ? `<p class="text-warning" style="padding: 0 12px 12px;">${syncConflicts.length} modification(s) en conflit nécessitent une vérification. Sauvegardez-les avant toute intervention ; elles ne seront pas appliquées automatiquement.</p>` : ''}
             </div>
 
             <div class="settings-card" style="grid-column: 1 / -1;">
@@ -9510,7 +9724,7 @@ const showFormatModal = (id = null) => {
                 </div>
                 <div class="form-group">
                     <label>Contenance (cl)</label>
-                    <input type="number" name="contenanceCl" value="${format?.contenanceCl || 50}" min="1" required>
+                    <input type="number" name="contenanceCl" value="${escapeHtml(safeNumAttr(format?.contenanceCl ?? 50))}" min="1" required>
                 </div>
             </div>
             <div class="form-group">
@@ -10113,6 +10327,7 @@ const exportAllData = () => {
     ALL_TABLES.forEach(table => {
         data[table] = DB.get(table) || [];
     });
+    data.syncConflicts = v11GetQueue().filter(op => op.blockedReason);
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -10162,6 +10377,59 @@ const _importCloneLocalCache = () => {
 };
 const _importCloneVersions = () => JSON.parse(JSON.stringify(V11._versions || {}));
 
+const validateImportData = (data) => {
+    const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const hasField = (record, field) => Object.prototype.hasOwnProperty.call(record, field);
+    const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+    if (!isRecord(data)) return { valid: false, reason: 'La sauvegarde doit être un objet' };
+
+    const numericFields = {
+        employees: ['tauxHoraire'],
+        formats: ['contenanceCl'],
+        lots: ['quantite'],
+        pointages: ['pause'],
+        inventaire: ['quantite', 'seuilAlerte'],
+        livraisons: ['caissesVertesLivrees', 'caissesNoiresLivrees'],
+        history: ['quantity']
+    };
+    const nestedFields = {
+        recettes: { ingredients: true },
+        commandes: { items: true, lotsUtilises: false },
+        livraisons: { lignes: true, lotsTraces: false }
+    };
+    const tables = ALL_TABLES.filter(table => hasField(data, table));
+    if (tables.length === 0) return { valid: false, reason: 'Aucune table reconnue dans la sauvegarde' };
+
+    for (const table of tables) {
+        if (!Array.isArray(data[table])) {
+            return { valid: false, reason: `« ${table} » doit être un tableau` };
+        }
+        for (const [index, record] of data[table].entries()) {
+            const path = `${table}[${index}]`;
+            if (!isRecord(record)) return { valid: false, reason: `« ${path} » doit être un objet` };
+            for (const field of numericFields[table] || []) {
+                if (hasField(record, field) && !isNumber(record[field])) {
+                    return { valid: false, reason: `« ${path}.${field} » doit être un nombre fini` };
+                }
+            }
+            for (const [field, required] of Object.entries(nestedFields[table] || {})) {
+                if (!required && !hasField(record, field)) continue;
+                if (!Array.isArray(record[field])) {
+                    return { valid: false, reason: `« ${path}.${field} » doit être un tableau` };
+                }
+                for (const [childIndex, child] of record[field].entries()) {
+                    const childPath = `${path}.${field}[${childIndex}]`;
+                    if (!isRecord(child)) return { valid: false, reason: `« ${childPath} » doit être un objet` };
+                    if (!isNumber(child.quantite)) {
+                        return { valid: false, reason: `« ${childPath}.quantite » doit être un nombre fini` };
+                    }
+                }
+            }
+        }
+    }
+    return { valid: true, tables };
+};
+
 const importAllData = (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -10169,7 +10437,12 @@ const importAllData = (event) => {
     reader.onload = (e) => {
         try {
             const data = JSON.parse(e.target.result);
-            const tablesToImport = ALL_TABLES.filter(table => Array.isArray(data[table]));
+            const importValidation = validateImportData(data);
+            if (!importValidation.valid) {
+                showToast(`Restauration annulée : ${importValidation.reason}.`, 'error');
+                return;
+            }
+            const tablesToImport = importValidation.tables;
 
             for (const table of tablesToImport) {
                 const validation = v11ValidateTable(table, data[table]);

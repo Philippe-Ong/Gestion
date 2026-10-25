@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v11.13
+**Version:** v11.14
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -38,7 +38,10 @@ Tableau JSON d'opérations en attente de synchronisation Firestore. Chaque opér
   "record": "object|null (données complètes pour upsert, null pour delete)",
   "timestamp": "number (Date.now())",
   "knownVersion": "number|null (_version distant au moment du queuing)",
-  "base": "object|null (état serveur de référence au moment de la modification locale — fusion à trois voies)"
+  "base": "object|null (état de référence capturé avant la modification locale — fusion à trois voies)",
+  "baseCaptured": "boolean (optionnel, true pour les opérations créées depuis v11.14)",
+  "blockedReason": "string (optionnel : remote-deleted|base-unknown|id-collision)",
+  "blockedAt": "string (optionnel, date ISO du blocage)"
 }
 ```
 
@@ -72,8 +75,18 @@ Conséquences :
 - Un conflit réel (même champ modifié différemment) est signalé, jamais silencieux.
 - Une suppression locale n'est pas appliquée si le document a été modifié à distance
   depuis la `base` : l'enregistrement est rétabli et l'utilisateur averti.
-- Sans `base` connue (première synchronisation), le comportement historique « local
-  gagne » est conservé.
+- Depuis v11.14, la base est capturée avant la modification locale, y compris avant
+  le premier chargement cloud. Elle n'est jamais remplacée par un état distant plus récent.
+- Une création porte explicitement `base: null` et `baseCaptured: true`. Une ancienne
+  opération sans base fiable est bloquée ; elle ne remplace pas un document distant.
+- Si une modification vise un document supprimé à distance, celui-ci n'est pas recréé.
+  L'opération est conservée dans la file avec `blockedReason` et `blockedAt`, signalée à
+  l'utilisateur et exclue du stock affiché. Les autres opérations continuent à se synchroniser.
+- Les modifications en conflit sont incluses dans le champ optionnel `syncConflicts` de
+  la sauvegarde JSON et consultables par `window.v11Debug.blocked()`. Leur restauration
+  automatique est désactivée : elles doivent être vérifiées avant correction métier.
+- Une édition effectuée pendant une transaction est conservée et rebasée sur le résultat
+  commis, sans perdre les champs fusionnés à distance.
 
 Helpers : `v11Equal` (égalité profonde), `v11MergeRecord`, `v11GetBase`, `v11SetBase`,
 `v11SetBaseFromRemote`, `v11ApplyMergedLocal`. Debug : `window.v11Debug.conflicts()`,
@@ -217,6 +230,7 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
 ```json
 {
   "id": "uuid",
+  "numero": "string (optionnel pour les anciennes commandes)",
   "clientId": "uuid",
   "dateCommande": "date",
   "dateLivraison": "date",
@@ -226,6 +240,23 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   ]
 }
 ```
+
+**Numérotation des commandes et BL (v11.14) :** toute nouvelle commande, duplication ou
+création de BL nécessite une connexion, une session authentifiée et la synchronisation V11
+prête. Une transaction Firestore écrit ensemble le document métier, le compteur
+`syncMeta/numbering-commandes` ou `syncMeta/numbering-livraisons` (`lastNumber`) et une
+réservation `syncMeta/number-{table}-{clé}` (`recordId`, `numero`). La clé est l'ID de la
+commande pour une commande et la commande d'origine pour un BL. Les réessais réutilisent
+le même document et le même numéro ; deux appareils créant le BL d'une même commande
+retrouvent le même BL. Les compteurs sont initialisés au-dessus des numéros historiques
+distants et locaux. Les opérations locales en attente sur le document ciblé doivent être
+synchronisées avant création ou réutilisation distante.
+
+Les numéros existants sont conservés. L'édition des documents existants reste possible hors
+ligne. Les règles `syncMeta/{document}` déjà décrites couvrent les compteurs et réservations.
+Tous les appareils doivent recharger la v11.14 pour participer à cette attribution atomique ;
+les anciens clients ne mettent pas ces compteurs à jour. Aucun doublon historique n'est
+renuméroté automatiquement.
 
 ### Livraisons / Bulletins de livraison
 ```json
@@ -294,6 +325,17 @@ Génère et télécharge directement un fichier `.pdf` nommé `BL-XXXXX_YYYY-MM-
 ```
 
 **Pointages de nuit :** Les pointages où `heureFin < heureDebut` (ex. 22:00 → 02:00) sont supportés. La durée est calculée par le helper `computePointageMinutes` qui ajoute 24h (1440 min) à l'heure de fin si elle est antérieure à l'heure de début, avant de soustraire la pause.
+
+Depuis v11.14, une session ouverte la veille reste visible et peut être terminée après minuit ;
+elle empêche une deuxième arrivée. La pause saisie doit être un nombre entier positif ou nul
+qui ne dépasse pas la durée du pointage. Les exports d'archives reprennent les filtres année,
+client et statut de la vue Archives ; l'export depuis Commandes conserve toutes ses archives.
+
+**Restauration JSON (v11.14) :** les tables, objets, tableaux imbriqués et champs numériques
+sont validés avant toute écriture. Un champ numérique contenant du HTML est refusé. Les
+prix clients restent des chaînes et les propriétés optionnelles absentes restent acceptées.
+Les contenances, seuils, unités et quantités affichés sont échappés indépendamment de cette
+validation, y compris pour les anciennes données locales.
 
 ### Historique de production
 ```json
