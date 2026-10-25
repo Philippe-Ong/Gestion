@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v12.5**
+**v12.6**
 
 ## Adresse
 
@@ -117,6 +117,18 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v12.6
+
+Refonte du tableau de bord : un cockpit du jour, puis les chiffres et tendances.
+
+- **🎯 Cockpit du jour** — Un en-tête qui résume la journée, des raccourcis (+ Commande, + Lot, Pointage) et cinq tuiles cliquables : à produire, livraisons sous 7 jours, stock vendable, équipe sur place, livré ce mois (comparé aux mêmes jours du mois précédent).
+- **🚨 Priorités** — Commandes en retard ou urgentes, lots expirés, invendables ou à DLV proche, consommables sous le seuil et pointages restés ouverts, du plus critique au moins critique ; un clic ouvre directement la commande, le stock filtré, l'article ou la clôture du pointage.
+- **🚚 Livraisons · 7 jours** — Les 7 prochains jours d'un coup d'œil (un jour ouvre les commandes de ce jour) et les prochaines livraisons, retards en tête.
+- **🧪 Production à lancer** — Les 4 cuves et 2 casseroles de l'atelier remplies selon le plan, puis par arôme : litres, bouteilles, postes, échéance et recette manquante.
+- **👥 Équipe et À faire** — Pointer l'arrivée ou le départ sans quitter le tableau de bord ; tâches avec « Effacer les terminées ».
+- **📈 Chiffres & tendances** — CA ou bouteilles livrés sur 12 semaines ou 12 mois, panier moyen, bouteilles produites, meilleurs clients et ventes par arôme ; détail au survol, au toucher ou au clavier, et tableau des données.
+- **🛠️ Plan de production plus juste** (aussi dans le jumeau 3D) — Les cuves vont d'abord aux arômes dont le manque est le plus proche (première livraison non couverte par le stock), et non plus à ceux de la commande la plus proche même quand elle est déjà couverte.
 
 ### Nouveautés v12.5
 
