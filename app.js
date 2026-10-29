@@ -3567,7 +3567,9 @@ const modal = {
         // which is what we want for confirmDialog whose body has no inputs.
         const bodyFocusables = bodyEl ? bodyEl.querySelectorAll(focusableSelector) : [];
         const footerFocusables = footerEl ? footerEl.querySelectorAll(focusableSelector) : [];
-        const target = bodyFocusables[0] || footerFocusables[0] || document.getElementById('modalClose');
+        // Fiches de consultation (traçabilité, commande) : focus sur la fermeture, pas sur un lien du contenu
+        const fiche = bodyEl?.querySelector('.trace-sheet');
+        const target = fiche ? document.getElementById('modalClose') : (bodyFocusables[0] || footerFocusables[0] || document.getElementById('modalClose'));
         if (target) setTimeout(() => target.focus(), 0);
     },
     hide: () => {
@@ -13368,111 +13370,171 @@ const checkStockAndUpdateCommandes = () => {
     }
 };
 
+// Badge d'état de la commande (en retard si la livraison prévue est passée)
+const commandeStatusBadge = (commande) => {
+    const enRetard = (commande.statut === 'en_attente' || commande.statut === 'produite')
+        && (twinDaysUntil(commande.dateLivraison) ?? 0) < 0;
+    if (enRetard) return '<span class="trace-status trace-status--danger">En retard</span>';
+    const cls = { en_attente: 'warning', produite: 'info', livrée: 'success' }[commande.statut] || 'neutral';
+    return `<span class="trace-status trace-status--${cls}">${escapeHtml(getCommandeStatutLabel(commande.statut))}</span>`;
+};
+
+// Étapes datées : commandée → produite → livrée (ou livraison prévue)
+const commandeStepsHtml = (commande) => {
+    if (commande.statut === 'annulee') return '<p class="trace-alert">Commande annulée : elle n\'est plus produite ni livrée. « Restaurer » la remet en attente.</p>';
+    const rang = { en_attente: 0, produite: 1, livrée: 2 }[commande.statut] ?? 0;
+    const jours = twinDaysUntil(commande.dateLivraison);
+    const livraisonRel = jours === null ? ''
+        : jours < 0 ? `en retard de ${twinFmtInt(-jours)} j`
+        : jours === 0 ? "aujourd'hui" : jours === 1 ? 'demain' : `dans ${twinFmtInt(jours)} j`;
+    const steps = [
+        { label: 'Commandée', date: commande.dateCommande ? formatDate(commande.dateCommande) : '—', rel: '' },
+        { label: 'Produite', date: rang === 2 ? 'Faite' : rang === 1 ? 'Prête à livrer' : 'À produire', rel: '' },
+        rang === 2
+            ? { label: 'Livrée', date: commande.dateLivraisonEffective ? formatJourTrace(commande.dateLivraisonEffective) : formatDate(commande.dateLivraison), rel: commande.numeroBL ? `BL ${commande.numeroBL}` : '' }
+            : { label: 'Livraison prévue', date: commande.dateLivraison ? formatDate(commande.dateLivraison) : 'sans date', rel: livraisonRel, retard: jours !== null && jours < 0 }
+    ];
+    return `<ol class="cmd-steps">${steps.map((s, i) => {
+        const etat = i < rang || rang === 2 ? 'done' : i === rang ? 'current' : 'todo';
+        return `
+            <li class="cmd-step cmd-step--${etat}">
+                <span class="cmd-step-dot" aria-hidden="true">${etat === 'done' ? '✓' : i + 1}</span>
+                <span class="cmd-step-label">${escapeHtml(s.label)}</span>
+                <span class="cmd-step-date">${escapeHtml(s.date)}</span>
+                ${s.rel ? `<span class="cmd-step-rel${s.retard ? ' is-danger' : ''}">${escapeHtml(s.rel)}</span>` : ''}
+            </li>`;
+    }).join('')}</ol>`;
+};
+
 const showCommandeDetails = (id) => {
-    const commandes = DB.get('commandes');
-    const clients = DB.get('clients');
-    const aromes = DB.get('aromes');
-    const formats = DB.get('formats');
+    const commandes = DB.get('commandes') || [];
+    const clients = DB.get('clients') || [];
+    const aromes = DB.get('aromes') || [];
+    const formats = DB.get('formats') || [];
 
     const commande = commandes.find(c => c.id === id);
     if (!commande) return;
 
     const client = clients.find(c => c.id === commande.clientId);
-    const clientName = client ? (client.societe || client.nom) : 'N/A';
+    const clientName = client ? (client.societe || client.nom) : (commande.clientLivraison?.societe || commande.clientLivraison?.nom || 'Client inconnu');
+    const contact = client?.societe && client?.nom && client.nom !== client.societe ? client.nom : '';
+    const items = getItems(commande);
+    const montant = diagnoseCommandeMontant(commande, clients, formats);
+    const ouverte = commande.statut === 'en_attente' || commande.statut === 'produite';
 
-    const itemsHtml = getItems(commande).map(item => {
-        const arome = aromes.find(a => a.id === item.aromeId);
-        const format = formats.find(f => f.id === item.formatId);
-        return `<tr>
-            <td>${escapeHtml(arome?.nom || '?')}${item.enPlus ? ` <span class="stock-tag">${item.offert ? 'en plus · offert' : 'en plus'}</span>` : ''}</td>
-            <td>${escapeHtml(format?.nom || '?')}</td>
-            <td>${item.enPlus ? '+' : ''}${escapeHtml(String(item.quantite))}</td>
-        </tr>`;
-    }).join('');
-    // Livraison partielle : liens entre la commande livrée et son reliquat
-    const lienCommande = (cid) => {
-        const c = commandes.find(x => x.id === cid);
-        return c ? `<a href="#" data-click="show-commande-details" data-id="${escapeHtml(c.id)}" data-prevent>#${escapeHtml(getCommandeNumero(c))}</a> (${escapeHtml(getCommandeStatutLabel(c.statut).toLowerCase())})` : '—';
+    // Couverture prévisionnelle par le stock (règle d'attribution v13.0), par ligne
+    const couverture = new Map();
+    if (ouverte) {
+        const prevu = planAttributionCommandes().plan.get(id);
+        const itemsPlan = prevu ? getItems(prevu.commande) : [];
+        (prevu?.lignes || []).forEach(l => couverture.set(itemsPlan.indexOf(l.item), l));
+    }
+    const couvertureHtml = (idx) => {
+        const l = couverture.get(idx);
+        if (!l) return '';
+        if (l.manque <= 0) return '<span class="cmd-line-cover is-ok">✓ Couvert par le stock</span>';
+        const enStock = l.demande - l.manque;
+        const texte = commande.statut === 'produite'
+            ? `Stock insuffisant : manque ${twinFmtInt(l.manque)} bt`
+            : `${enStock > 0 ? `${twinFmtInt(enStock)} bt en stock · ` : ''}${twinFmtInt(l.manque)} bt à produire`;
+        return `<span class="cmd-line-cover${commande.statut === 'produite' ? ' is-danger' : ' is-todo'}">${escapeHtml(texte)}</span>`;
     };
 
-    const lotsUtilisesHtml = commande.lotsUtilises && commande.lotsUtilises.length > 0
-        ? commande.lotsUtilises.map(lot => `
-            <tr>
-                <td><a href="#" style="color: var(--primary); font-weight: 600;" data-click="show-lot-trace" data-id="${escapeHtml(String(lot.lotId))}" data-prevent>#${escapeHtml(formatLotNumero(lot.numLot || lot.lotId))}</a></td>
-                <td>${escapeHtml(lot.arome)}</td>
-                <td>${escapeHtml(lot.format)}</td>
-                <td>${escapeHtml(String(lot.quantite))}</td>
-            </tr>
-        `).join('')
-        : '';
+    const lignesHtml = items.map((item, idx) => {
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = resolveCommandeFormat(item, formats)?.format;
+        const prix = montant.items[idx];
+        const prixHtml = prix?.priceUsed > 0
+            ? `<span class="cmd-line-price">${item.offert ? 'offert' : escapeHtml(formatChf(prix.ligneTotal))}</span>
+               <span class="cmd-line-unit">${escapeHtml(`${twinFmtInt(item.quantite)} × ${formatChf(prix.priceUsed)}`)}</span>`
+            : '';
+        return `
+            <li class="cmd-line">
+                <span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>
+                <div class="cmd-line-main">
+                    <div class="cmd-line-name">${escapeHtml(arome?.nom || '?')} <span class="stock-group-format">· ${escapeHtml(format?.nom || '?')}</span>${item.enPlus ? ` <span class="stock-tag">${item.offert ? 'en plus · offert' : 'en plus'}</span>` : ''}</div>
+                    ${couvertureHtml(idx)}
+                </div>
+                <span class="cmd-line-qty">${item.enPlus ? '+' : ''}${escapeHtml(twinFmtInt(item.quantite))} bt</span>
+                ${prixHtml ? `<div class="cmd-line-amount">${prixHtml}</div>` : ''}
+            </li>`;
+    }).join('');
 
-    const livraisons = DB.get('livraisons') || [];
-    const livraison = livraisons.find(l => l.commandeId === id);
+    const totalBt = items.filter(i => !i.enPlus).reduce((s, i) => s + (Number(i.quantite) || 0), 0);
+    const enPlusBt = items.filter(i => i.enPlus).reduce((s, i) => s + (Number(i.quantite) || 0), 0);
+    const nbAromes = new Set(items.map(i => i.aromeId)).size;
 
-    const totalItems = (commande.items || []).reduce((sum, i) => sum + i.quantite, 0);
+    // Livraison partielle : liens entre la commande livrée et son reliquat
+    const lienCommande = (cid, libelle) => {
+        const c = commandes.find(x => x.id === cid);
+        return c ? `<p class="trace-note cmd-link-note">${escapeHtml(libelle)} <button type="button" class="trace-journey-link" data-click="show-commande-details" data-id="${escapeHtml(c.id)}">#${escapeHtml(getCommandeNumero(c))}</button> (${escapeHtml(getCommandeStatutLabel(c.statut).toLowerCase())})</p>` : '';
+    };
 
-    const modalTitle = `Commande #${getCommandeNumero(commande)}`;
+    const lotsHtml = (commande.lotsUtilises || []).length === 0 ? '' : `
+        <section class="trace-section">
+            <h4 class="trace-section-title">Lots livrés</h4>
+            <ul class="cmd-lots">${commande.lotsUtilises.map(lot => {
+                const arome = aromes.find(a => normalizeName(a.nom) === normalizeName(lot.arome));
+                return `
+                    <li>
+                        <button type="button" class="cmd-lot" data-click="show-lot-trace" data-id="${escapeHtml(String(lot.lotId))}" aria-label="${escapeHtml(`Tracer le lot ${formatLotNumero(lot.numLot || lot.lotId)}`)}">
+                            <span class="stock-lot-num">#${escapeHtml(formatLotNumero(lot.numLot || lot.lotId))}</span>
+                            <span class="cmd-lot-name"><span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>${escapeHtml(lot.arome || '?')} <span class="stock-group-format">· ${escapeHtml(lot.format || '?')}</span></span>
+                            <span class="cmd-lot-dlv">${lot.dlv ? `DLV ${escapeHtml(formatDate(lot.dlv))}` : ''}</span>
+                            <span class="cmd-line-qty">${escapeHtml(twinFmtInt(lot.quantite))} bt</span>
+                            ${dashIcon('chevron')}
+                        </button>
+                    </li>`;
+            }).join('')}</ul>
+        </section>`;
+
+    const initiales = !client && !commande.clientLivraison ? '?' : String(clientName).trim().split(/\s+/).slice(0, 2).map(m => m.charAt(0)).join('').toUpperCase() || '?';
     const modalBody = `
-        <div class="commande-details">
-            <p><strong>Client:</strong> ${escapeHtml(clientName)}</p>
-            <p><strong>Date commande:</strong> ${formatDate(commande.dateCommande)}</p>
-            <p><strong>Date livraison:</strong> ${formatDate(commande.dateLivraison)}</p>
-            ${commande.dateLivraisonEffective ? `<p><strong>Livrée le:</strong> ${formatDateTime(commande.dateLivraisonEffective)}</p>` : ''}
-            <p><strong>Statut:</strong> ${escapeHtml(getCommandeStatutLabel(commande.statut))}</p>
-            ${commande.reliquatDe ? `<p><strong>Reliquat de:</strong> ${lienCommande(commande.reliquatDe)}</p>` : ''}
-            ${commande.reliquatId ? `<p><strong>Reliquat:</strong> ${lienCommande(commande.reliquatId)}</p>` : ''}
-            ${renderStepTracker(commande.statut)}
-            <p><strong>Total:</strong> ${totalItems} articles</p>
-            <table class="details-table">
-                <thead>
-                    <tr>
-                        <th>Arôme</th>
-                        <th>Format</th>
-                        <th>Quantité</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${itemsHtml}
-                </tbody>
-            </table>
-            ${lotsUtilisesHtml ? `
-            <h4 style="margin-top:20px;">Lots utilisés</h4>
-            <table class="details-table">
-                <thead>
-                    <tr>
-                        <th>Lot</th>
-                        <th>Arôme</th>
-                        <th>Format</th>
-                        <th>Quantité</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${lotsUtilisesHtml}
-                </tbody>
-            </table>
-            ` : ''}
+        <div class="trace-sheet">
+            <div class="trace-hero">
+                <span class="trace-hero-swatch cmd-hero-avatar" aria-hidden="true">${escapeHtml(initiales)}</span>
+                <div class="trace-hero-text">
+                    <div class="trace-hero-name">${escapeHtml(clientName)}</div>
+                    <div class="trace-hero-sub">${escapeHtml([`Commande #${getCommandeNumero(commande)}`, contact].filter(Boolean).join(' · '))}</div>
+                </div>
+                ${commandeStatusBadge(commande)}
+            </div>
+
+            ${commandeStepsHtml(commande)}
+            ${commande.reliquatDe ? lienCommande(commande.reliquatDe, 'Reliquat de la commande') : ''}
+            ${commande.reliquatId ? lienCommande(commande.reliquatId, 'Livraison partielle : reliquat') : ''}
+
+            <div class="trace-kpis cmd-kpis">
+                <div class="trace-kpi"><span class="trace-kpi-value">${escapeHtml(`${twinFmtInt(totalBt)} bt`)}</span><span class="trace-kpi-label">${escapeHtml(enPlusBt > 0 ? `Bouteilles · +${twinFmtInt(enPlusBt)} en plus` : 'Bouteilles')}</span></div>
+                <div class="trace-kpi"><span class="trace-kpi-value">${escapeHtml(twinFmtInt(nbAromes))}</span><span class="trace-kpi-label">${nbAromes > 1 ? 'Arômes' : 'Arôme'}</span></div>
+                <div class="trace-kpi trace-kpi--stock"><span class="trace-kpi-value">${escapeHtml(montant.hasPrice ? formatChf(montant.total) : '—')}</span><span class="trace-kpi-label">${montant.hasPrice ? 'Montant' : 'Montant (tarif inconnu)'}</span></div>
+            </div>
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Articles</h4>
+                ${lignesHtml ? `<ul class="cmd-lines">${lignesHtml}</ul>` : '<p class="text-muted">Aucun article</p>'}
+            </section>
+            ${lotsHtml}
         </div>
     `;
 
-    let actionsHtml = `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`;
+    const btn = (cls, action, label) => `<button class="btn ${cls}" data-click="${action}" data-id="${escapeHtml(id)}">${label}</button>`;
+    const annuler = `<button class="btn btn-ghost btn-ghost-danger modal-footer-start" data-click="confirm-annuler-commande" data-id="${escapeHtml(id)}">Annuler la commande</button>`;
+    const fermer = '<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>';
+    let actionsHtml = fermer;
     if (commande.statut === 'en_attente') {
-        actionsHtml = `<button class="btn btn-secondary" data-click="edit-commande" data-id="${escapeHtml(id)}">Modifier</button>`
-            + `<button class="btn btn-secondary" data-click="duplicate-commande" data-id="${escapeHtml(id)}">Dupliquer</button>`
-            + `<button class="btn btn-success" data-click="marquer-commande-produite" data-id="${escapeHtml(id)}">Marquer produite</button>`
-            + `<button class="btn btn-danger" data-click="confirm-annuler-commande" data-id="${escapeHtml(id)}">Annuler la commande</button>` + actionsHtml;
+        actionsHtml = annuler + btn('btn-secondary', 'duplicate-commande', 'Dupliquer') + btn('btn-secondary', 'edit-commande', 'Modifier')
+            + btn('btn-success', 'marquer-commande-produite', 'Marquer produite');
     } else if (commande.statut === 'produite') {
-        actionsHtml = `<button class="btn btn-secondary" data-click="edit-commande" data-id="${escapeHtml(id)}">Modifier</button>`
-            + `<button class="btn btn-secondary" data-click="duplicate-commande" data-id="${escapeHtml(id)}">Dupliquer</button>`
-            + `<button class="btn btn-success" data-click="livrer-commande" data-id="${escapeHtml(id)}">Livrer</button>`
-            + `<button class="btn btn-danger" data-click="confirm-annuler-commande" data-id="${escapeHtml(id)}">Annuler la commande</button>` + actionsHtml;
+        actionsHtml = annuler + btn('btn-secondary', 'duplicate-commande', 'Dupliquer') + btn('btn-secondary', 'edit-commande', 'Modifier')
+            + btn('btn-success', 'livrer-commande', 'Livrer');
     } else if (commande.statut === 'livrée') {
-        actionsHtml = `<button class="btn btn-secondary" data-click="commande-bl" data-id="${escapeHtml(id)}">Bulletin de livraison</button>`
-            + `<button class="btn btn-secondary" data-click="duplicate-commande" data-id="${escapeHtml(id)}">Dupliquer</button>`
-            + `<button class="btn btn-secondary" data-click="restaurer-commande" data-id="${escapeHtml(id)}">Restaurer</button>` + actionsHtml;
+        actionsHtml = btn('btn-ghost modal-footer-start', 'restaurer-commande', 'Restaurer') + btn('btn-secondary', 'duplicate-commande', 'Dupliquer')
+            + fermer + btn('btn-primary', 'commande-bl', 'Bulletin de livraison');
     } else if (commande.statut === 'annulee') {
-        actionsHtml = `<button class="btn btn-secondary" data-click="restaurer-commande" data-id="${escapeHtml(id)}">Restaurer</button>` + actionsHtml;
+        actionsHtml = fermer + btn('btn-primary', 'restaurer-commande', 'Restaurer');
     }
-    modal.show(modalTitle, modalBody, actionsHtml);
+    modal.show(`Commande #${getCommandeNumero(commande)}`, modalBody, actionsHtml);
 };
 
 const deleteCommande = (id) => {
