@@ -1267,6 +1267,8 @@ CLICK_HANDLERS['delete-format'] = (el) => deleteFormat(el.getAttribute('data-id'
 CLICK_HANDLERS['show-recette-modal'] = (el) => showRecetteModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['delete-recette'] = (el) => deleteRecette(el.getAttribute('data-id'));
 CLICK_HANDLERS['show-client-modal'] = (el) => showClientModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['show-client-details'] = (el) => showClientDetails(el.getAttribute('data-id'));
+CLICK_HANDLERS['client-new-commande'] = (el) => { modal.hide(); showCommandeModal(null, { clientId: el.getAttribute('data-id') }); };
 CLICK_HANDLERS['delete-client'] = (el) => deleteClient(el.getAttribute('data-id'));
 CLICK_HANDLERS['save-employe'] = (el, e) => saveEmploye(e, el.getAttribute('data-id') || '');
 CLICK_HANDLERS['save-arome'] = (el, e) => saveArome(e, el.getAttribute('data-id') || '');
@@ -13608,7 +13610,7 @@ const showCommandeDetails = (id) => {
             <div class="trace-hero">
                 <span class="trace-hero-swatch cmd-hero-avatar" aria-hidden="true">${escapeHtml(initiales)}</span>
                 <div class="trace-hero-text">
-                    <div class="trace-hero-name">${escapeHtml(clientName)}</div>
+                    <div class="trace-hero-name">${client ? `<button type="button" class="client-name-link" data-click="show-client-details" data-id="${escapeHtml(client.id)}">${escapeHtml(clientName)}</button>` : escapeHtml(clientName)}</div>
                     <div class="trace-hero-sub">${escapeHtml([`Commande #${getCommandeNumero(commande)}`, contact].filter(Boolean).join(' · '))}</div>
                 </div>
                 ${commandeStatusBadge(commande)}
@@ -17143,13 +17145,15 @@ const renderParametres = () => {
                       clients.map(c => `
                         <li class="settings-item">
                             <div class="settings-item-info">
-                                <div><strong>${escapeHtml(c.societe || '')}</strong> ${escapeHtml(c.nom || '')}</div>
+                                <div><button type="button" class="client-name-link" data-click="show-client-details" data-id="${escapeHtml(c.id)}"><strong>${escapeHtml(c.societe || '')}</strong> ${escapeHtml(c.nom || '')}</button></div>
                                 <div class="text-muted" style="font-size:12px;">${escapeHtml(c.adresse || '')} ${escapeHtml(c.npa || '')}</div>
                                 ${c.actif ? '' : `<span class="badge badge-default">${c.ponctuel ? 'Ponctuel' : 'Inactif'}</span>`}
                             </div>
                             <div class="settings-item-actions">
-                                <button class="btn btn-sm btn-secondary" data-click="show-client-modal" data-id="${escapeHtml(c.id)}">Modifier</button>
-                                ${rowMenuHtml(c.societe || c.nom || 'client', `<button type="button" class="is-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>`)}
+                                <button class="btn btn-sm btn-secondary" data-click="show-client-details" data-id="${escapeHtml(c.id)}">Fiche</button>
+                                ${rowMenuHtml(c.societe || c.nom || 'client', `
+                                    <button type="button" data-click="show-client-modal" data-id="${escapeHtml(c.id)}">Modifier</button>
+                                    <button type="button" class="is-danger" data-click="delete-client" data-id="${escapeHtml(c.id)}">Supprimer</button>`)}
                             </div>
                         </li>
                       `).join('')}
@@ -17710,85 +17714,254 @@ const syncRecettesInventaire = () => {
 };
 
 // Settings - Clients
-const showClientModal = (id = null) => {
-    const clients = DB.get('clients');
-    const client = id ? clients.find(c => c.id === id) : null;
+const TARIF_CATEGORIE_LABELS = { custom: 'Personnalisé', distributeur: 'Distributeur', prive: 'Privé', restaurant: 'Restaurant' };
 
-    modal.show(id ? 'Modifier client' : 'Nouveau client', `
-        <form id="clientForm">
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Société</label>
-                    <input type="text" name="societe" value="${escapeHtml(client?.societe || '')}">
+// Prix appliqué à un client pour une contenance : son prix, sinon celui de sa catégorie
+const clientPrixEffectif = (client, key) => {
+    const propre = parseFloat(String(client?.[key] || '').replace(',', '.'));
+    if (propre > 0) return { prix: propre, source: 'client' };
+    const preset = parseFloat(TARIF_PRESETS[normalizeTarifKey(client?.tarifs)]?.[key]);
+    return preset > 0 ? { prix: preset, source: 'categorie' } : null;
+};
+
+// Ligne de commande cliquable (fiche client)
+const clientCommandeRowHtml = (cmd) => {
+    const bt = getItems(cmd).reduce((s, i) => s + (Number(i.quantite) || 0), 0);
+    const date = cmd.statut === 'livrée' && cmd.dateLivraisonEffective ? formatJourTrace(cmd.dateLivraisonEffective) : (cmd.dateLivraison ? formatDate(cmd.dateLivraison) : 'sans date');
+    const jours = twinDaysUntil(cmd.dateLivraison);
+    const quand = cmd.statut === 'livrée' ? `livrée le ${date}`
+        : cmd.statut === 'annulee' ? `prévue le ${date}`
+        : jours === null ? 'sans date'
+        : jours < 0 ? `livraison ${date} · en retard de ${twinFmtInt(-jours)} j`
+        : `livraison ${date} · ${jours === 0 ? "aujourd'hui" : jours === 1 ? 'demain' : `dans ${twinFmtInt(jours)} j`}`;
+    return `
+        <li>
+            <button type="button" class="cmd-lot client-cmd" data-click="show-commande-details" data-id="${escapeHtml(cmd.id)}">
+                <span class="stock-lot-num">#${escapeHtml(getCommandeNumero(cmd))}</span>
+                <span class="client-cmd-when">${escapeHtml(quand)}</span>
+                ${commandeStatusBadge(cmd)}
+                <span class="cmd-line-qty">${escapeHtml(twinFmtInt(bt))} bt</span>
+                ${dashIcon('chevron')}
+            </button>
+        </li>`;
+};
+
+const showClientDetails = (id) => {
+    const clients = DB.get('clients') || [];
+    const client = clients.find(c => c.id === id);
+    if (!client) {
+        showToast('Client introuvable', 'error');
+        return;
+    }
+    const formats = DB.get('formats') || [];
+    const aromes = DB.get('aromes') || [];
+    const commandes = (DB.get('commandes') || []).filter(c => c.clientId === id);
+    const nom = client.societe || client.nom || 'Client sans nom';
+    const contact = client.societe && client.nom && client.nom !== client.societe ? client.nom : '';
+    const categorie = normalizeTarifKey(client.tarifs);
+    const initiales = String(nom).trim().split(/\s+/).slice(0, 2).map(m => m.charAt(0)).join('').toUpperCase() || '?';
+
+    const ouvertes = sortCommandesByDateLivraison(commandes.filter(c => c.statut === 'en_attente' || c.statut === 'produite'))
+        .map(({ commande }) => commande);
+    const dateLivree = (c) => c.dateLivraisonEffective || c.dateLivraison || '';
+    const livrees = commandes.filter(c => c.statut === 'livrée')
+        .sort((a, b) => (Date.parse(dateLivree(b)) || 0) - (Date.parse(dateLivree(a)) || 0));
+    const annee = new Date().getFullYear();
+    const livreesAnnee = livrees.filter(c => String(dateLivree(c)).slice(0, 4) === String(annee));
+    const btDe = (c) => getItems(c).reduce((s, i) => s + (Number(i.quantite) || 0), 0);
+    const btAnnee = livreesAnnee.reduce((s, c) => s + btDe(c), 0);
+    const montants = livreesAnnee.map(c => getCommandeMontant(c, clients, formats)).filter(m => m !== null);
+    const caAnnee = montants.length ? montants.reduce((s, m) => s + m, 0) : null;
+    const derniere = livrees[0] ? dateLivree(livrees[0]) : '';
+    const historique = commandes.filter(c => c.statut === 'livrée' || c.statut === 'annulee')
+        .sort((a, b) => (Date.parse(dateLivree(b)) || 0) - (Date.parse(dateLivree(a)) || 0));
+
+    // Arômes les plus livrés (toutes années)
+    const parArome = new Map();
+    livrees.forEach(c => getItems(c).forEach(i => parArome.set(i.aromeId, (parArome.get(i.aromeId) || 0) + (Number(i.quantite) || 0))));
+    const topAromes = [...parArome.entries()].filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const maxArome = topAromes[0]?.[1] || 1;
+
+    const kpi = (label, value, extra = '') => `<div class="trace-kpi${extra}"><span class="trace-kpi-value">${escapeHtml(value)}</span><span class="trace-kpi-label">${escapeHtml(label)}</span></div>`;
+    const prixHtml = [['prix25cl', '25 cl'], ['prix50cl', '50 cl'], ['prix100cl', '1 l']].map(([key, label]) => {
+        const p = clientPrixEffectif(client, key);
+        return `
+            <div class="trace-date">
+                <span class="trace-date-label">${escapeHtml(label)}</span>
+                <span class="trace-date-value">${escapeHtml(p ? formatChf(p.prix) : '—')}</span>
+                <span class="trace-date-rel">${escapeHtml(p ? (p.source === 'client' ? 'prix du client' : 'prix de la catégorie') : 'pas de prix')}</span>
+            </div>`;
+    }).join('');
+    const duree = clientDureeVieMin(client);
+    const badge = client.actif !== false
+        ? '<span class="trace-status trace-status--success">Actif</span>'
+        : `<span class="trace-status trace-status--neutral">${client.ponctuel ? 'Ponctuel' : 'Inactif'}</span>`;
+
+    modal.show(nom, `
+        <div class="trace-sheet">
+            <div class="trace-hero">
+                <span class="trace-hero-swatch cmd-hero-avatar" aria-hidden="true">${escapeHtml(initiales)}</span>
+                <div class="trace-hero-text">
+                    <div class="trace-hero-name">${escapeHtml(nom)}</div>
+                    <div class="trace-hero-sub">${escapeHtml([contact, `Tarif ${TARIF_CATEGORIE_LABELS[categorie] || 'personnalisé'}`].filter(Boolean).join(' · '))}</div>
                 </div>
-                <div class="form-group">
-                    <label>Prénom & Nom</label>
-                    <input type="text" name="nom" value="${escapeHtml(client?.nom || '')}">
-                </div>
+                ${badge}
             </div>
-            <div class="form-group">
-                <label>Adresse</label>
-                <input type="text" name="adresse" value="${escapeHtml(client?.adresse || '')}">
+
+            <div class="bl-dest">
+                ${client.adresse || client.npa || client.localite
+                    ? [client.adresse, `${client.npa || ''} ${client.localite || ''}`.trim()].filter(Boolean).map(l => `<div class="rappel-client-info">${escapeHtml(l)}</div>`).join('')
+                    : '<div class="rappel-client-info text-muted">Pas d\'adresse enregistrée</div>'}
+                <div class="rappel-client-info">${client.coord ? linkifyContact(client.coord) : '<span class="text-muted">Pas de coordonnées enregistrées</span>'}</div>
+                ${client.modeFact ? `<div class="rappel-client-info">Facturation : ${escapeHtml(client.modeFact)}</div>` : ''}
             </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>NPA & Localité</label>
-                    <input type="text" name="npa" value="${escapeHtml(client?.npa || '')}">
-                </div>
-                <div class="form-group">
-                    <label>Catégorie tarif</label>
-                    <select name="tarifs" onchange="applyTarifPreset(this)">
-                        ${(() => {
-                            const cat = normalizeTarifKey(client?.tarifs);
-                            return `
-                            <option value="custom" ${cat === 'custom' ? 'selected' : ''}>Personnalisé</option>
-                            <option value="distributeur" ${cat === 'distributeur' ? 'selected' : ''}>Distributeur (2.25 / 3.80 / 6.–)</option>
-                            <option value="prive" ${cat === 'prive' ? 'selected' : ''}>Privé (3.– / 5.– / 8.50)</option>
-                            <option value="restaurant" ${cat === 'restaurant' ? 'selected' : ''}>Restaurant (litre 4.–)</option>`;
-                        })()}
-                    </select>
-                </div>
+
+            <div class="trace-kpis bl-kpis">
+                ${kpi('En cours', twinFmtInt(ouvertes.length))}
+                ${kpi(`Livré en ${annee}`, `${twinFmtInt(btAnnee)} bt`)}
+                ${kpi(`CA ${annee}`, caAnnee === null ? '—' : formatChf(caAnnee), ' trace-kpi--stock')}
+                ${kpi('Dernière livraison', derniere ? formatJourTrace(derniere) : '—')}
             </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Prix 25cl</label>
-                    <input type="text" name="prix25cl" value="${escapeHtml(client?.prix25cl || '')}" oninput="onPrixInputChange()">
-                </div>
-                <div class="form-group">
-                    <label>Prix 50cl</label>
-                    <input type="text" name="prix50cl" value="${escapeHtml(client?.prix50cl || '')}" oninput="onPrixInputChange()">
-                </div>
-                <div class="form-group">
-                    <label>Prix 100cl</label>
-                    <input type="text" name="prix100cl" value="${escapeHtml(client?.prix100cl || '')}" oninput="onPrixInputChange()">
-                </div>
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Tarifs <span class="trace-section-hint">${escapeHtml(duree > 0 ? `DLV d'au moins ${twinFmtInt(duree)} j à la livraison` : 'aucune exigence de durée de vie')}</span></h4>
+                <div class="trace-life"><div class="trace-dates">${prixHtml}</div></div>
+            </section>
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Commandes en cours</h4>
+                ${ouvertes.length ? `<ul class="cmd-lots">${ouvertes.map(clientCommandeRowHtml).join('')}</ul>` : '<p class="text-muted">Aucune commande en cours.</p>'}
+            </section>
+
+            ${topAromes.length ? `
+            <section class="trace-section">
+                <h4 class="trace-section-title">Arômes les plus livrés</h4>
+                <ul class="client-aromes">${topAromes.map(([aromeId, n]) => {
+                    const a = aromes.find(x => x.id === aromeId);
+                    return `
+                        <li>
+                            <span class="client-arome-name"><span class="aroma-tile-dot" style="background:${safeColor(a?.couleur)}"></span>${escapeHtml(a?.nom || '?')}</span>
+                            <span class="client-arome-bar"><span style="width:${safeNumAttr(Math.max(4, Math.round(n / maxArome * 100)))}%;background:${safeColor(a?.couleur)}"></span></span>
+                            <span class="cmd-line-qty">${escapeHtml(twinFmtInt(n))} bt</span>
+                        </li>`;
+                }).join('')}</ul>
+            </section>` : ''}
+
+            ${historique.length ? `
+            <section class="trace-section">
+                <h4 class="trace-section-title">Historique <span class="trace-section-hint">${escapeHtml(historique.length > 6 ? `6 dernières sur ${twinFmtInt(historique.length)}` : dashPlural(historique.length, 'commande'))}</span></h4>
+                <ul class="cmd-lots">${historique.slice(0, 6).map(clientCommandeRowHtml).join('')}</ul>
+            </section>` : ''}
+        </div>
+    `, `
+        ${commandes.length === 0 ? `<button class="btn btn-ghost btn-ghost-danger modal-footer-start" data-click="delete-client" data-id="${escapeHtml(id)}">Supprimer</button>` : ''}
+        <button class="btn btn-secondary" data-click="show-client-modal" data-id="${escapeHtml(id)}">Modifier</button>
+        ${client.actif !== false ? `<button class="btn btn-primary" data-click="client-new-commande" data-id="${escapeHtml(id)}">+ Commande</button>` : '<button class="btn btn-secondary" data-click="close-modal">Fermer</button>'}
+    `, 'large');
+};
+
+const showClientModal = (id = null) => {
+    const clients = DB.get('clients') || [];
+    const client = id ? clients.find(c => c.id === id) : null;
+    const cat = normalizeTarifKey(client?.tarifs);
+    const prixPreset = (valeur) => valeur === '' || valeur === undefined ? '—' : formatChf(parseFloat(valeur)).replace(/^CHF\s*/, '');
+    const categories = ['custom', 'distributeur', 'prive', 'restaurant'].map(k => {
+        const p = TARIF_PRESETS[k];
+        const definis = p ? [['25 cl', p.prix25cl], ['50 cl', p.prix50cl], ['1 l', p.prix100cl]].filter(([, v]) => v) : [];
+        const detail = !p ? 'Vos propres prix'
+            : definis.length === 3 ? `CHF ${definis.map(([, v]) => prixPreset(v)).join(' · ')}`
+            : definis.map(([l, v]) => `${l} CHF ${prixPreset(v)}`).join(' · ');
+        return `
+            <label class="choice-card">
+                <input type="radio" name="tarifs" value="${k}" ${cat === k ? 'checked' : ''} onchange="applyTarifPreset(this)">
+                <span class="choice-card-title">${escapeHtml(TARIF_CATEGORIE_LABELS[k])}</span>
+                <span class="choice-card-text">${escapeHtml(detail)}</span>
+            </label>`;
+    }).join('');
+    const prix = (name, label) => `
+        <div class="form-group">
+            <label for="client_${name}">${escapeHtml(label)}</label>
+            <div class="input-affix"><span class="input-affix-text" aria-hidden="true">CHF</span>
+                <input type="text" id="client_${name}" name="${name}" inputmode="decimal" value="${escapeHtml(client?.[name] || '')}" placeholder="—" oninput="onPrixInputChange()">
             </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Mode facturation</label>
-                    <input type="text" name="modeFact" value="${escapeHtml(client?.modeFact || '')}">
+        </div>`;
+
+    modal.show(id ? 'Modifier le client' : 'Nouveau client', `
+        <form id="clientForm" class="form-sheet">
+            <fieldset class="form-section">
+                <legend class="trace-section-title">Identité</legend>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="client_societe">Société</label>
+                        <input type="text" id="client_societe" name="societe" autocomplete="organization" value="${escapeHtml(client?.societe || '')}" placeholder="Ex. Café du Lac">
+                    </div>
+                    <div class="form-group">
+                        <label for="client_nom">Prénom et nom</label>
+                        <input type="text" id="client_nom" name="nom" autocomplete="name" value="${escapeHtml(client?.nom || '')}" placeholder="Personne de contact">
+                    </div>
                 </div>
+                <small class="text-muted">La société ou le nom suffit.</small>
+            </fieldset>
+
+            <fieldset class="form-section">
+                <legend class="trace-section-title">Adresse et contact <span class="trace-section-hint">imprimés sur le BL</span></legend>
                 <div class="form-group">
-                    <label>Coordonnées</label>
-                    <input type="text" name="coord" value="${escapeHtml(client?.coord || '')}">
+                    <label for="client_adresse">Adresse</label>
+                    <input type="text" id="client_adresse" name="adresse" autocomplete="street-address" value="${escapeHtml(client?.adresse || '')}" placeholder="Rue et numéro">
                 </div>
-            </div>
-            <div class="form-group">
-                <label for="clientDureeVie">Durée de vie minimale à la livraison (jours)</label>
-                <input type="number" id="clientDureeVie" name="dureeVieMinJours" min="0" step="1" inputmode="numeric" value="${clientDureeVieMin(client) || ''}" placeholder="Aucune exigence">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="client_npa">NPA et localité</label>
+                        <input type="text" id="client_npa" name="npa" value="${escapeHtml(client?.npa || '')}" placeholder="1201 Genève">
+                    </div>
+                    <div class="form-group">
+                        <label for="client_coord">Téléphone, e-mail</label>
+                        <input type="text" id="client_coord" name="coord" value="${escapeHtml(client?.coord || '')}" placeholder="079 123 45 67 · nom@exemple.ch">
+                    </div>
+                </div>
+            </fieldset>
+
+            <fieldset class="form-section">
+                <legend class="trace-section-title">Tarifs <span class="trace-section-hint">25 cl · 50 cl · 1 l</span></legend>
+                <div class="choice-cards">${categories}</div>
+                <div class="form-row form-row--3">
+                    ${prix('prix25cl', 'Prix 25 cl')}
+                    ${prix('prix50cl', 'Prix 50 cl')}
+                    ${prix('prix100cl', 'Prix 1 l')}
+                </div>
+                <small class="text-muted">Choisir une catégorie remplit les prix ; modifier un prix passe en « Personnalisé ».</small>
+            </fieldset>
+
+            <fieldset class="form-section">
+                <legend class="trace-section-title">Livraison et facturation</legend>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="client_modeFact">Mode de facturation</label>
+                        <input type="text" id="client_modeFact" name="modeFact" value="${escapeHtml(client?.modeFact || '')}" placeholder="Ex. facture mensuelle">
+                    </div>
+                    <div class="form-group">
+                        <label for="clientDureeVie">Durée de vie minimale à la livraison</label>
+                        <div class="input-affix input-affix--end">
+                            <input type="number" id="clientDureeVie" name="dureeVieMinJours" min="0" step="1" inputmode="numeric" value="${clientDureeVieMin(client) || ''}" placeholder="Aucune exigence">
+                            <span class="input-affix-text" aria-hidden="true">jours</span>
+                        </div>
+                    </div>
+                </div>
                 <small class="text-muted">Les lots dont la DLV arrive avant ce délai ne sont pas proposés pour ce client.</small>
-            </div>
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="actif" ${client?.actif !== false ? 'checked' : ''}>
-                    Actif
-                </label>
-            </div>
+            </fieldset>
+
+            <label class="switch-row">
+                <span>
+                    <span class="switch-row-title">Client actif</span>
+                    <span class="switch-row-text">Un client inactif n'est plus proposé dans les nouvelles commandes.</span>
+                </span>
+                <input type="checkbox" name="actif" class="switch" ${client?.actif !== false ? 'checked' : ''}>
+            </label>
         </form>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
         <button class="btn btn-primary" data-click="save-client" data-id="${escapeHtml(id || '')}">Enregistrer</button>
-    `);
+    `, 'large');
 };
 
 const saveClient = (event, id) => {
@@ -17859,7 +18032,7 @@ const deleteClient = (id) => {
         const clients = DB.get('clients').filter(c => c.id !== id);
         DB.set('clients', clients);
         showToast('Client supprimé');
-        renderParametres();
+        renderCurrentView();
     });
 };
 
