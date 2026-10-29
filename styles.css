@@ -4193,6 +4193,7 @@ input[type="checkbox"] {
     color: var(--text-light);
     font-variant-numeric: tabular-nums;
 }
+.stock-section-action { margin-left: auto; align-self: center; }
 .stock-hint {
     margin: 8px 2px 0;
     font-size: 12px;

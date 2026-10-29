@@ -1180,6 +1180,7 @@ CLICK_HANDLERS['delete-hist-record'] = (el) => deleteHistoryRecord(el.getAttribu
 // Vente directe / Vendre
 // ---------------------------------------------------------------------------
 CLICK_HANDLERS['vendre-lot'] = (el) => vendreLot(el.getAttribute('data-id'));
+CLICK_HANDLERS['sortir-lots-perimes'] = (el) => sortirLotsPerimes((el.getAttribute('data-ids') || '').split(',').filter(Boolean));
 
 // ---------------------------------------------------------------------------
 // Pointage
@@ -9361,6 +9362,8 @@ const stockLotsHtml = (ov) => {
     const horsVente = focus ? [] : ov.horsVente
         .filter(lot => inCell(stockCellKey(lot.arome, lot.format)) && matchLot(lot))
         .sort((a, b) => rang(a) - rang(b) || stockFefo(a, b));
+    // Sortie groupée (péremption) : lots périmés affichés, hors lots bloqués (rappel) et quantités invalides
+    const perimes = horsVente.filter(isLotPerimeSortable);
 
     const chips = [
         selected ? (() => {
@@ -9430,6 +9433,7 @@ const stockLotsHtml = (ov) => {
             <div class="stock-section-head">
                 <h2 class="stock-section-title" id="stockHorsVenteTitle">Hors vente</h2>
                 <span class="stock-section-meta">${escapeHtml(`${dashPlural(horsVente.length, 'lot')} · ${twinFmtInt(horsVente.reduce((s, l) => s + Math.max(0, Number(l.quantite) || 0), 0))} bt`)}</span>
+                ${perimes.length ? `<button type="button" class="btn btn-sm btn-secondary stock-section-action" data-click="sortir-lots-perimes" data-ids="${escapeHtml(perimes.map(l => l.id).join(','))}">Tout sortir (péremption)</button>` : ''}
             </div>
             <p class="stock-hint stock-hint--top">Ni vendables ni livrables : sortez-les du stock (destruction, casse) ou traitez le rappel du lot bloqué.</p>
             <div class="stock-group"><ul class="stock-lot-list">${horsVente.map(lot => stockHorsVenteRowHtml(ov, lot, now)).join('')}</ul></div>
@@ -10251,6 +10255,53 @@ const vendreLot = async (lotId) => {
     DB.set('history', history);
     modal.hide();
     showToast(`${quantite} bouteille(s) sortie(s) du stock — ${SORTIE_MOTIFS[motif]}`);
+    renderCurrentView();
+};
+
+// Lot hors vente que la sortie groupée peut détruire : quantité valide, non
+// vendable (DLV/DLC dépassée) et non bloqué (un lot bloqué passe par le rappel).
+const isLotPerimeSortable = (lot) => {
+    const quantite = Number(lot?.quantite);
+    return !!lot && Number.isFinite(quantite) && quantite > 0 && !lot.bloque && !isLotSellable(lot);
+};
+
+// Sortie groupée des lots périmés affichés dans « Hors vente » (motif destruction / péremption)
+const sortirLotsPerimes = async (ids) => {
+    const cibles = new Set(ids);
+    const avant = (DB.get('lots') || []).filter(l => cibles.has(String(l.id)) && isLotPerimeSortable(l));
+    if (avant.length === 0) {
+        showToast('Aucun lot périmé à sortir', 'error');
+        renderCurrentView();
+        return;
+    }
+    const nbBt = avant.reduce((s, l) => s + Number(l.quantite), 0);
+    const ok = await confirmDialog(
+        `Sortir ${dashPlural(avant.length, 'lot')} (${twinFmtInt(nbBt)} bt) du stock pour destruction / péremption ? Les lots bloqués ne sont pas concernés : traitez-les depuis leur rappel.`,
+        { danger: true, title: 'Sortie des lots périmés', confirmLabel: 'Tout sortir' }
+    );
+    if (!ok) return;
+
+    // Relecture après la confirmation : un autre appareil a pu modifier le stock
+    const lots = DB.get('lots') || [];
+    const history = DB.get('history') || [];
+    let nbLots = 0;
+    let total = 0;
+    const restants = lots.filter(lot => {
+        if (!cibles.has(String(lot.id)) || !isLotPerimeSortable(lot)) return true;
+        const quantite = Number(lot.quantite);
+        history.unshift(buildLotHistoryEntry('SORTIE', lot, quantite, { motif: 'destruction' }));
+        nbLots += 1;
+        total += quantite;
+        return false;
+    });
+    if (nbLots === 0) {
+        showToast('Aucun lot périmé à sortir', 'error');
+        renderCurrentView();
+        return;
+    }
+    DB.set('lots', restants);
+    DB.set('history', history);
+    showToast(`${dashPlural(nbLots, 'lot sorti', 'lots sortis')} du stock — ${twinFmtInt(total)} bt, ${SORTIE_MOTIFS.destruction}`);
     renderCurrentView();
 };
 
