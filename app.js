@@ -10694,6 +10694,59 @@ const getLotRappelData = (numLot) => {
     };
 };
 
+// Coordonnées libres d'un client : e-mails et numéros de téléphone deviennent cliquables
+const linkifyContact = (text) => {
+    const re = /([\w.+-]+@[\w-]+(?:\.[\w-]+)+)|(\+?\d[\d .\/-]{7,}\d)/g;
+    const s = String(text || '');
+    let html = '';
+    let last = 0;
+    s.replace(re, (m, email, tel, offset) => {
+        html += escapeHtml(s.slice(last, offset));
+        html += email
+            ? `<a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a>`
+            : `<a href="tel:${escapeHtml(tel.replace(/[^\d+]/g, ''))}">${escapeHtml(tel)}</a>`;
+        last = offset + m.length;
+        return m;
+    });
+    return html + escapeHtml(s.slice(last));
+};
+
+// Destinataires du rappel, regroupés par client : livraisons et sorties nominatives
+const rappelDestinataires = (r) => {
+    const groupes = new Map();
+    const groupe = (clientId, clientNom, adresse, coord) => {
+        const cle = clientId || `nom:${normalizeName(clientNom)}`;
+        if (!groupes.has(cle)) groupes.set(cle, { clientNom, adresse, coord, total: 0, envois: [] });
+        const g = groupes.get(cle);
+        if (!g.adresse && adresse) g.adresse = adresse;
+        if (!g.coord && coord) g.coord = coord;
+        return g;
+    };
+    r.livraisonsClients.forEach(l => {
+        const g = groupe(l.clientId, l.clientNom, l.adresse, l.coord);
+        g.total += Number(l.quantite) || 0;
+        // Une commande livrée en plusieurs formats : une seule ligne
+        const meme = l.commandeId ? g.envois.find(e => e.commandeId === l.commandeId) : null;
+        if (meme) {
+            meme.parFormat.push({ format: l.format, quantite: Number(l.quantite) || 0 });
+            return;
+        }
+        g.envois.push({
+            date: l.date,
+            libelle: [l.commandeNumero ? `Cmd #${l.commandeNumero}` : 'Livraison', l.numeroBL ? `BL ${l.numeroBL}` : '', l.date && !l.dateEffective ? 'prévue' : ''].filter(Boolean).join(' · '),
+            commandeId: l.commandeId,
+            parFormat: [{ format: l.format, quantite: Number(l.quantite) || 0 }]
+        });
+    });
+    r.sorties.filter(s => s.type !== 'ajust' && (s.clientId || s.clientNom)).forEach(s => {
+        const g = groupe(s.clientId, s.clientNom, s.adresse, s.coord);
+        const q = Math.abs(getHistoryDelta(s));
+        g.total += q;
+        g.envois.push({ date: s.dateAdded, libelle: [s.type === 'vente' ? 'Vente directe' : (SORTIE_MOTIFS[s.motif] || 'Sortie'), s.note].filter(Boolean).join(' · '), parFormat: [{ format: s.format, quantite: q }] });
+    });
+    return [...groupes.values()].sort((a, b) => b.total - a.total || String(a.clientNom).localeCompare(String(b.clientNom), 'fr'));
+};
+
 const showLotRappelModal = (numLot) => {
     const r = getLotRappelData(numLot);
     if (r.traces.length === 0) {
@@ -10701,112 +10754,168 @@ const showLotRappelModal = (numLot) => {
         return;
     }
 
+    const fmtBt = (n) => `${twinFmtInt(n)} bt`;
     const listeDates = (list) => list.length ? list.map(d => formatDate(d)).join(', ') : '—';
     const ambigu = r.aromes.length > 1 || r.datesProduction.length > 1;
     const lotsBloques = r.lotsEnStock.filter(l => l.bloque);
-    const lotsLibres = r.lotsEnStock.filter(l => !l.bloque);
+    const lotsLibres = r.lotsEnStock.filter(l => !l.bloque && Number(l.quantite) > 0);
+    const btBloques = lotsBloques.reduce((s, l) => s + (Number(l.quantite) || 0), 0);
+    const btLibres = lotsLibres.reduce((s, l) => s + (Number(l.quantite) || 0), 0);
     const numAttr = escapeHtml(r.numLot);
+    const couleurs = DB.get('aromes') || [];
+    const couleurDe = (nom) => safeColor(couleurs.find(a => normalizeName(a.nom) === normalizeName(nom))?.couleur);
+    const destinataires = rappelDestinataires(r);
+    const anonymes = r.sorties.filter(s => s.type !== 'ajust' && !s.clientId && !s.clientNom)
+        .reduce((s, h) => s + Math.abs(getHistoryDelta(h)), 0);
+
+    const badge = btLibres > 0
+        ? '<span class="trace-status trace-status--warning">Stock non bloqué</span>'
+        : btBloques > 0 ? '<span class="trace-status trace-status--danger">Stock bloqué</span>'
+        : '<span class="trace-status trace-status--neutral">Plus de stock</span>';
+
+    // Plan de rappel : bloquer, prévenir, exporter
+    const etape = (etat, titre, texte, action = '') => `
+        <li class="rappel-step rappel-step--${etat}">
+            <span class="rappel-step-dot" aria-hidden="true">${etat === 'done' ? '✓' : ''}</span>
+            <div class="rappel-step-main">
+                <div class="rappel-step-title">${escapeHtml(titre)}</div>
+                <div class="rappel-step-text">${escapeHtml(texte)}</div>
+            </div>
+            ${action}
+        </li>`;
+    const planHtml = `
+        <ol class="rappel-plan">
+            ${btLibres > 0
+                ? etape('todo', 'Bloquer le stock restant', `${fmtBt(btLibres)} encore vendables ou livrables${btBloques > 0 ? ` (${fmtBt(btBloques)} déjà bloquées)` : ''}.`,
+                    `<button type="button" class="btn btn-sm btn-primary" data-click="bloquer-lot" data-num="${numAttr}">Bloquer ${escapeHtml(fmtBt(btLibres))}</button>`)
+                : btBloques > 0
+                    ? etape('done', 'Stock bloqué', `${fmtBt(btBloques)} bloquées${lotsBloques[0].motifBlocage ? ` : ${lotsBloques[0].motifBlocage}` : ''}.`,
+                        `<button type="button" class="btn btn-sm btn-ghost" data-click="debloquer-lot" data-num="${numAttr}">Débloquer</button>`)
+                    : etape('done', 'Aucun stock restant', 'Toutes les bouteilles de ce lot sont sorties du stock.')}
+            ${destinataires.length > 0
+                ? etape('todo', 'Prévenir les destinataires', `${dashPlural(destinataires.length, 'client')} à contacter (${fmtBt(destinataires.reduce((s, d) => s + d.total, 0))}), coordonnées ci-dessous.${anonymes > 0 ? ` ${fmtBt(anonymes)} vendues sans client connu.` : ''}`)
+                : etape('done', 'Aucun destinataire connu', anonymes > 0 ? `${fmtBt(anonymes)} sorties sans client enregistré.` : 'Aucune bouteille de ce lot n\'a quitté l\'atelier.')}
+            ${etape('todo', 'Archiver le dossier', 'Export Excel : synthèse, formats, ingrédients, clients et sorties.',
+                `<button type="button" class="btn btn-sm btn-secondary" data-click="export-lot-rappel" data-num="${numAttr}">Exporter Excel</button>`)}
+        </ol>`;
+
+    const destinatairesHtml = destinataires.length === 0 ? '' : `
+        <section class="trace-section">
+            <h4 class="trace-section-title">Destinataires à contacter</h4>
+            <div class="rappel-clients">${destinataires.map(d => `
+                <article class="rappel-client">
+                    <div class="rappel-client-head">
+                        <span class="rappel-client-name">${escapeHtml(d.clientNom || 'Client')}</span>
+                        <span class="cmd-line-qty">${escapeHtml(fmtBt(d.total))}</span>
+                    </div>
+                    ${d.adresse ? `<div class="rappel-client-info">${escapeHtml(d.adresse)}</div>` : ''}
+                    <div class="rappel-client-info">${d.coord ? linkifyContact(d.coord) : '<span class="text-muted">Pas de coordonnées enregistrées</span>'}</div>
+                    <ul class="rappel-client-envois">${d.envois.map(e => `
+                        <li>
+                            <span>${escapeHtml(e.date ? formatJourTrace(e.date) : '—')}</span>
+                            ${e.commandeId
+                                ? `<button type="button" class="trace-journey-link" data-click="show-commande-details" data-id="${escapeHtml(e.commandeId)}">${escapeHtml(e.libelle)}</button>`
+                                : `<span>${escapeHtml(e.libelle)}</span>`}
+                            <span class="rappel-client-envoi-qty">${escapeHtml(e.parFormat.map(f => `${f.format || '?'} · ${fmtBt(f.quantite)}`).join(', '))}</span>
+                        </li>`).join('')}
+                    </ul>
+                </article>`).join('')}
+            </div>
+        </section>`;
 
     const formatsHtml = `
-        <div class="trace-scroll"><table class="details-table">
-            <thead><tr><th>Format</th><th>Produit</th><th>Livré</th><th>Ventes / sorties</th><th>Stock</th><th></th></tr></thead>
-            <tbody>
-                ${r.traces.map(t => `<tr>
-                    <td>${escapeHtml(t.format || '?')}${r.aromes.length > 1 ? ` <span class="text-muted">${escapeHtml(t.arome || '')}</span>` : ''}</td>
-                    <td>${t.totalProduit}</td>
-                    <td>${t.totalLivre}</td>
-                    <td>${t.totalVenteDirecte + t.totalSorties}</td>
-                    <td>${t.lot ? `${t.enStock}${t.bloque ? ' <span class="badge badge-danger">Bloqué</span>' : ''}` : '<span class="badge badge-default">Épuisé</span>'}</td>
-                    <td><button type="button" class="btn btn-sm btn-ghost" data-click="show-lot-trace" data-id="${escapeHtml(t.lotId)}">Détail</button></td>
-                </tr>`).join('')}
-            </tbody>
-        </table></div>`;
+        <section class="trace-section">
+            <h4 class="trace-section-title">Par format</h4>
+            <ul class="cmd-lots">${r.traces.map(t => `
+                <li>
+                    <button type="button" class="cmd-lot rappel-format" data-click="show-lot-trace" data-id="${escapeHtml(t.lotId)}" aria-label="${escapeHtml(`Traçabilité ${t.arome || ''} ${t.format || ''}`)}">
+                        <span class="cmd-lot-name"><span class="aroma-tile-dot" style="background:${couleurDe(t.arome)}"></span>${escapeHtml(t.format || '?')}${r.aromes.length > 1 ? ` <span class="stock-group-format">· ${escapeHtml(t.arome || '')}</span>` : ''}</span>
+                        <span class="rappel-format-stats">${escapeHtml(`produit ${twinFmtInt(t.totalProduit)} · livré ${twinFmtInt(t.totalLivre)} · sorti ${twinFmtInt(t.totalVenteDirecte + t.totalSorties)}`)}</span>
+                        ${!t.lot ? '<span class="trace-status trace-status--neutral">Épuisé</span>'
+                            : t.bloque ? `<span class="trace-status trace-status--danger">${escapeHtml(fmtBt(t.enStock))} bloquées</span>`
+                            : `<span class="trace-status trace-status--warning">${escapeHtml(fmtBt(t.enStock))} en stock</span>`}
+                        ${dashIcon('chevron')}
+                    </button>
+                </li>`).join('')}
+            </ul>
+        </section>`;
 
-    const clientsHtml = r.livraisonsClients.length === 0
-        ? '<p class="text-muted">Aucune livraison client pour ce lot</p>'
-        : `<div class="trace-scroll"><table class="details-table">
-            <thead><tr><th>Date</th><th>Client</th><th>Adresse / contact</th><th>Cmd</th><th>BL</th><th>Format</th><th>Qté</th></tr></thead>
-            <tbody>
-                ${r.livraisonsClients.map(l => `<tr>
-                    <td>${formatJourTrace(l.date)}${l.date && !l.dateEffective ? ' <span class="text-muted">(prévue)</span>' : ''}</td>
-                    <td><strong>${escapeHtml(l.clientNom)}</strong></td>
-                    <td>${escapeHtml([l.adresse, l.coord].filter(Boolean).join(' — ') || '—')}</td>
-                    <td>#${escapeHtml(String(l.commandeNumero || '—'))}</td>
-                    <td>${l.numeroBL ? escapeHtml(String(l.numeroBL)) : '—'}</td>
-                    <td>${escapeHtml(l.format || '?')}</td>
-                    <td><strong>${l.quantite}</strong></td>
-                </tr>`).join('')}
-            </tbody>
-        </table></div>`;
+    const mouvements = [
+        ...r.sorties.map(s => ({
+            kind: s.type,
+            date: s.dateAdded,
+            titre: s.type === 'vente' ? 'Vente directe' : s.type === 'ajust' ? 'Ajustement' : (SORTIE_MOTIFS[s.motif] || 'Sortie'),
+            detail: [s.format, s.clientNom || (s.type === 'ajust' ? '' : 'client inconnu'), s.note].filter(Boolean).join(' · '),
+            delta: getHistoryDelta(s)
+        })),
+        ...r.retours.map(x => ({
+            kind: 'retour',
+            date: x.dateAdded,
+            titre: `Livraison annulée${x.clientNom ? ` — ${x.clientNom}` : ''}`,
+            detail: [x.format, x.commandeNumero ? `Cmd #${x.commandeNumero}` : '', x.numeroBL ? `BL ${x.numeroBL}` : ''].filter(Boolean).join(' · '),
+            delta: Number(x.quantity) || 0
+        }))
+    ].sort((a, b) => (Date.parse(a.date || '') || 0) - (Date.parse(b.date || '') || 0));
+    const mouvementsHtml = mouvements.length === 0 ? '' : `
+        <section class="trace-section">
+            <h4 class="trace-section-title">Ventes directes, sorties et annulations</h4>
+            <ol class="trace-journey">${mouvements.map(m => `
+                <li class="trace-journey-item trace-journey-item--${escapeHtml(m.kind)}">
+                    <span class="trace-journey-dot" aria-hidden="true"></span>
+                    <div class="trace-journey-main">
+                        <div class="trace-journey-title">${escapeHtml(m.titre)}</div>
+                        <div class="trace-journey-meta">${escapeHtml([m.date ? formatJourTrace(m.date) : 'date inconnue', m.detail].filter(Boolean).join(' · '))}</div>
+                    </div>
+                    <span class="trace-journey-qty${m.delta < 0 ? ' is-out' : ''}">${escapeHtml(`${m.delta < 0 ? '−' : '+'}${fmtBt(Math.abs(m.delta))}`)}</span>
+                </li>`).join('')}
+            </ol>
+        </section>`;
 
-    const sortiesHtml = r.sorties.length === 0 ? '' : `
-        <h4 style="margin-top: 16px;">Ventes directes, sorties et ajustements</h4>
-        <div class="trace-scroll"><table class="details-table">
-            <thead><tr><th>Date</th><th>Motif</th><th>Client</th><th>Format</th><th>Qté</th><th>Note</th></tr></thead>
-            <tbody>
-                ${r.sorties.map(s => {
-                    const delta = getHistoryDelta(s);
-                    const motif = s.type === 'vente' ? 'Vente directe' : s.type === 'ajust' ? 'Ajustement' : (SORTIE_MOTIFS[s.motif] || 'Sortie');
-                    return `<tr>
-                        <td>${formatJourTrace(s.dateAdded)}</td>
-                        <td>${escapeHtml(motif)}</td>
-                        <td>${s.clientNom ? escapeHtml(s.clientNom) : '<span class="text-muted">inconnu</span>'}</td>
-                        <td>${escapeHtml(s.format || '?')}</td>
-                        <td><strong>${delta < 0 ? '−' : '+'}${Math.abs(delta)}</strong></td>
-                        <td>${s.note ? escapeHtml(s.note) : ''}</td>
-                    </tr>`;
-                }).join('')}
-            </tbody>
-        </table></div>`;
-
-    const retoursHtml = r.retours.length === 0 ? '' : `
-        <h4 style="margin-top: 16px;">Livraisons annulées (commandes restaurées)</h4>
-        <div class="trace-scroll"><table class="details-table">
-            <thead><tr><th>Annulée le</th><th>Client</th><th>Cmd</th><th>BL</th><th>Format</th><th>Qté</th></tr></thead>
-            <tbody>
-                ${r.retours.map(x => `<tr>
-                    <td>${formatJourTrace(x.dateAdded)}</td>
-                    <td>${x.clientNom ? escapeHtml(x.clientNom) : '—'}</td>
-                    <td>${x.commandeNumero ? `#${escapeHtml(String(x.commandeNumero))}` : '—'}</td>
-                    <td>${x.numeroBL ? escapeHtml(String(x.numeroBL)) : '—'}</td>
-                    <td>${escapeHtml(x.format || '?')}</td>
-                    <td>${Number(x.quantity) || 0}</td>
-                </tr>`).join('')}
-            </tbody>
-        </table></div>`;
-
-    const footer = `
-        <button class="btn btn-secondary" data-click="close-modal">Fermer</button>
-        <button class="btn btn-secondary" data-click="export-lot-rappel" data-num="${numAttr}">Exporter Excel</button>
-        ${lotsBloques.length > 0 ? `<button class="btn btn-secondary" data-click="debloquer-lot" data-num="${numAttr}">Débloquer le stock</button>` : ''}
-        ${lotsLibres.length > 0 ? `<button class="btn btn-danger" data-click="bloquer-lot" data-num="${numAttr}">Bloquer le stock restant</button>` : ''}
-    `;
+    const sorti = r.totalVenteDirecte + r.totalSorties;
+    const kpi = (label, value, extra = '') => `<div class="trace-kpi${extra}"><span class="trace-kpi-value">${escapeHtml(value)}</span><span class="trace-kpi-label">${escapeHtml(label)}</span></div>`;
 
     modal.show(`Rappel du lot #${r.numLotAffiche}`, `
-        <div class="commande-details">
-            ${ambigu ? '<p class="trace-alert">Ce numéro est partagé par plusieurs arômes ou dates de production : vérifiez chaque ligne avant d\'agir.</p>' : ''}
-            ${lotsBloques.length > 0 ? `<p class="trace-alert trace-alert-danger"><strong>Stock bloqué</strong> (${lotsBloques.reduce((s, l) => s + (Number(l.quantite) || 0), 0)} bt)${lotsBloques[0].motifBlocage ? ` — ${escapeHtml(lotsBloques[0].motifBlocage)}` : ''}</p>` : ''}
-            <div class="workflow-summary">
-                <div><span>Produit</span><strong>${r.totalProduit} bt</strong></div>
-                <div><span>Livré</span><strong>${r.totalLivre} bt</strong></div>
-                <div><span>Ventes et sorties</span><strong>${r.totalVenteDirecte + r.totalSorties} bt</strong></div>
-                <div><span>En stock</span><strong>${r.enStock} bt</strong></div>
-                <div><span>Destinataires connus</span><strong>${r.nbDestinataires}</strong></div>
+        <div class="trace-sheet">
+            <div class="trace-hero">
+                <span class="trace-hero-swatch" style="background:${couleurDe(r.aromes[0])}" aria-hidden="true"></span>
+                <div class="trace-hero-text">
+                    <div class="trace-hero-name">${escapeHtml(r.aromes.join(', ') || '?')}</div>
+                    <div class="trace-hero-sub">${escapeHtml(`Lot #${r.numLotAffiche} · ${dashPlural(r.traces.length, 'format')}`)}</div>
+                </div>
+                ${badge}
             </div>
-            <p><strong>Arôme :</strong> ${escapeHtml(r.aromes.join(', ') || '?')}</p>
-            <p><strong>Production :</strong> ${listeDates(r.datesProduction)} · <strong>DLV :</strong> ${listeDates(r.dlvs)} · <strong>DLC :</strong> ${listeDates(r.dlcs)}</p>
 
-            <h4 style="margin-top: 16px;">Par format</h4>
+            ${ambigu ? '<p class="trace-alert">Ce numéro est partagé par plusieurs arômes ou dates de production : vérifiez chaque format avant d\'agir.</p>' : ''}
+
+            <div class="trace-life">
+                <div class="trace-dates">
+                    <div class="trace-date"><span class="trace-date-label">Production</span><span class="trace-date-value">${escapeHtml(listeDates(r.datesProduction))}</span></div>
+                    <div class="trace-date"><span class="trace-date-label">DLV</span><span class="trace-date-value">${escapeHtml(listeDates(r.dlvs))}</span></div>
+                    <div class="trace-date"><span class="trace-date-label">DLC</span><span class="trace-date-value">${escapeHtml(listeDates(r.dlcs))}</span></div>
+                </div>
+            </div>
+
+            <div class="trace-kpis rappel-kpis">
+                ${kpi('Produit', fmtBt(r.totalProduit))}
+                ${kpi('Livré', fmtBt(r.totalLivre))}
+                ${kpi('Vendu / sorti', fmtBt(sorti))}
+                ${kpi(btBloques > 0 && btLibres === 0 ? 'En stock (bloqué)' : 'En stock', fmtBt(r.enStock))}
+                ${kpi('Destinataires', twinFmtInt(r.nbDestinataires), ' trace-kpi--stock')}
+            </div>
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Plan de rappel</h4>
+                ${planHtml}
+            </section>
+            ${destinatairesHtml}
             ${formatsHtml}
-
-            ${r.ingredients.length || r.totalProduit > 0 ? `<h4 style="margin-top: 16px;">Ingrédients utilisés</h4>${ingredientsTraceHtml(r.ingredients, r.totalProduit)}` : ''}
-
-            <h4 style="margin-top: 16px;">Clients livrés</h4>
-            ${clientsHtml}
-            ${sortiesHtml}
-            ${retoursHtml}
+            ${r.ingredients.length || r.totalProduit > 0 ? `<section class="trace-section"><h4 class="trace-section-title">Ingrédients utilisés</h4>${ingredientsTraceHtml(r.ingredients, r.totalProduit)}</section>` : ''}
+            ${mouvementsHtml}
         </div>
-    `, footer, 'large');
+    `, `
+        <button class="btn btn-secondary" data-click="close-modal">Fermer</button>
+        <button class="btn btn-primary" data-click="export-lot-rappel" data-num="${numAttr}">Exporter Excel</button>
+    `, 'large');
 };
 
 const exportLotRappelExcel = (numLot) => {
