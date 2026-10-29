@@ -4435,6 +4435,65 @@ input[type="checkbox"] {
     .rappel-format { grid-template-columns: 1fr auto 16px; }
     .rappel-format-stats { grid-column: 1 / 2; grid-row: 2; }
 }
+/* Fiches bulletin de livraison (v13.2) */
+.trace-hero-sub .trace-journey-link { white-space: nowrap; }
+.trace-section-hint { margin-left: 6px; font-size: 12px; font-weight: 500; color: var(--text-muted); }
+.trace-kpi--warn { background: var(--bg-warning); border-color: transparent; }
+.trace-kpi--warn .trace-kpi-value { color: var(--warning-dark); }
+.bl-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.bl-line { grid-template-columns: auto 1fr auto; }
+.bl-dest {
+    padding: 12px 14px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+}
+.bl-notes {
+    margin: 0;
+    padding: 10px 14px;
+    border-left: 3px solid var(--primary-light);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: var(--bg-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text);
+    white-space: pre-line;
+}
+.bl-notes strong { display: block; margin-bottom: 2px; font-size: 12px; color: var(--text-light); }
+.bl-counters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+}
+.bl-counter {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px 10px 14px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    background: var(--bg-secondary);
+}
+.bl-counter-label { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.bl-crate { width: 16px; height: 12px; border-radius: 3px; }
+.bl-crate--verte { background: #3f8a4a; }
+.bl-crate--noire { background: #2a2a2a; }
+.bl-counter-ctrl { display: flex; align-items: center; gap: 6px; }
+.bl-counter-btn { width: 40px; min-height: 40px; padding: 0; font-size: 18px; font-weight: 700; }
+.bl-counter-ctrl input {
+    width: 56px;
+    min-height: 40px;
+    text-align: center;
+    font-size: 16px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    -moz-appearance: textfield;
+}
+.bl-counter-ctrl input::-webkit-outer-spin-button,
+.bl-counter-ctrl input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+@media (max-width: 480px) {
+    .bl-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .trace-scroll {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;

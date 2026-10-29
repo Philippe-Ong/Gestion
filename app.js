@@ -1217,6 +1217,11 @@ CLICK_HANDLERS['show-livraison-details'] = (el) => showLivraisonDetails(el.getAt
 CLICK_HANDLERS['prepare-bl-export'] = (el) => showPrepareBLExportModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['delete-livraison'] = (el) => deleteLivraison(el.getAttribute('data-id'));
 CLICK_HANDLERS['close-modal'] = () => modal.hide();
+CLICK_HANDLERS['bl-caisse-step'] = (el) => {
+    const input = document.getElementById(el.getAttribute('data-target'));
+    if (!input) return;
+    input.value = String(Math.max(0, (parseInt(input.value, 10) || 0) + (Number(el.getAttribute('data-delta')) || 0)));
+};
 CLICK_HANDLERS['export-bl-excel'] = (el) => exportPreparedBL(el.getAttribute('data-id'), 'excel');
 CLICK_HANDLERS['export-bl-pdf'] = (el) => exportPreparedBL(el.getAttribute('data-id'), 'pdf');
 
@@ -13924,6 +13929,52 @@ const renderLivraisons = () => {
     safeRender(html);
 };
 
+// En-tête commun des fiches BL : client, n° de BL, commande liée, état de l'export
+const blHeroHtml = (livraison, client, commande) => {
+    const nom = client?.societe || client?.nom || commande?.clientLivraison?.societe || commande?.clientLivraison?.nom || 'Client inconnu';
+    const initiales = client || commande?.clientLivraison
+        ? String(nom).trim().split(/\s+/).slice(0, 2).map(m => m.charAt(0)).join('').toUpperCase()
+        : '?';
+    const exporte = getBLLastExportDate(livraison);
+    const cmd = commande
+        ? `<button type="button" class="trace-journey-link" data-click="show-commande-details" data-id="${escapeHtml(commande.id)}">commande #${escapeHtml(getCommandeNumero(commande))}</button>`
+        : escapeHtml(`commande #${String(livraison.commandeId || '').slice(-5)}`);
+    return `
+        <div class="trace-hero">
+            <span class="trace-hero-swatch cmd-hero-avatar" aria-hidden="true">${escapeHtml(initiales || '?')}</span>
+            <div class="trace-hero-text">
+                <div class="trace-hero-name">${escapeHtml(nom)}</div>
+                <div class="trace-hero-sub">BL-${escapeHtml(String(getBLNumero(livraison)))} · ${cmd}</div>
+            </div>
+            ${exporte
+                ? '<span class="trace-status trace-status--success">Exporté</span>'
+                : '<span class="trace-status trace-status--warning">Jamais exporté</span>'}
+        </div>`;
+};
+
+// Lots tracés d'un BL (interne, non imprimé) : liste cliquable vers la traçabilité du lot
+const blLotsHtml = (lotsTraces, aromes) => `
+    <ul class="cmd-lots">${lotsTraces.map(lot => {
+        const arome = aromes.find(a => normalizeName(a.nom) === normalizeName(lot.arome));
+        const limite = lot.dlv ? `DLV ${formatDate(lot.dlv)}` : lot.dlc ? `DLC ${formatDate(lot.dlc)}` : '';
+        return `
+            <li>
+                <button type="button" class="cmd-lot" data-click="show-lot-trace" data-id="${escapeHtml(String(lot.lotId))}" aria-label="${escapeHtml(`Tracer le lot ${formatLotNumero(lot.numLot || lot.lotId)}`)}">
+                    <span class="stock-lot-num">#${escapeHtml(formatLotNumero(lot.numLot || lot.lotId))}</span>
+                    <span class="cmd-lot-name"><span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>${escapeHtml(lot.arome || '?')} <span class="stock-group-format">· ${escapeHtml(lot.format || '?')}</span></span>
+                    <span class="cmd-lot-dlv">${escapeHtml(limite)}</span>
+                    <span class="cmd-line-qty">${escapeHtml(twinFmtInt(lot.quantite || 0))} bt</span>
+                    ${dashIcon('chevron')}
+                </button>
+            </li>`;
+    }).join('')}</ul>`;
+
+// Alerte si la trace interne ne couvre pas exactement les bouteilles du BL
+const blTraceAlertHtml = (totalItems, totalTrace, forcedCount) => [
+    forcedCount > 0 ? `<p class="trace-alert">Alerte interne : ${escapeHtml(dashPlural(forcedCount, 'ligne'))} livrée(s) avec stock insuffisant confirmé.</p>` : '',
+    totalTrace !== totalItems ? `<p class="trace-alert">${escapeHtml(`${twinFmtInt(totalTrace)} bt tracées pour ${twinFmtInt(totalItems)} bt sur le BL : vérifiez les lots de la livraison.`)}</p>` : ''
+].join('');
+
 const showLivraisonDetails = (id) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
@@ -13936,78 +13987,83 @@ const showLivraisonDetails = (id) => {
 
     const client = clients.find(c => c.id === livraison.clientId);
     const commande = commandes.find(c => c.id === livraison.commandeId);
+    const lignes = livraison.lignes || [];
 
-    const lignesHtml = (livraison.lignes || []).map(l => {
+    const lignesHtml = lignes.map(l => {
         const a = aromes.find(a => a.id === l.aromeId);
         const f = formats.find(f => f.id === l.formatId);
-        return `<tr>
-            <td>${escapeHtml(a?.nom || l.aromeNom || '?')}</td>
-            <td>${escapeHtml(f?.nom || l.formatNom || '?')}</td>
-            <td>${escapeHtml(l.quantite)}</td>
-        </tr>`;
+        return `
+            <li class="cmd-line bl-line">
+                <span class="aroma-tile-dot" style="background:${safeColor(a?.couleur)}"></span>
+                <div class="cmd-line-main"><div class="cmd-line-name">${escapeHtml(a?.nom || l.aromeNom || '?')} <span class="stock-group-format">· ${escapeHtml(f?.nom || l.formatNom || '?')}</span></div></div>
+                <span class="cmd-line-qty">${escapeHtml(twinFmtInt(l.quantite))} bt</span>
+            </li>`;
     }).join('');
 
     const lotsTraces = (livraison.lotsTraces && livraison.lotsTraces.length > 0)
         ? livraison.lotsTraces
         : buildLotsTracesForCommande(commande);
-    const traceHtml = lotsTraces.map(lot => `
-        <tr>
-            <td><a href="#" style="color: var(--primary); font-weight: 600;" data-click="show-lot-trace" data-id="${escapeHtml(String(lot.lotId))}" data-prevent>#${escapeHtml(formatLotNumero(lot.numLot || lot.lotId))}</a></td>
-            <td>${escapeHtml(lot.arome || '?')}</td>
-            <td>${escapeHtml(lot.format || '?')}</td>
-            <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
-            <td>${escapeHtml(lot.quantite || 0)}</td>
-        </tr>
-    `).join('');
     const forcedTraceCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
-    const totalItems = (livraison.lignes || []).reduce((sum, l) => sum + l.quantite, 0);
-    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const totalItems = lignes.reduce((sum, l) => sum + (Number(l.quantite) || 0), 0);
+    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (Number(lot.quantite) || 0), 0);
     const caissesVertes = parseInt(livraison.caissesVertesLivrees, 10) || 0;
     const caissesNoires = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
+    const dernierExport = getBLLastExportDate(livraison);
 
-    modal.show(`BL #${getBLNumero(livraison)}`, `
-        <div class="commande-details">
-            <p><strong>Client:</strong> ${escapeHtml(client?.societe || client?.nom || 'N/A')}</p>
-            <p><strong>Date BL:</strong> ${formatDate(livraison.dateBL)}</p>
-            <p><strong>N° commande:</strong> #${escapeHtml(commande ? getCommandeNumero(commande) : livraison.commandeId.slice(-5))}</p>
-            <p><strong>Dernier export:</strong> ${(() => { const d = getBLLastExportDate(livraison); return d ? formatDateTime(d) : 'Jamais exporté'; })()}</p>
-            <p><strong>Caisses IFCO:</strong> ${caissesVertes} verte(s), ${caissesNoires} noire(s)</p>
-            ${livraison.notes ? `<p><strong>Notes internes:</strong> ${escapeHtml(livraison.notes)}</p>` : ''}
-            <p><strong>Total:</strong> ${totalItems} articles</p>
-            <table class="details-table">
-                <thead>
-                    <tr>
-                        <th>Arôme</th>
-                        <th>Format</th>
-                        <th>Quantité</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${lignesHtml}
-                </tbody>
-            </table>
-            <h4 style="margin-top:20px;">Traçabilité interne</h4>
-            ${forcedTraceCount > 0 ? `<p class="badge badge-warning">Alerte interne: ${forcedTraceCount} ligne(s) avec stock insuffisant confirmé.</p>` : ''}
-            ${traceHtml ? `
-            <p class="text-muted">${totalTrace} bouteille(s) tracée(s) depuis les lots réellement livrés.</p>
-            <table class="details-table">
-                <thead>
-                    <tr>
-                        <th>Lot</th>
-                        <th>Arôme</th>
-                        <th>Format</th>
-                        <th>DLC</th>
-                        <th>Quantité livrée</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${traceHtml}
-                </tbody>
-            </table>
-            ` : '<p class="text-muted">Aucune trace de lot enregistrée pour ce BL.</p>'}
+    // Destinataire imprimé sur le BL (client actuel, sinon instantané pris à la livraison)
+    const dest = client || commande?.clientLivraison || null;
+    const destLignes = dest ? [
+        dest.societe && dest.nom && dest.nom !== dest.societe ? dest.nom : '',
+        dest.adresse,
+        `${dest.npa || ''} ${dest.localite || ''}`.trim()
+    ].filter(Boolean) : [];
+
+    const kpi = (label, value, extra = '') => `<div class="trace-kpi${extra}"><span class="trace-kpi-value">${escapeHtml(value)}</span><span class="trace-kpi-label">${escapeHtml(label)}</span></div>`;
+
+    modal.show(`BL-${getBLNumero(livraison)}`, `
+        <div class="trace-sheet">
+            ${blHeroHtml(livraison, client, commande)}
+
+            <div class="trace-life">
+                <div class="trace-dates">
+                    <div class="trace-date"><span class="trace-date-label">Date du BL</span><span class="trace-date-value">${escapeHtml(livraison.dateBL ? formatDate(livraison.dateBL) : '—')}</span></div>
+                    <div class="trace-date"><span class="trace-date-label">Livrée le</span><span class="trace-date-value">${escapeHtml(commande?.dateLivraisonEffective ? formatJourTrace(commande.dateLivraisonEffective) : '—')}</span></div>
+                    <div class="trace-date"><span class="trace-date-label">Dernier export</span><span class="trace-date-value">${escapeHtml(dernierExport ? formatJourTrace(dernierExport) : 'Jamais')}</span>${dernierExport ? `<span class="trace-date-rel">${escapeHtml(new Date(dernierExport).toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' }))}</span>` : ''}</div>
+                </div>
+            </div>
+
+            <div class="trace-kpis bl-kpis">
+                ${kpi('Bouteilles', `${twinFmtInt(totalItems)} bt`)}
+                ${kpi('Caisses vertes', twinFmtInt(caissesVertes))}
+                ${kpi('Caisses noires', twinFmtInt(caissesNoires))}
+                ${kpi('Tracées', `${twinFmtInt(totalTrace)} bt`, totalTrace === totalItems ? ' trace-kpi--stock' : ' trace-kpi--warn')}
+            </div>
+
+            ${dest ? `
+            <section class="trace-section">
+                <h4 class="trace-section-title">Destinataire</h4>
+                <div class="bl-dest">
+                    <div class="rappel-client-name">${escapeHtml(dest.societe || dest.nom || '')}</div>
+                    ${destLignes.map(l => `<div class="rappel-client-info">${escapeHtml(l)}</div>`).join('')}
+                    ${dest.coord ? `<div class="rappel-client-info">${linkifyContact(dest.coord)}</div>` : ''}
+                </div>
+            </section>` : ''}
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Articles livrés</h4>
+                ${lignesHtml ? `<ul class="cmd-lines">${lignesHtml}</ul>` : '<p class="text-muted">Aucun article</p>'}
+            </section>
+
+            ${livraison.notes ? `<p class="bl-notes"><strong>Notes internes</strong>${escapeHtml(livraison.notes)}</p>` : ''}
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Traçabilité interne <span class="trace-section-hint">non imprimée sur le BL</span></h4>
+                ${blTraceAlertHtml(totalItems, totalTrace, forcedTraceCount)}
+                ${lotsTraces.length ? blLotsHtml(lotsTraces, aromes) : '<p class="text-muted">Aucune trace de lot enregistrée pour ce BL.</p>'}
+            </section>
         </div>
     `, `
-        <button class="btn btn-danger" data-click="delete-livraison" data-id="${escapeHtml(id)}">Supprimer</button>
+        <button class="btn btn-ghost btn-ghost-danger modal-footer-start" data-click="delete-livraison" data-id="${escapeHtml(id)}">Supprimer</button>
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
         <button class="btn btn-primary" data-click="prepare-bl-export" data-id="${escapeHtml(id)}">Préparer / Exporter</button>
     `);
@@ -14140,6 +14196,7 @@ const showPrepareBLExportModal = (livraisonId) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
     const commandes = DB.get('commandes') || [];
+    const aromes = DB.get('aromes') || [];
     const livraison = livraisons.find(l => l.id === livraisonId);
     if (!livraison) {
         showToast('Livraison non trouvée', 'error');
@@ -14148,61 +14205,46 @@ const showPrepareBLExportModal = (livraisonId) => {
 
     const commande = commandes.find(c => c.id === livraison.commandeId);
     const client = clients.find(c => c.id === livraison.clientId);
-    const totalItems = (livraison.lignes || []).reduce((sum, l) => sum + (l.quantite || 0), 0);
+    const totalItems = (livraison.lignes || []).reduce((sum, l) => sum + (Number(l.quantite) || 0), 0);
     const lotsTraces = (livraison.lotsTraces && livraison.lotsTraces.length > 0)
         ? livraison.lotsTraces
         : buildLotsTracesForCommande(commande);
-    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (lot.quantite || 0), 0);
+    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (Number(lot.quantite) || 0), 0);
     const forcedCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
-    const tracePreview = lotsTraces.slice(0, 4).map(lot => `
-        <tr>
-            <td>#${escapeHtml(formatLotNumero(lot.numLot || lot.lotId))}</td>
-            <td>${escapeHtml(lot.arome || '?')}</td>
-            <td>${escapeHtml(lot.format || '?')}</td>
-            <td>${lot.dlc ? formatDate(lot.dlc) : 'N/A'}</td>
-            <td>${escapeHtml(lot.quantite || 0)}</td>
-        </tr>
-    `).join('');
+
+    // Compteur de caisses IFCO avec boutons − / + (saisie directe toujours possible)
+    const compteur = (id, label, valeur, couleur) => `
+        <div class="bl-counter">
+            <label for="${id}" class="bl-counter-label"><span class="bl-crate bl-crate--${couleur}" aria-hidden="true"></span>${escapeHtml(label)}</label>
+            <div class="bl-counter-ctrl">
+                <button type="button" class="btn btn-secondary bl-counter-btn" data-click="bl-caisse-step" data-target="${id}" data-delta="-1" aria-label="${escapeHtml(`${label} : une de moins`)}">−</button>
+                <input type="number" id="${id}" min="0" step="1" inputmode="numeric" value="${safeNumAttr(valeur)}">
+                <button type="button" class="btn btn-secondary bl-counter-btn" data-click="bl-caisse-step" data-target="${id}" data-delta="1" aria-label="${escapeHtml(`${label} : une de plus`)}">+</button>
+            </div>
+        </div>`;
 
     modal.show(`Préparer BL-${getBLNumero(livraison)}`, `
-        <div class="commande-details">
-            <div class="workflow-summary">
-                <div><span>Client</span><strong>${escapeHtml(client?.societe || client?.nom || 'N/A')}</strong></div>
-                <div><span>Commande</span><strong>#${escapeHtml(commande ? getCommandeNumero(commande) : String(livraison.commandeId).slice(-5))}</strong></div>
-                <div><span>Articles</span><strong>${totalItems}</strong></div>
-                <div><span>Trace interne</span><strong>${totalTrace}</strong></div>
-            </div>
-            ${forcedCount > 0 ? `<p class="badge badge-warning">Alerte interne: ${forcedCount} ligne(s) livrée(s) avec stock insuffisant confirmé.</p>` : ''}
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="blCaissesVertes">Caisses vertes livrées (IFCO)</label>
-                    <input type="number" id="blCaissesVertes" min="0" step="1" value="${parseInt(livraison.caissesVertesLivrees, 10) || 0}">
+        <div class="trace-sheet">
+            ${blHeroHtml(livraison, client, commande)}
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Caisses IFCO livrées <span class="trace-section-hint">imprimées sur le BL</span></h4>
+                <div class="bl-counters">
+                    ${compteur('blCaissesVertes', 'Caisses vertes', parseInt(livraison.caissesVertesLivrees, 10) || 0, 'verte')}
+                    ${compteur('blCaissesNoires', 'Caisses noires', parseInt(livraison.caissesNoiresLivrees, 10) || 0, 'noire')}
                 </div>
-                <div class="form-group">
-                    <label for="blCaissesNoires">Caisses noires livrées (IFCO)</label>
-                    <input type="number" id="blCaissesNoires" min="0" step="1" value="${parseInt(livraison.caissesNoiresLivrees, 10) || 0}">
-                </div>
-            </div>
-            <div class="form-group">
+            </section>
+
+            <div class="form-group" style="margin: 0;">
                 <label for="blNotesInternes">Notes internes</label>
-                <textarea id="blNotesInternes" rows="3" placeholder="Notes non imprimées sur le BL client">${escapeHtml(livraison.notes || '')}</textarea>
+                <textarea id="blNotesInternes" rows="3" placeholder="Non imprimées sur le BL client">${escapeHtml(livraison.notes || '')}</textarea>
             </div>
-            <h4 style="margin-top:16px;">Traçabilité interne</h4>
-            ${tracePreview ? `
-            <table class="details-table">
-                <thead>
-                    <tr>
-                        <th>Lot</th>
-                        <th>Arôme</th>
-                        <th>Format</th>
-                        <th>DLC</th>
-                        <th>Quantité</th>
-                    </tr>
-                </thead>
-                <tbody>${tracePreview}</tbody>
-            </table>
-            ${lotsTraces.length > 4 ? `<p class="text-muted">+${lotsTraces.length - 4} autre(s) ligne(s) tracée(s)</p>` : ''}
-            ` : '<p class="text-muted">Aucun lot tracé pour cette livraison.</p>'}
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Traçabilité interne <span class="trace-section-hint">${escapeHtml(`${twinFmtInt(totalTrace)} / ${twinFmtInt(totalItems)} bt tracées`)}</span></h4>
+                ${blTraceAlertHtml(totalItems, totalTrace, forcedCount)}
+                ${lotsTraces.length ? blLotsHtml(lotsTraces, aromes) : '<p class="text-muted">Aucun lot tracé pour cette livraison.</p>'}
+            </section>
         </div>
     `, `
         <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
