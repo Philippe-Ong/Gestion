@@ -10402,6 +10402,7 @@ const getLotTraceData = (lotId) => {
         totalAjustements,
         totalRetours,
         livraisonsClients,
+        productions,
         ventes,
         sorties,
         ajustements,
@@ -10444,6 +10445,64 @@ const formatJourTrace = (value) => {
     return s.length > 10 ? new Date(s).toLocaleDateString('fr-CH') : formatDate(s);
 };
 
+// « il y a 12 j », « dans 3 j », « aujourd'hui » (dates de la frise du lot)
+const traceRelativeDay = (value) => {
+    const days = twinDaysUntil(value);
+    if (days === null) return '';
+    if (days === 0) return "aujourd'hui";
+    return days > 0 ? `dans ${twinFmtInt(days)} j` : `il y a ${twinFmtInt(-days)} j`;
+};
+
+// Badge d'état du lot en tête de la fiche de traçabilité
+const traceStatusBadge = (t) => {
+    if (!t.lot) return '<span class="trace-status trace-status--neutral">Épuisé</span>';
+    if (t.bloque) return '<span class="trace-status trace-status--danger">Bloqué</span>';
+    const status = getLotStatus(t.lot);
+    const [cls, label] = {
+        ok: ['success', 'Vendable'],
+        warning: ['warning', getLotStatusLabel('warning', t.lot)],
+        invendable: ['danger', 'Invendable'],
+        expired: ['danger', 'Expiré']
+    }[status] || ['neutral', status];
+    return `<span class="trace-status trace-status--${cls}">${escapeHtml(label)}</span>`;
+};
+
+// Parcours chronologique du lot : production, livraisons, ventes, sorties, ajustements, retours
+const traceJourneyItems = (t) => {
+    const temps = (v) => { const ms = Date.parse(v || ''); return Number.isNaN(ms) ? 0 : ms; };
+    const items = [];
+    t.productions.forEach(p => items.push({
+        kind: 'prod', date: p.productionDate || p.dateAdded, titre: 'Production', detail: '', delta: Number(p.quantity) || 0
+    }));
+    t.livraisonsClients.forEach(l => items.push({
+        kind: 'livraison',
+        date: l.date,
+        titre: l.clientNom || 'Client',
+        detail: [
+            l.commandeNumero ? `Cmd #${l.commandeNumero}` : '',
+            l.numeroBL ? `BL ${l.numeroBL}` : '',
+            l.date && !l.dateEffective ? 'livraison prévue' : ''
+        ].filter(Boolean).join(' · '),
+        delta: -(Number(l.quantite) || 0),
+        commandeId: l.commandeId
+    }));
+    [...t.ventes, ...t.sorties, ...t.ajustements].forEach(h => {
+        const type = getHistoryType(h);
+        const titre = type === 'vente' ? 'Vente directe'
+            : type === 'ajust' ? `Ajustement${h.motif && h.motif !== 'correction' ? ` (${SORTIE_MOTIFS[h.motif] || h.motif})` : ''}`
+            : SORTIE_MOTIFS[h.motif] || 'Sortie';
+        items.push({ kind: type, date: h.dateAdded, titre, detail: [h.clientNom, h.note].filter(Boolean).join(' — '), delta: getHistoryDelta(h) });
+    });
+    t.retours.forEach(r => items.push({
+        kind: 'retour',
+        date: r.dateAdded,
+        titre: `Livraison annulée${r.clientNom ? ` — ${r.clientNom}` : ''}`,
+        detail: [r.commandeNumero ? `Cmd #${r.commandeNumero}` : '', r.numeroBL ? `BL ${r.numeroBL}` : '', 're-crédité en stock'].filter(Boolean).join(' · '),
+        delta: Number(r.quantity) || 0
+    }));
+    return items.sort((a, b) => temps(a.date) - temps(b.date));
+};
+
 const showLotTraceModal = (lotId) => {
     const t = getLotTraceData(lotId);
     if (!t.arome && t.livraisonsClients.length === 0 && t.totalProduit === 0) {
@@ -10451,100 +10510,107 @@ const showLotTraceModal = (lotId) => {
         return;
     }
 
-    const ligne = (label, value) => `
-        <div class="flex-between" style="padding: 6px 0; border-bottom: 1px solid var(--border-light);">
-            <span style="color: var(--text-light);">${escapeHtml(label)}</span>
-            <strong>${value}</strong>
+    const ecart = getLotTraceEcart(t);
+    const numLotAffiche = formatLotNumero(t.numLot || t.lotId);
+    const arome = (DB.get('aromes') || []).find(a => normalizeName(a.nom) === normalizeName(t.arome));
+    const fmtBt = (n) => `${twinFmtInt(n)} bt`;
+
+    // Frise Prod. → DLV → DLC (lot encore en stock) et dates avec leur échéance
+    const datesLot = { dateProduction: t.dateProduction, dlv: t.dlv, dlc: t.dlc };
+    const dates = [['Production', t.dateProduction], ['DLV', t.dlv], ['DLC', t.dlc]]
+        .filter(([, d]) => d && isValidDateOnly(d));
+    const datesHtml = dates.length === 0 ? '' : `
+        <div class="trace-dates">${dates.map(([label, d]) => `
+            <div class="trace-date">
+                <span class="trace-date-label">${escapeHtml(label)}</span>
+                <span class="trace-date-value">${escapeHtml(formatDate(d))}</span>
+                <span class="trace-date-rel">${escapeHtml(traceRelativeDay(d))}</span>
+            </div>`).join('')}
         </div>`;
 
-    const ecart = getLotTraceEcart(t);
+    // Où sont passées les bouteilles : livré, vendu, sorti, en stock
+    const sorti = t.totalVenteDirecte + t.totalSorties;
+    const parts = [
+        { cls: 'livre', label: 'Livré aux clients', n: t.totalLivre },
+        { cls: 'vente', label: 'Ventes directes', n: t.totalVenteDirecte },
+        { cls: 'sortie', label: 'Autres sorties', n: t.totalSorties },
+        { cls: 'stock', label: 'En stock', n: t.enStock }
+    ].filter(p => p.n > 0);
+    const base = parts.reduce((s, p) => s + p.n, 0);
+    const fluxHtml = base === 0 ? '' : `
+        <div class="trace-flow-bar" role="img" aria-label="${escapeHtml(parts.map(p => `${p.label} ${fmtBt(p.n)}`).join(', '))}">
+            ${parts.map(p => `<span class="trace-flow-seg trace-flow-seg--${p.cls}" style="flex-grow:${safeNumAttr(p.n)}"></span>`).join('')}
+        </div>
+        <ul class="trace-flow-legend">
+            ${parts.map(p => `<li><span class="trace-flow-dot trace-flow-seg--${p.cls}"></span>${escapeHtml(p.label)} <strong>${escapeHtml(fmtBt(p.n))}</strong></li>`).join('')}
+        </ul>`;
 
-    const livraisonsHtml = t.livraisonsClients.length === 0
-        ? '<p class="text-muted">Aucune livraison client pour ce lot</p>'
-        : `<div class="trace-scroll"><table class="details-table">
-            <thead>
-                <tr><th>Date</th><th>Client</th><th>Cmd</th><th>BL</th><th>Qté</th></tr>
-            </thead>
-            <tbody>
-                ${t.livraisonsClients.map(l => `
-                    <tr>
-                        <td>${formatJourTrace(l.date)}${l.date && !l.dateEffective ? ' <span class="text-muted">(prévue)</span>' : ''}</td>
-                        <td>${escapeHtml(l.clientNom)}</td>
-                        <td>#${escapeHtml(String(l.commandeNumero || '—'))}</td>
-                        <td>${l.numeroBL ? escapeHtml(String(l.numeroBL)) : '—'}</td>
-                        <td><strong>${escapeHtml(l.quantite)} bt</strong></td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table></div>`;
+    const kpi = (label, value, extra = '') => `
+        <div class="trace-kpi${extra}">
+            <span class="trace-kpi-value">${value}</span>
+            <span class="trace-kpi-label">${escapeHtml(label)}</span>
+        </div>`;
 
-    const mouvements = [...t.ventes, ...t.sorties, ...t.ajustements]
-        .sort((a, b) => new Date(a.dateAdded || 0) - new Date(b.dateAdded || 0));
-    const mouvementLabel = (h) => {
-        const type = getHistoryType(h);
-        if (type === 'vente') return 'Vente directe';
-        if (type === 'ajust') return `Ajustement${h.motif && h.motif !== 'correction' ? ` (${SORTIE_MOTIFS[h.motif] || h.motif})` : ''}`;
-        return SORTIE_MOTIFS[h.motif] || 'Sortie';
-    };
-    const mouvementsHtml = mouvements.length === 0 ? '' : `
-        <h4 style="margin-top: 16px;">Ventes directes, sorties et ajustements</h4>
-        <div class="trace-scroll"><table class="details-table">
-            <thead><tr><th>Date</th><th>Type</th><th>Client / note</th><th>Qté</th></tr></thead>
-            <tbody>
-                ${mouvements.map(h => {
-                    const delta = getHistoryDelta(h);
-                    const detail = [h.clientNom, h.note].filter(Boolean).join(' — ');
-                    return `<tr>
-                        <td>${formatJourTrace(h.dateAdded)}</td>
-                        <td>${escapeHtml(mouvementLabel(h))}</td>
-                        <td>${detail ? escapeHtml(detail) : '—'}</td>
-                        <td><strong>${delta < 0 ? '−' : '+'}${Math.abs(delta)} bt</strong></td>
-                    </tr>`;
-                }).join('')}
-            </tbody>
-        </table></div>`;
+    const parcours = traceJourneyItems(t);
+    const parcoursHtml = parcours.length === 0
+        ? '<p class="text-muted">Aucun mouvement enregistré pour ce lot.</p>'
+        : `<ol class="trace-journey">${parcours.map(it => {
+            const qte = `${it.delta < 0 ? '−' : '+'}${twinFmtInt(Math.abs(it.delta))} bt`;
+            const titre = it.commandeId
+                ? `<button type="button" class="trace-journey-link" data-click="show-commande-details" data-id="${escapeHtml(it.commandeId)}">${escapeHtml(it.titre)}</button>`
+                : escapeHtml(it.titre);
+            return `
+                <li class="trace-journey-item trace-journey-item--${escapeHtml(it.kind)}">
+                    <span class="trace-journey-dot" aria-hidden="true"></span>
+                    <div class="trace-journey-main">
+                        <div class="trace-journey-title">${titre}</div>
+                        <div class="trace-journey-meta">${escapeHtml([it.date ? formatJourTrace(it.date) : 'date inconnue', it.detail].filter(Boolean).join(' · '))}</div>
+                    </div>
+                    <span class="trace-journey-qty${it.delta < 0 ? ' is-out' : ''}">${escapeHtml(qte)}</span>
+                </li>`;
+        }).join('')}</ol>`;
 
-    const retoursHtml = t.retours.length === 0 ? '' : `
-        <h4 style="margin-top: 16px;">Livraisons annulées (commandes restaurées)</h4>
-        <div class="trace-scroll"><table class="details-table">
-            <thead><tr><th>Annulée le</th><th>Client</th><th>Cmd</th><th>BL</th><th>Qté re-créditée</th></tr></thead>
-            <tbody>
-                ${t.retours.map(r => `<tr>
-                    <td>${formatJourTrace(r.dateAdded)}</td>
-                    <td>${r.clientNom ? escapeHtml(r.clientNom) : '—'}</td>
-                    <td>${r.commandeNumero ? `#${escapeHtml(String(r.commandeNumero))}` : '—'}</td>
-                    <td>${r.numeroBL ? escapeHtml(String(r.numeroBL)) : '—'}</td>
-                    <td><strong>${Number(r.quantity) || 0} bt</strong></td>
-                </tr>`).join('')}
-            </tbody>
-        </table></div>`;
-
-    const numLotAffiche = formatLotNumero(t.numLot || t.lotId);
+    const ingredientsHtml = t.ingredients.length || t.totalProduit > 0
+        ? `<section class="trace-section"><h4 class="trace-section-title">Ingrédients utilisés</h4>${ingredientsTraceHtml(t.ingredients, t.totalProduit)}</section>`
+        : '';
 
     modal.show(`Traçabilité lot #${numLotAffiche}`, `
-        <div class="commande-details">
+        <div class="trace-sheet">
+            <div class="trace-hero">
+                <span class="trace-hero-swatch" style="background:${safeColor(arome?.couleur)}" aria-hidden="true"></span>
+                <div class="trace-hero-text">
+                    <div class="trace-hero-name">${escapeHtml(t.arome || '?')}</div>
+                    <div class="trace-hero-sub">${escapeHtml(t.format || '?')} · lot #${escapeHtml(numLotAffiche)}</div>
+                </div>
+                ${traceStatusBadge(t)}
+            </div>
+
             ${t.bloque ? `<p class="trace-alert trace-alert-danger"><strong>Lot bloqué</strong>${t.motifBlocage ? ` — ${escapeHtml(t.motifBlocage)}` : ''}${t.dateBlocage ? ` (depuis le ${formatJourTrace(t.dateBlocage)})` : ''}</p>` : ''}
-            ${ligne('Arôme / Format', `${escapeHtml(t.arome || '?')} • ${escapeHtml(t.format || '?')}`)}
-            ${t.dateProduction ? ligne('Date de production', formatDate(t.dateProduction)) : ''}
-            ${t.dlv ? ligne('DLV', formatDate(t.dlv)) : ''}
-            ${t.dlc ? ligne('DLC', formatDate(t.dlc)) : ''}
-            ${t.totalProduit > 0 ? ligne('Produit', `${escapeHtml(t.totalProduit)} bt`) : ''}
-            ${ligne('Livré aux clients', `${escapeHtml(t.totalLivre)} bt`)}
-            ${t.totalVenteDirecte > 0 ? ligne('Ventes directes', `${escapeHtml(t.totalVenteDirecte)} bt`) : ''}
-            ${t.totalSorties > 0 ? ligne('Autres sorties', `${escapeHtml(t.totalSorties)} bt`) : ''}
-            ${t.totalAjustements !== 0 ? ligne('Ajustements', `${t.totalAjustements > 0 ? '+' : '−'}${Math.abs(t.totalAjustements)} bt`) : ''}
-            ${ligne('En stock', t.lot ? `${escapeHtml(t.enStock)} bt` : '<span class="badge badge-default">Épuisé</span>')}
-            ${ecart !== null && ecart !== 0 ? ligne('Écart non expliqué', `${escapeHtml(ecart)} bt`) : ''}
 
-            ${t.ingredients.length || t.totalProduit > 0 ? `<h4 style="margin-top: 16px;">Ingrédients utilisés</h4>${ingredientsTraceHtml(t.ingredients, t.totalProduit)}` : ''}
+            <div class="trace-life">
+                ${t.lot ? lotShelfLifeHtml(datesLot) : ''}
+                ${datesHtml}
+            </div>
 
-            <h4 style="margin-top: 16px;">Livraisons clients</h4>
-            ${livraisonsHtml}
-            ${mouvementsHtml}
-            ${retoursHtml}
+            <div class="trace-kpis">
+                ${t.totalProduit > 0 ? kpi('Produit', escapeHtml(fmtBt(t.totalProduit))) : ''}
+                ${kpi('Livré', escapeHtml(fmtBt(t.totalLivre)))}
+                ${kpi('Vendu / sorti', escapeHtml(fmtBt(sorti)))}
+                ${kpi('En stock', t.lot ? escapeHtml(fmtBt(t.enStock)) : 'Épuisé', ' trace-kpi--stock')}
+            </div>
+            ${fluxHtml}
+            ${t.totalAjustements !== 0 ? `<p class="trace-note">Ajustements de quantité : ${t.totalAjustements > 0 ? '+' : '−'}${escapeHtml(fmtBt(Math.abs(t.totalAjustements)))}</p>` : ''}
+            ${ecart !== null && ecart !== 0 ? `<p class="trace-alert">Écart non expliqué : <strong>${escapeHtml(fmtBt(ecart))}</strong> (produit + ajustements − livré − vendu − sorti − stock)</p>` : ''}
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Parcours du lot</h4>
+                ${parcoursHtml}
+            </section>
+            ${ingredientsHtml}
         </div>
     `, `
         <button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>
+        ${t.lot && t.enStock > 0 ? `<button class="btn btn-secondary" data-click="sell-lot" data-id="${escapeHtml(t.lotId)}">Sortie de stock</button>` : ''}
         <button class="btn btn-primary" data-click="show-lot-rappel" data-num="${escapeHtml(String(t.numLot || t.lotId))}">Rappel du lot (tous formats)</button>
     `);
 };

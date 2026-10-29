@@ -4074,6 +4074,169 @@ input[type="checkbox"] {
     background: var(--bg-danger);
     color: var(--danger-dark);
 }
+/* Fiche de traçabilité d'un lot (v13.2) */
+.trace-sheet { display: flex; flex-direction: column; gap: 16px; }
+.trace-sheet > .trace-alert { margin: 0; }
+.trace-hero {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+.trace-hero-swatch {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.35), 0 0 0 1px var(--border-light);
+}
+.trace-hero-text { flex: 1; min-width: 0; }
+.trace-hero-name {
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    line-height: 1.2;
+    color: var(--text);
+}
+.trace-hero-sub { margin-top: 2px; font-size: 13px; color: var(--text-light); }
+.trace-status {
+    flex: none;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 700;
+}
+.trace-status--success { background: var(--bg-success); color: var(--success-dark); }
+.trace-status--warning { background: var(--bg-warning); color: var(--warning-dark); }
+.trace-status--danger  { background: var(--bg-danger);  color: var(--danger-dark); }
+.trace-status--neutral { background: var(--bg-neutral); color: var(--text-light); }
+.trace-life {
+    padding: 14px 16px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+}
+.trace-life .shelf-life { margin: 0 0 12px; }
+.trace-dates {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: 10px;
+}
+.trace-date { display: flex; flex-direction: column; gap: 1px; }
+.trace-date-label { font-size: 12px; color: var(--text-light); }
+.trace-date-value { font-size: 14.5px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.trace-date-rel { font-size: 12px; color: var(--text-muted); }
+.trace-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 10px;
+}
+.trace-kpi {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 12px 14px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-light);
+    background: var(--white);
+}
+.trace-kpi-value {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+.trace-kpi-label { font-size: 12px; color: var(--text-light); }
+.trace-kpi--stock { background: var(--primary-tint); border-color: transparent; }
+.trace-kpi--stock .trace-kpi-value { color: var(--primary-darker); }
+.trace-flow-bar {
+    display: flex;
+    gap: 2px;
+    height: 10px;
+    margin-top: -4px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--border-light);
+}
+.trace-flow-seg { flex-basis: 0; min-width: 4px; }
+.trace-flow-seg--livre  { background: var(--primary); }
+.trace-flow-seg--vente  { background: var(--info); }
+.trace-flow-seg--sortie { background: var(--warning-light); }
+.trace-flow-seg--stock  { background: var(--primary-light); opacity: 0.55; }
+.trace-flow-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin: -8px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 12.5px;
+    color: var(--text-light);
+}
+.trace-flow-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.trace-flow-legend strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.trace-flow-dot { width: 9px; height: 9px; border-radius: 50%; }
+.trace-note { margin: -8px 0 0; font-size: 12.5px; color: var(--text-light); }
+.trace-section .details-table { margin-top: 0; }
+.trace-section-title { margin: 0 0 8px; font-size: 14px; font-weight: 700; color: var(--text); }
+.trace-journey { margin: 0; padding: 0; list-style: none; }
+.trace-journey-item {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0 8px 2px;
+}
+/* Fil vertical reliant les étapes */
+.trace-journey-item:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 24px;
+    bottom: -8px;
+    width: 2px;
+    background: var(--border-light);
+}
+.trace-journey-dot {
+    position: relative;
+    flex: none;
+    width: 12px;
+    height: 12px;
+    margin-top: 4px;
+    border-radius: 50%;
+    background: var(--border-strong);
+    box-shadow: 0 0 0 3px var(--white);
+}
+.trace-journey-item--prod .trace-journey-dot      { background: var(--primary-light); }
+.trace-journey-item--livraison .trace-journey-dot { background: var(--primary); }
+.trace-journey-item--vente .trace-journey-dot     { background: var(--info); }
+.trace-journey-item--sortie .trace-journey-dot    { background: var(--warning-light); }
+.trace-journey-item--retour .trace-journey-dot    { background: var(--info-dark); }
+.trace-journey-main { flex: 1; min-width: 0; }
+.trace-journey-title { font-size: 14px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.trace-journey-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--primary-dark);
+    text-align: left;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+}
+.trace-journey-link:hover { text-decoration-color: currentColor; }
+.trace-journey-meta { margin-top: 1px; font-size: 12.5px; color: var(--text-light); overflow-wrap: anywhere; }
+.trace-journey-qty {
+    flex: none;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--success-dark);
+    font-variant-numeric: tabular-nums;
+}
+.trace-journey-qty.is-out { color: var(--text); }
 .trace-scroll {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
