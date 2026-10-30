@@ -360,12 +360,29 @@ Génère et télécharge directement un fichier `.pdf` nommé `BL-XXXXX_YYYY-MM-
 }
 ```
 
-**Pointages de nuit :** Les pointages où `heureFin < heureDebut` (ex. 22:00 → 02:00) sont supportés. La durée est calculée par le helper `computePointageMinutes` qui ajoute 24h (1440 min) à l'heure de fin si elle est antérieure à l'heure de début, avant de soustraire la pause.
+Un enregistrement est **une plage de travail** ; une journée peut en compter plusieurs. `heureFin`
+vaut `''` tant que la plage est en cours (arrivée pointée en direct), `notes` est facultatif.
 
-Depuis v13.1, une session ouverte la veille reste visible et peut être terminée après minuit ;
-elle empêche une deuxième arrivée. La pause saisie doit être un nombre entier positif ou nul
-qui ne dépasse pas la durée du pointage. Les exports d'archives reprennent les filtres année,
-client et statut de la vue Archives ; l'export depuis Commandes conserve toutes ses archives.
+**Pointages de nuit :** Les pointages où `heureFin < heureDebut` (ex. 22:00 → 02:00) sont supportés. La durée est calculée par le helper `computePointageMinutes` qui ajoute 24h (1440 min) à l'heure de fin si elle est antérieure à l'heure de début, avant de soustraire la pause. La plage compte pour le jour d'arrivée (`date`).
+
+**Durée (v13.3) :** `pointageDuree(p, now)` est la règle unique (page Pointage, tableau de bord,
+jumeau) : pause déduite ; une plage en cours compte jusqu'à maintenant ; un départ oublié compte 0.
+
+**Départ oublié (v13.3) :** une plage sans `heureFin` ouverte depuis plus de
+`CONSTANTS.POINTAGE_OUVERT_MAX_H` (16 h) n'est plus « en cours » (`findPointageEnCours`) : elle
+est signalée « départ non saisi » (case « ! » du tableau de la semaine, plages de la semaine,
+priorités du tableau de bord via `pointagesAClore`) et n'empêche plus une nouvelle arrivée. Une plage
+de la veille ouverte depuis moins longtemps (travail de nuit) reste en cours et peut être terminée
+après minuit.
+
+**Contrôles de saisie :** début et fin obligatoires (seule une plage déjà en cours peut rester
+sans fin), plage non vide, pause entière positive ou nulle qui ne dépasse pas la durée, jour non
+futur, aucun chevauchement avec les autres plages de la personne la veille, le jour même et le
+lendemain (`pointageIntervalle`). L'arrivée en direct est refusée si des heures déjà saisies
+couvrent ce moment.
+
+Les exports d'archives reprennent les filtres année, client et statut de la vue Archives ;
+l'export depuis Commandes conserve toutes ses archives.
 
 **Restauration JSON (v13.1) :** les tables, objets, tableaux imbriqués et champs numériques
 sont validés avant toute écriture. Un champ numérique contenant du HTML est refusé. Les
@@ -432,7 +449,7 @@ Les entrées d'historique sont créées par `buildLotHistoryEntry(prefixe, lot, 
 
 ### 3.0 Jumeau numérique 3D (v12.0)
 Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaque rendu de `renderJumeau()`. Les re-rendus (snapshots V11, actions) mettent à jour la scène sur place sans recréer le contexte WebGL.
-- **Zones** (`TWIN_ZONES`) : Production (labo : cuves et plaques), Entrepôt (piles de casiers arôme × format), Expédition (commandes `en_attente`/`produite`), Consommables (réserve et chambre froide, articles d'inventaire `consommable`), Équipe (employés actifs, présents = pointage du jour sans `heureFin`).
+- **Zones** (`TWIN_ZONES`) : Production (labo : cuves et plaques), Entrepôt (piles de casiers arôme × format), Expédition (commandes `en_attente`/`produite`), Consommables (réserve et chambre froide, articles d'inventaire `consommable`), Équipe (employés actifs, présents = plage en cours selon `findPointageEnCours`).
 - **Équipement réel (v12.1)** : `CONSTANTS.ATELIER_CUVES` cuves de `CUVE_MAX_L` (4 × 25 L) et une casserole par plaque à induction (`CONSTANTS.ATELIER_CASSEROLES_L` = [9, 4] → plaque 1 : 9 L, plaque 2 : 4 L). Depuis v13.2, le jumeau lit le plan commun `buildProductionPlan()` (manques de `planAttributionCommandes`, brassins par échéance du manque, `planifierAtelier`) : la 1re fournée occupe les postes, les récipients des fournées suivantes sont « en attente ». Items : `equip:cuve-N` / `equip:casserole-N` (statut `planned` ou `idle`), détail dans `model.production`.
 - **Plan de l'étage (v12.3)** : 1 unité = 1 m ; étage d'environ 24 × 16 m (`TWIN_PLAN`) posé sur un rez-de-chaussée vitré, d'après les photos de l'atelier : labo de production, laverie et stock côté fenêtres, couloir central, réserve avec chambre froide, vestiaire-bureau et expédition (monte-charge). Les cloisons (`TWIN_PARTITIONS`) sont coupées à 1,10 m avec un chapeau sombre ; la partie haute fenêtrée de chaque façade (`TWIN_FACADES`) est masquée quand la caméra est du côté extérieur de ce mur (`twinUpdateCutaways`).
 - **Modèles 3D (v12.3)** : paillasse de labo (caissons blancs, lisse vert-de-gris à clips rouges, plan en résine sauge, évier et robinetterie de labo), îlot d'embouteillage, armoires hautes avec cartons d'Einkochautomat ; cuves 25 L inox à robinet et thermostat posées sur la paillasse (Ø 38 cm, `TWIN_CUVE`, couvercle relevé et thé visible si planifiée), casseroles 9 L / 4 L (`TWIN_POTS`) sur plaques à induction avec vapeur ; stock en piles de casiers noirs (8 par couche, ~1,9 m au plus), bouteilles en verre au thé ambré, étiquette ThéCol par arôme et bouchon noir (`twinBottleSpec()`) ; commandes en caisses vertes ajourées sur chariots bleus avec bon de livraison (bouteilles visibles si produite) ; consommables rangés par nature (`twinBinKind`) sur étagères inox (ingrédients, chambre froide) ou rayonnages noirs (emballages) : boîtes hermétiques dont le niveau suit le stock, sacs kraft, packs de bouteilles sous film, cartons de bouchons, rouleaux d'étiquettes, bidons ; mannequins en blouse, charlotte, gants et tablier à la couleur de l'employé ; absent = blouse suspendue au portant du vestiaire. Les pièces répétées sont instanciées (`InstancedMesh`) et la sélection passe par des volumes invisibles hors scène.
@@ -452,7 +469,7 @@ Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaq
 Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `renderDashboard()` à partir de `buildDashboardModel()`, qui réutilise `buildTwinModel()` (mêmes règles que le jumeau 3D) ; le jumeau reste la page d'accueil.
 - **En-tête** : salutation, date, résumé (priorités critiques, commandes à livrer sous 7 jours, litres à produire) ; actions « + Commande » (`showCommandeModal`), « + Lot » (`showNouveauLotModal`), « Pointage ».
 - **Tuiles** (liens vers la page concernée) : À produire (litres, bouteilles, postes occupés) ; Livraisons · 7 j (commandes `en_attente` / `produite` en retard ou dues dans les 7 jours ; retards, sinon prêtes / total) ; Stock vendable (lots expirés, invendables ou à DLV proche, sinon bouteilles produites sur 7 jours d'après les entrées `PROD-`) ; Équipe (sur place / effectif actif, heures pointées du jour) ; Livré ce mois (CA des commandes livrées depuis le 1er, comparé aux mêmes jours du mois précédent ; en bouteilles quand aucun tarif n'est connu).
-- **Priorités** : alertes du jumeau (commandes en retard ou urgentes, lots expirés / invendables / DLV proche, consommables sous le seuil ou bas) et pointages restés ouverts les jours précédents, triés critique → attention → à surveiller (icône + libellé, jamais la couleur seule) ; 6 visibles puis « Voir N autres ». Chaque ligne ouvre l'action existante : `show-commande-details`, `twin-goto-stock` (stock filtré), `show-inventaire-modal`, `cloturer-pointage`. Les besoins de production ont leur propre carte.
+- **Priorités** : alertes du jumeau (commandes en retard ou urgentes, lots expirés / invendables / DLV proche, consommables sous le seuil ou bas) et départs oubliés (`pointagesAClore`, même règle que la page Pointage), triés critique → attention → à surveiller (icône + libellé, jamais la couleur seule) ; 6 visibles puis « Voir N autres ». Chaque ligne ouvre l'action existante : `show-commande-details`, `twin-goto-stock` (stock filtré), `show-inventaire-modal`, `cloturer-pointage`. Les besoins de production ont leur propre carte.
 - **Livraisons · 7 jours** : bande des 7 jours (commandes et bouteilles par jour ; un jour ouvre Commandes filtrée sur ce jour via `weekCalendarSelectedDate`) puis les 6 prochaines commandes, retards en tête.
 - **Production à lancer** : les postes de l'atelier (4 cuves, 2 casseroles) remplis à la couleur de l'arôme selon le plan du jumeau, puis par arôme : litres, bouteilles, postes (ou « Fournée N »), recette manquante, échéance du manque et détail par format ; « Planifier » ouvre le planificateur.
 - **Équipe** : pointer l'arrivée ou le départ (`clockInEmployee` / `clockOutEmployee`).
@@ -472,11 +489,14 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - Durée de vie (`lotShelfLifeHtml`, aussi dans l'inspecteur du jumeau) : phrase « Vendable encore N j » / « DLV dépassée de N j » / « DLC dépassée de N j » et frise Prod. → DLV → DLC (vert : vente, jaune : DLV proche, gris puis rouge après la DLV) avec un repère « aujourd'hui »
 - Bouton « Sortie » : le motif « vente » n'est proposé que si le lot est vendable (ni bloqué, ni DLV/DLC dépassée)
 
-### 3.3 Pointage (Heures)
-- Vue calendrier/semaine
-- Pointer arrivée/départ
-- Tableau des pointages avec filtres
-- Calcul automatique des heures
+### 3.3 Pointage (Heures) — v13.3
+Les heures se saisissent surtout après le travail ; pointer en direct reste possible.
+- **Barre d'outils** : « Semaine » / « Mois » (`thecol_filter_pointage_vue`, préférence locale) ; « Pointer maintenant » (vue Semaine) ou « Exporter Excel » (vue Mois) ; « + Saisir des heures ».
+- **En cours** (vue Semaine) : arrivées pointées en direct, durée mise à jour toutes les 30 s ; « Départ » et ⋯ « Corriger les heures ».
+- **Semaine** (`buildPointageSemaine`) : navigation semaine par semaine (pas au-delà de la semaine en cours). Tableau personnes × jours (employés actifs dans l'ordre et les couleurs du jumeau, puis inactifs ou supprimés qui ont des heures), total par personne et par jour ; une case ouvre la journée ; jours à venir non saisissables ; repères « en cours » et « départ non saisi ». Sur téléphone (requête de conteneur `ptg`), nom et total passent au-dessus des 7 jours. Puis « Plages de la semaine », bloc repliable (fermé par défaut, état mémorisé sur l'appareil : `thecol_filter_pointage_plages`), jour par jour, ⋯ Modifier / Supprimer (confirmation, relecture après l'attente). Un départ oublié s'y corrige en ouvrant sa journée (case « ! » ou ⋯ Modifier) ; la priorité du tableau de bord ouvre la même fenêtre (`cloturer-pointage`).
+- **Mois** (`buildPointageMois`) : par personne, heures du mois, journées travaillées, moyenne par journée, cumul depuis janvier, bande des jours et « Détail des journées » (une journée ouvre la saisie).
+- **Fenêtre « Heures de travail »** (`showPointageJourModal`) : employé (mémorisé localement, `thecol_filter_pointage_employe`) et jour ; toutes les plages de ce jour (début, fin, pause, note), « + Ajouter une plage », ✕ pour retirer, durée de chaque plage et total en direct ; Entrée enregistre. Changer d'employé ou de jour recharge ses plages et garde celles ajoutées. L'enregistrement relit la table, ne supprime que les plages chargées dans la fenêtre et refuse une journée modifiée entre-temps sur un autre appareil.
+- **Export Excel** (`exportPointagesMois`) : `pointages_AAAA-MM.xlsx`, feuilles « Synthèse » (journées, heures en h:mm et en décimal, depuis janvier, total) et « Détail » (date, jour, employé, début, fin, pause, durée, note).
 
 ### 3.4 Commandes
 - Liste des commandes avec filtres
@@ -532,6 +552,7 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - En-tête de page (v12.8) : le titre est celui de la barre du haut ; la page n'affiche qu'une barre d'outils (`pageToolbar`) — onglets ou sélecteur de mode à gauche, actions à droite, l'action principale en dernier
 - Actions secondaires d'une ligne dans un menu « ⋯ » (`rowMenuHtml`) ; les suppressions y sont rangées. Le rouge est réservé aux boîtes de confirmation
 - Textes ≥ 11 px, pas de libellés en majuscules (sauf logo, badge « LIVE » et jumeau 3D) ; cibles tactiles ≥ 40 px sur téléphone et écrans tactiles
+- Pas de texte d'aide (v13.3) : ni paragraphe explicatif, ni note sous un champ, ni légende qui décrit le fonctionnement. Restent les données, les états vides, les alertes et les confirmations
 - Boutons: vert olive, border-radius 8px
 - Inputs: border gris, focus vert
 - Cards: fond blanc, shadow léger
@@ -554,10 +575,10 @@ Voir §3.5 (v13.2). Répartition d'un brassin en récipients (`getProductionReci
    - Ces articles sont créés ou migrés automatiquement depuis l'ancien nom "Capsules" par `syncRecettesInventaire`
 
 ### Pointage
-1. Sélectionner employé
-2. Pointer entrée (horodatage)
-3. Pointer sortie (horodatage)
-4. Calcul automatique: (fin - début - pause) / 60
+1. Après le travail : toucher sa case du jour (ou « + Saisir des heures »)
+2. Saisir une ou plusieurs plages (début, fin, pause facultative, note facultative)
+3. En direct, au choix : « Arrivée » puis « Départ » (tableau de bord, page Pointage, jumeau, palette)
+4. Calcul automatique : fin − début − pause, par plage (fin le lendemain si elle précède le début)
 
 ### Stock
 1. Nouveau lot: arôme, format, quantité, dates

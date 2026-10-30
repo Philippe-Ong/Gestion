@@ -8,7 +8,8 @@ const CONSTANTS = {
     ATELIER_CUVES: 4,          // cuves de 25 L de l'atelier (jumeau 3D)
     ATELIER_CASSEROLES_L: [9, 4], // casseroles des plaques à induction 1 et 2 (jumeau 3D)
     STOCK_WARN_DAYS: 30,       // DLC warning threshold in days (lots legacy sans DLV)
-    DLV_WARN_DAYS: 7           // DLV warning threshold in days (« DLV proche »)
+    DLV_WARN_DAYS: 7,          // DLV warning threshold in days (« DLV proche »)
+    POINTAGE_OUVERT_MAX_H: 16  // pointage sans départ au-delà de ce délai : départ oublié, « à clôturer »
 };
 
 // Utility Functions
@@ -111,17 +112,6 @@ const getLocalDateISOString = () => {
 const toLocalDayKey = (ms) => {
     const d = new Date(ms);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
-
-const csvCell = (v) => {
-    // Preserve legitimate JS numbers as-is (no formula risk from numeric type)
-    if (typeof v === 'number') return String(v);
-    const s = String(v ?? '');
-    // Neutralize CSV formula injection: prefix ' when first non-whitespace char
-    // is one of = + - @.  Preserves leading whitespace in the final value.
-    const neutralized = /^[=+\-@]/.test(s.trim()) ? "'" + s : s;
-    if (/[",\n]/.test(neutralized)) return '"' + neutralized.replace(/"/g, '""') + '"';
-    return neutralized;
 };
 
 const requireNumberingConnection = () => {
@@ -1185,10 +1175,32 @@ CLICK_HANDLERS['sortir-lots-perimes'] = (el) => sortirLotsPerimes((el.getAttribu
 // ---------------------------------------------------------------------------
 // Pointage
 // ---------------------------------------------------------------------------
-CLICK_HANDLERS['pointage-select-employee'] = (el) => pointageSelectEmployee(el.getAttribute('data-id'));
+CLICK_HANDLERS['pointage-vue'] = (el) => {
+    DB.setFilter('pointage_vue', el.getAttribute('data-value') === 'mois' ? 'mois' : 'semaine');
+    renderPointage();
+};
+CLICK_HANDLERS['pointage-nav'] = (el) => pointageNaviguer(Number(el.getAttribute('data-dir')) || 0);
+CLICK_HANDLERS['pointage-saisir'] = () => showPointageJourModal();
+CLICK_HANDLERS['pointage-jour'] = (el) => showPointageJourModal({
+    employeId: el.getAttribute('data-emp') || '',
+    date: el.getAttribute('data-date') || '',
+    focusId: el.getAttribute('data-focus') || ''
+});
+CLICK_HANDLERS['pointage-plage-ajout'] = () => ajouterPlageJour();
+CLICK_HANDLERS['pointage-plage-suppr'] = (el) => retirerPlageJour(el);
+CLICK_HANDLERS['save-pointage-jour'] = () => savePointageJour();
+CLICK_HANDLERS['pointage-maintenant-modal'] = () => showPointerMaintenantModal();
+CLICK_HANDLERS['pointage-maintenant'] = (el) => {
+    const id = el.getAttribute('data-id');
+    const ok = el.getAttribute('data-sens') === 'depart' ? clockOutEmployee(id) : clockInEmployee(id);
+    if (!ok) return;
+    modal.hide();
+    renderCurrentView();
+};
+CLICK_HANDLERS['pointage-export'] = () => exportPointagesMois();
 CLICK_HANDLERS['delete-pointage'] = (el) => deletePointage(el.getAttribute('data-id'));
-CLICK_HANDLERS['cloturer-pointage'] = (el) => showCloturePointageModal(el.getAttribute('data-id'));
-CLICK_HANDLERS['save-cloture-pointage'] = (el) => saveCloturePointage(el.getAttribute('data-id'));
+CLICK_HANDLERS['cloturer-pointage'] = (el) => cloturerPointage(el.getAttribute('data-id'));
+CHANGE_HANDLERS['pointage-jour-cible'] = () => chargerPlagesJour();
 
 // ---------------------------------------------------------------------------
 // Commandes
@@ -3630,8 +3642,9 @@ document.addEventListener('keydown', (e) => {
 });
 
 // State variables for pointage and weekly calendar
-let pointageSelectedEmployeId = null;
-let pointageClockInterval = null;
+let pointageLundiAffiche = null; // lundi (AAAA-MM-JJ) de la semaine affichée, null = semaine en cours
+let pointageMoisAffiche = null;  // mois (AAAA-MM) affiché, null = mois en cours
+let pointageTicker = null;
 let weekCalendarSelectedDate = '';
 let _commandeModalClientOptions = [];
 
@@ -3914,7 +3927,6 @@ const dashAxis = (max) => {
 const buildDashboardModel = () => {
     const now = new Date();
     const today = dateOnly(now);
-    const todayKey = getLocalDateISOString();
     const twin = buildTwinModel();
     const commandes = DB.get('commandes') || [];
     const clients = DB.get('clients') || [];
@@ -3924,7 +3936,7 @@ const buildDashboardModel = () => {
     const history = DB.get('history') || [];
 
     // Priorités : alertes du jumeau (sauf besoins de production, qui ont leur carte)
-    // + pointages restés ouverts les jours précédents (même règle que la page Pointage)
+    // + départs oubliés (même règle que la page Pointage)
     const priorites = [];
     twin.alerts.forEach(alert => {
         const item = twin.byId.get(alert.id);
@@ -3934,19 +3946,16 @@ const buildDashboardModel = () => {
         else if (item?.kind === 'bin') attrs = { 'data-click': 'inventaire-ajuster', 'data-id': item.itemId };
         if (attrs) priorites.push({ level: alert.level, title: alert.title, text: alert.text, attrs });
     });
-    pointages
-        .filter(p => p.date && p.date < todayKey && !p.heureFin)
-        .sort((a, b) => a.date.localeCompare(b.date))
-        .forEach(p => {
-            const emp = employees.find(e => e.id === p.employeId);
-            const nom = emp ? `${emp.prenom || ''} ${emp.nom || ''}`.trim() : 'Employé supprimé';
-            priorites.push({
-                level: 'warning',
-                title: `Pointage resté ouvert · ${nom}`,
-                text: `Arrivée le ${formatDate(p.date)}${p.heureDebut ? ` à ${p.heureDebut}` : ''} : départ à saisir`,
-                attrs: { 'data-click': 'cloturer-pointage', 'data-id': p.id }
-            });
+    pointagesAClore(pointages, now).forEach(p => {
+        const emp = employees.find(e => e.id === p.employeId);
+        const nom = emp ? `${emp.prenom || ''} ${emp.nom || ''}`.trim() : 'Employé supprimé';
+        priorites.push({
+            level: 'warning',
+            title: `Pointage resté ouvert · ${nom}`,
+            text: `Arrivée le ${formatDate(p.date)}${p.heureDebut ? ` à ${p.heureDebut}` : ''} : départ à saisir`,
+            attrs: { 'data-click': 'cloturer-pointage', 'data-id': p.id }
         });
+    });
     priorites.sort((a, b) => DASH_LEVEL_ORDER[a.level] - DASH_LEVEL_ORDER[b.level]);
 
     // Commandes à livrer : en retard + 7 prochains jours (twin.orders est trié par échéance)
@@ -4368,7 +4377,6 @@ const dashChartHtml = (t, titre) => {
                 </div>
             </div>
             <div class="dash-chart-x" aria-hidden="true">${t.buckets.map(b => `<span${b.current ? ' class="is-current"' : ''}>${escapeHtml(b.label)}</span>`).join('')}</div>
-            <p class="dash-chart-note">Barre claire : ${t.periode === 'mois' ? 'mois' : 'semaine'} en cours · détail au survol, au toucher ou avec les flèches ← →</p>
             <details class="dash-table" data-dash-key="table"${dashOpenAttr('table')}>
                 <summary>Voir les données</summary>
                 <div class="dash-table-wrap">
@@ -4596,18 +4604,11 @@ const twinRelativeDay = (days) => {
     return days > 0 ? `dans ${days} j` : `en retard de ${-days} j`;
 };
 const twinCrateSize = (contenanceCl) => (contenanceCl <= 30 ? 24 : contenanceCl <= 60 ? 12 : 6);
-const twinPresenceMinutes = (p, nowMin) => {
-    const debut = parseHHMM(p.heureDebut);
-    if (debut === null) return 0;
-    if (!p.heureFin) return computePointageMinutes(debut, nowMin, 0) || 0;
-    return computePointageMinutes(debut, parseHHMM(p.heureFin), Number(p.pause) || 0) || 0;
-};
 
 // --- Modèle : projection des tables métier vers les objets de l'atelier ---
 const buildTwinModel = () => {
     const now = new Date();
     const todayKey = getLocalDateISOString();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
     const lots = DB.get('lots') || [];
     const commandes = DB.get('commandes') || [];
     const aromes = DB.get('aromes') || [];
@@ -4794,7 +4795,7 @@ const buildTwinModel = () => {
     const staff = employees.filter(e => e.actif).map((emp, index) => {
         const todays = pointages.filter(p => p.employeId === emp.id && p.date === todayKey);
         const open = findPointageEnCours(pointages, emp.id, todayKey);
-        const minutes = todays.reduce((s, p) => s + twinPresenceMinutes(p, nowMin), 0);
+        const minutes = todays.reduce((s, p) => s + pointageDuree(p, now), 0);
         const nom = `${emp.prenom || ''} ${emp.nom || ''}`.trim() || 'Employé';
         return {
             id: `staff:${emp.id}`, zone: 'equipe', kind: 'staff', employeId: emp.id, nom,
@@ -4978,9 +4979,9 @@ const twinCssColor = (name, fallback) => {
 // ambient : cadence max. (i/s) des animations d'ambiance (pulsations, vapeur) ; 0 = figées, la scène
 // n'est redessinée que lorsqu'elle change (caméra, données)
 const TWIN_QUALITY_LEVELS = {
-    low: { label: 'Économie', hint: 'Téléphones et tablettes : sans occlusion ambiante ni animations', dpr: 1.25, shadow: 1024, ao: 0, tex: 256, segments: 12, steam: 8, ambient: 0 },
-    medium: { label: 'Standard', hint: 'Occlusion ambiante en demi-résolution', dpr: 1.6, shadow: 2048, ao: 0.5, tex: 512, segments: 20, steam: 14, ambient: 15 },
-    high: { label: 'Haute', hint: 'Ordinateurs : tous les effets', dpr: 2, shadow: 4096, ao: 1, tex: 1024, segments: 28, steam: 20, ambient: 30 }
+    low: { label: 'Économie', dpr: 1.25, shadow: 1024, ao: 0, tex: 256, segments: 12, steam: 8, ambient: 0 },
+    medium: { label: 'Standard', dpr: 1.6, shadow: 2048, ao: 0.5, tex: 512, segments: 20, steam: 14, ambient: 15 },
+    high: { label: 'Haute', dpr: 2, shadow: 4096, ao: 1, tex: 1024, segments: 28, steam: 20, ambient: 30 }
 };
 const TWIN_QUALITY_ORDER = ['low', 'medium', 'high'];
 
@@ -8093,7 +8094,6 @@ const twinShellHtml = () => {
             <aside class="twin-panel" id="twinPanel" aria-label="Alertes et objets de l'atelier"></aside>
             <aside class="twin-inspector" id="twinInspector" aria-label="Détails de l'objet sélectionné" hidden></aside>
             <div class="twin-kpis" id="twinKpis"></div>
-            <div class="twin-hint" aria-hidden="true">Glisser : pivoter · Clic droit ou 2 doigts : déplacer · Molette : zoom · Clic : inspecter · ←/→ : objet suivant</div>
         </section>`;
 };
 
@@ -8391,7 +8391,7 @@ const twinToggleFullscreen = () => {
     else root.requestFullscreen?.().catch(() => showToast('Plein écran indisponible', 'error'));
 };
 
-// --- Pointage rapide réutilisable (page Pointage + jumeau 3D) ---
+// --- Pointage en direct réutilisable (page Pointage, tableau de bord, jumeau 3D, palette) ---
 const clockInEmployee = (empId) => {
     if (!empId) {
         showToast('Sélectionne un employé', 'error');
@@ -8406,6 +8406,17 @@ const clockInEmployee = (empId) => {
     }
     const now = new Date();
     const heureDebut = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    // Heures déjà saisies qui couvrent ce moment (plage du jour ou de nuit de la veille)
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const couverte = pointages.find(p => {
+        if (p.employeId !== empId || !p.heureFin || (p.date !== today && p.date !== pointageJourDecale(today, -1))) return false;
+        const iv = pointageIntervalle(p, today, now);
+        return iv && iv[0] <= nowMin && nowMin < iv[1];
+    });
+    if (couverte) {
+        showToast(`Des heures sont déjà saisies à ce moment (${pointagePlageLabel(couverte)})`, 'error');
+        return false;
+    }
     pointages.push({ id: generateId(), employeId: empId, date: today, heureDebut, heureFin: '', pause: 0 });
     DB.set('pointages', pointages);
     showToast(`Arrivée pointée à ${heureDebut}`);
@@ -8475,13 +8486,12 @@ const twinRenderQualityMenu = () => {
     const setting = twinQualitySetting();
     const auto = Twin.autoQuality || (twinIsSupported() ? twinDetectQuality() : 'medium');
     const options = [
-        ['auto', 'Auto', `${TWIN_QUALITY_LEVELS[auto].label} sur cet appareil`],
-        ...[...TWIN_QUALITY_ORDER].reverse().map(k => [k, TWIN_QUALITY_LEVELS[k].label, TWIN_QUALITY_LEVELS[k].hint])
+        ['auto', `Auto (${TWIN_QUALITY_LEVELS[auto].label})`],
+        ...[...TWIN_QUALITY_ORDER].reverse().map(k => [k, TWIN_QUALITY_LEVELS[k].label])
     ];
-    el.innerHTML = `<p class="twin-quality-title">Qualité du rendu 3D</p>${options.map(([value, label, hint]) => `
+    el.innerHTML = `<p class="twin-quality-title">Qualité du rendu 3D</p>${options.map(([value, label]) => `
         <button type="button" role="menuitemradio" class="twin-quality-opt" aria-checked="${setting === value}" data-click="twin-quality" data-quality="${value}">
             <span class="twin-quality-label">${escapeHtml(label)}</span>
-            <span class="twin-quality-hint">${escapeHtml(hint)}</span>
         </button>`).join('')}`;
 };
 
@@ -8580,6 +8590,7 @@ const getPaletteEntries = (query) => {
         { label: 'Ajouter un consommable', run: () => showInventaireModal('consommable') },
         { label: 'Nouveau client', run: () => showClientModal() },
         { label: 'Ajouter une tâche au tableau de bord', run: () => { gotoPage('dashboard'); setTimeout(() => document.getElementById('todoInput')?.focus(), 80); } },
+        { label: 'Saisir des heures de travail', run: () => showPointageJourModal() },
         { label: 'Synchroniser avec le cloud', run: () => window.forceFirebaseSync?.(), hidden: !window.firebaseReady },
         { label: 'Afficher les raccourcis clavier', keys: '?', run: () => showShortcutsHelp() }
     ].filter(a => !a.hidden).forEach(a => entries.push({ group: 'Actions', ...a }));
@@ -9295,7 +9306,6 @@ const stockMatrixHtml = (ov, selected) => {
                     </tbody>
                 </table>
             </div>
-            <p class="stock-hint">Grand chiffre : bouteilles libres, c'est-à-dire vendables moins celles réservées aux commandes en attente ou produites. Touchez une case pour n'afficher que ses lots.</p>
         </section>`;
 };
 
@@ -9410,7 +9420,6 @@ const stockLotsHtml = (ov) => {
                 <span class="stock-section-meta">${escapeHtml(`${dashPlural(horsVente.length, 'lot')} · ${twinFmtInt(horsVente.reduce((s, l) => s + Math.max(0, Number(l.quantite) || 0), 0))} bt`)}</span>
                 ${perimes.length ? `<button type="button" class="btn btn-sm btn-secondary stock-section-action" data-click="sortir-lots-perimes" data-ids="${escapeHtml(perimes.map(l => l.id).join(','))}">Tout sortir (péremption)</button>` : ''}
             </div>
-            <p class="stock-hint stock-hint--top">Ni vendables ni livrables : sortez-les du stock (destruction, casse) ou traitez le rappel du lot bloqué.</p>
             <div class="stock-group"><ul class="stock-lot-list">${horsVente.map(lot => stockHorsVenteRowHtml(ov, lot, now)).join('')}</ul></div>
         </section>` : ''}
         ${epuisesHtml}`;
@@ -10137,7 +10146,6 @@ const showVendreModal = (lotId, saisie = null) => {
                     <option value="">— Aucun / inconnu —</option>
                     ${clients.map(c => `<option value="${escapeHtml(c.id)}"${saisie?.clientId === c.id ? ' selected' : ''}>${escapeHtml(getClientLabel(c))}</option>`).join('')}
                 </select>
-                <small class="text-muted">Permet de retrouver le destinataire en cas de rappel.</small>
             </div>
             <div class="form-group">
                 <label for="sortieNote">Note (facultatif)</label>
@@ -10390,7 +10398,7 @@ const getLotTraceData = (lotId) => {
 const ingredientsTraceHtml = (ingredients, totalProduit) => {
     if (ingredients.length === 0) {
         return totalProduit > 0
-            ? '<p class="text-muted">Lots d\'ingrédients non suivis pour ce lot (production antérieure au suivi, ou lot créé sans passer par la production).</p>'
+            ? '<p class="text-muted">Lots d\'ingrédients non suivis pour ce lot.</p>'
             : '';
     }
     return `<div class="trace-scroll"><table class="details-table">
@@ -10403,8 +10411,7 @@ const ingredientsTraceHtml = (ingredients, totalProduit) => {
                 <td>${escapeHtml(invFmtQte(ing.quantite, ing.unite))}</td>
             </tr>`).join('')}
         </tbody>
-    </table></div>
-    <p class="text-muted" style="font-size: 12px; margin: 6px 0 0;">Quantités pour toute la production du jour, tous formats confondus.</p>`;
+    </table></div>`;
 };
 
 // Bouteilles non expliquées : produit + ajustements − livré − vendu − sorti − stock.
@@ -11125,7 +11132,6 @@ const showEditLotModal = (lotId) => {
             <div class="form-group">
                 <label for="editLotNote">Motif de la correction (facultatif)</label>
                 <input type="text" id="editLotNote" name="note" maxlength="200" placeholder="Ex. recomptage du stock">
-                <small class="text-muted">Un changement de quantité est journalisé comme ajustement. Le numéro de lot (#${escapeHtml(formatLotNumero(getLotNumero(lot)))}) ne change pas ; les livraisons déjà effectuées gardent leurs informations d'origine.</small>
             </div>
         </form>
     `, `
@@ -11222,647 +11228,765 @@ const saveEditLot = (event, lotId) => {
     }
 };
 
-// Pointage — helper functions
+// =============================================================================
+// Pointage (v13.3) — heures saisies après coup, vues Semaine et Mois
+// =============================================================================
+// Un pointage est une plage de travail : { id, employeId, date (jour d'arrivée),
+// heureDebut, heureFin ('' tant que la plage est en cours), pause (min), notes }.
+// Une plage dont la fin précède le début se termine le lendemain (travail de
+// nuit) et compte pour le jour d'arrivée. Les heures se saisissent après le
+// travail, journée par journée (showPointageJourModal) ; Arrivée / Départ en
+// direct restent possibles (clockInEmployee / clockOutEmployee).
 
-// Dernier pointage ouvert (sans heure de fin) de l'employé, daté d'aujourd'hui ou d'hier
-// (pointage de nuit : arrivée 22:00, départ 02:00). Les plus anciens sont traités à part
-// via la carte « Pointages non clôturés ».
+const POINTAGE_COULEUR_INACTIF = '#8B8B85';
+const POINTAGE_MEMBRE_INCONNU = { id: '', nom: 'Employé', actif: false, couleur: POINTAGE_COULEUR_INACTIF, initiales: '?' };
+
+// Jour (AAAA-MM-JJ) décalé de n jours ; partir de midi évite les changements d'heure
+const pointageJourDecale = (dayKey, n) => toLocalDayKey(new Date(`${dayKey}T12:00:00`).getTime() + n * 86400000);
+const pointageLundi = (dayKey) => pointageJourDecale(dayKey, -((new Date(`${dayKey}T12:00:00`).getDay() + 6) % 7));
+const pointageMoisDecale = (mois, n) => {
+    const [y, m] = mois.split('-').map(Number);
+    const d = new Date(y, m - 1 + n, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+const pointageJourLabel = (dayKey, options = { weekday: 'long', day: 'numeric', month: 'long' }) =>
+    new Date(`${dayKey}T12:00:00`).toLocaleDateString('fr-CH', options);
+const pointageJourCourt = (dayKey) => pointageJourLabel(dayKey, { weekday: 'short', day: 'numeric', month: 'short' });
+const pointagePlageLabel = (p) => `${p.heureDebut || '?'} – ${p.heureFin || 'en cours'}`;
+const pointageParDebut = (a, b) => (a.heureDebut || '').localeCompare(b.heureDebut || '');
+
+// « Semaine du 26 octobre au 1er novembre 2026 »
+const pointageTitreSemaine = (jours) => {
+    const a = new Date(`${jours[0]}T12:00:00`);
+    const b = new Date(`${jours[6]}T12:00:00`);
+    const jour = (d) => (d.getDate() === 1 ? '1er' : String(d.getDate()));
+    const mois = (d) => d.toLocaleDateString('fr-CH', { month: 'long' });
+    const debut = a.getMonth() === b.getMonth()
+        ? jour(a)
+        : `${jour(a)} ${mois(a)}${a.getFullYear() !== b.getFullYear() ? ` ${a.getFullYear()}` : ''}`;
+    return `Semaine du ${debut} au ${jour(b)} ${mois(b)} ${b.getFullYear()}`;
+};
+
+// Arrivée d'une plage en millisecondes (NaN si la date ou l'heure est illisible)
+const pointageDebutMs = (p) => {
+    const debut = parseHHMM(p.heureDebut);
+    const jour = dateOnly(p.date);
+    if (debut === null || Number.isNaN(jour.getTime())) return NaN;
+    return new Date(jour.getFullYear(), jour.getMonth(), jour.getDate(), Math.floor(debut / 60), debut % 60).getTime();
+};
+
+// Plage ouverte depuis plus de POINTAGE_OUVERT_MAX_H heures (ou illisible) : départ oublié
+const pointageOubli = (p, now = new Date()) =>
+    !p.heureFin && !(now.getTime() - pointageDebutMs(p) <= CONSTANTS.POINTAGE_OUVERT_MAX_H * 3600000);
+
+// Minutes travaillées d'une plage, pause déduite. Une plage en cours compte
+// jusqu'à maintenant ; un départ oublié ne compte pas tant qu'il n'est pas saisi.
+const pointageDuree = (p, now = new Date()) => {
+    const debut = parseHHMM(p.heureDebut);
+    if (debut === null) return 0;
+    const pause = Number(p.pause) || 0;
+    if (p.heureFin) return computePointageMinutes(debut, parseHHMM(p.heureFin), pause) || 0;
+    if (pointageOubli(p, now)) return 0;
+    return Math.max(0, Math.floor((now.getTime() - pointageDebutMs(p)) / 60000) - pause);
+};
+
+// Intervalle [début, fin[ d'une plage en minutes depuis minuit du jour `ref` :
+// une plage de nuit déborde sur le lendemain, une plage en cours s'étend jusqu'à
+// maintenant, un départ oublié n'occupe que sa minute d'arrivée.
+const pointageIntervalle = (p, ref, now = new Date()) => {
+    const debut = parseHHMM(p.heureDebut);
+    if (debut === null || !isValidDateOnly(p.date)) return null;
+    const decalage = Math.round((dateOnly(p.date).getTime() - dateOnly(ref).getTime()) / 86400000) * 1440;
+    let duree;
+    if (p.heureFin) {
+        const fin = parseHHMM(p.heureFin);
+        duree = fin === null ? 0 : (fin - debut + 1440) % 1440;
+    } else {
+        duree = pointageOubli(p, now) ? 0 : Math.floor((now.getTime() - pointageDebutMs(p)) / 60000);
+    }
+    return [decalage + debut, decalage + debut + Math.max(1, duree)];
+};
+
+// Plage en cours d'un employé (arrivée aujourd'hui, ou hier pour le travail de
+// nuit). Un départ oublié n'en est plus une : il est signalé « à clôturer ».
 const findPointageEnCours = (pointages, empId, today) => {
-    const hier = toLocalDayKey(new Date(`${today}T12:00:00`).getTime() - 86400000);
+    const hier = pointageJourDecale(today, -1);
+    const now = new Date();
     return pointages
-        .filter(p => p.employeId === empId && !p.heureFin && (p.date === today || p.date === hier))
+        .filter(p => p.employeId === empId && !p.heureFin && (p.date === today || p.date === hier) && !pointageOubli(p, now))
         .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.heureDebut || '').localeCompare(a.heureDebut || ''))[0] || null;
 };
 
-const pointageSelectEmployee = (empId) => {
-    pointageSelectedEmployeId = empId;
+// Départs oubliés, les plus anciens d'abord (priorités du tableau de bord)
+const pointagesAClore = (pointages, now = new Date()) => pointages
+    .filter(p => pointageOubli(p, now))
+    .sort((a, b) => (a.date || '').localeCompare(b.date || '') || pointageParDebut(a, b));
+
+// Personnes affichées : les employés actifs (ordre et couleurs du jumeau 3D),
+// puis les inactifs ou supprimés qui ont des heures dans `plages`
+const pointageEquipe = (plages = []) => {
+    const employees = DB.get('employees') || [];
+    const avecHeures = new Set(plages.map(p => p.employeId).filter(Boolean));
+    const membre = (id, nom, actif, couleur) => ({
+        id, nom, actif, couleur,
+        initiales: nom.split(/\s+/).map(x => x[0] || '').join('').slice(0, 2).toUpperCase()
+    });
+    const nomDe = (e) => `${e.prenom || ''} ${e.nom || ''}`.trim() || 'Employé';
+    const equipe = employees.filter(e => e.actif)
+        .map((e, i) => membre(e.id, nomDe(e), true, TWIN_STAFF_COLORS[i % TWIN_STAFF_COLORS.length]));
+    employees.filter(e => !e.actif && avecHeures.has(e.id))
+        .forEach(e => equipe.push(membre(e.id, nomDe(e), false, POINTAGE_COULEUR_INACTIF)));
+    const connus = new Set(employees.map(e => e.id));
+    avecHeures.forEach(id => {
+        if (!connus.has(id)) equipe.push(membre(id, 'Employé supprimé', false, POINTAGE_COULEUR_INACTIF));
+    });
+    return equipe;
+};
+
+const pointageAvatarHtml = (m, present = false) =>
+    `<span class="dash-avatar ptg-avatar${present ? ' is-present' : ''}" style="--avatar:${safeColor(m.couleur)}" aria-hidden="true">${escapeHtml(m.initiales || '?')}</span>`;
+
+// Semaine du lundi `lundi` : minutes par personne et par jour
+const buildPointageSemaine = (lundi, now = new Date()) => {
+    const jours = Array.from({ length: 7 }, (_, i) => pointageJourDecale(lundi, i));
+    const plages = (DB.get('pointages') || []).filter(p => p.date >= jours[0] && p.date <= jours[6]);
+    const lignes = pointageEquipe(plages).map(membre => {
+        const cases = jours.map(date => {
+            const duJour = plages.filter(p => p.employeId === membre.id && p.date === date);
+            return {
+                date,
+                minutes: duJour.reduce((s, p) => s + pointageDuree(p, now), 0),
+                enCours: duJour.some(p => !p.heureFin && !pointageOubli(p, now)),
+                aClore: duJour.some(p => pointageOubli(p, now))
+            };
+        });
+        return { membre, cases, total: cases.reduce((s, c) => s + c.minutes, 0) };
+    });
+    const totaux = jours.map((_, i) => lignes.reduce((s, l) => s + l.cases[i].minutes, 0));
+    return { jours, plages, lignes, totaux, total: totaux.reduce((s, m) => s + m, 0) };
+};
+
+// Mois `mois` (AAAA-MM) : minutes par personne et par jour, journées, cumul depuis janvier
+const buildPointageMois = (mois, now = new Date()) => {
+    const [y, m] = mois.split('-').map(Number);
+    const jours = Array.from({ length: new Date(y, m, 0).getDate() }, (_, i) => `${mois}-${String(i + 1).padStart(2, '0')}`);
+    const fin = jours[jours.length - 1];
+    const toutes = DB.get('pointages') || [];
+    const plages = toutes.filter(p => p.date >= jours[0] && p.date <= fin);
+    const depuisJanvier = toutes.filter(p => p.date >= `${y}-01-01` && p.date <= fin);
+    const membres = pointageEquipe(plages).map(membre => {
+        const siennes = plages.filter(p => p.employeId === membre.id);
+        const parJour = jours.map(date => siennes.filter(p => p.date === date).reduce((s, p) => s + pointageDuree(p, now), 0));
+        return {
+            membre, parJour, plages: siennes,
+            minutes: parJour.reduce((s, v) => s + v, 0),
+            journees: parJour.filter(v => v > 0).length,
+            annee: depuisJanvier.filter(p => p.employeId === membre.id).reduce((s, p) => s + pointageDuree(p, now), 0)
+        };
+    });
+    return {
+        mois, jours, plages, membres,
+        minutes: membres.reduce((s, x) => s + x.minutes, 0),
+        journees: membres.reduce((s, x) => s + x.journees, 0)
+    };
+};
+
+// En-tête de période avec navigation (la période en cours est la dernière)
+const pointageNavHtml = (titre, meta, estCourant, libelles) => `
+    <div class="stock-section-head ptg-nav">
+        <h2 class="stock-section-title" id="ptgPeriodeTitle">${escapeHtml(titre)}</h2>
+        <span class="stock-section-meta">${escapeHtml(meta)}</span>
+        <span class="ptg-nav-btns">
+            <button type="button" class="btn btn-sm btn-secondary ptg-nav-btn ptg-nav-prev" data-click="pointage-nav" data-dir="-1" aria-label="${escapeHtml(libelles.prec)}">${dashIcon('chevron')}</button>
+            ${estCourant ? '' : `<button type="button" class="btn btn-sm btn-secondary" data-click="pointage-nav" data-dir="0">${escapeHtml(libelles.retour)}</button>`}
+            <button type="button" class="btn btn-sm btn-secondary ptg-nav-btn" data-click="pointage-nav" data-dir="1" aria-label="${escapeHtml(libelles.suiv)}"${estCourant ? ' disabled' : ''}>${dashIcon('chevron')}</button>
+        </span>
+    </div>`;
+
+// Plages pointées en direct (Arrivée) et pas encore terminées
+const pointageEnCoursHtml = (pointages, now) => {
+    const today = toLocalDayKey(now.getTime());
+    const enCours = pointageEquipe(pointages)
+        .map(m => ({ m, p: findPointageEnCours(pointages, m.id, today) }))
+        .filter(x => x.p);
+    if (enCours.length === 0) return '';
+    const row = ({ m, p }) => `
+        <li class="ptg-row">
+            ${pointageAvatarHtml(m, true)}
+            <span class="ptg-row-main">
+                <span class="ptg-row-name">${escapeHtml(m.nom)}</span>
+                <span class="ptg-row-sub">Depuis ${p.date !== today ? 'hier ' : ''}${escapeHtml(p.heureDebut)} · <span data-ptg-depuis="${pointageDebutMs(p) + (Number(p.pause) || 0) * 60000}">${escapeHtml(twinFmtDuration(pointageDuree(p, now)))}</span></span>
+            </span>
+            <span class="ptg-row-actions">
+                <button type="button" class="btn btn-sm btn-primary" data-click="twin-clock-out" data-id="${escapeHtml(m.id)}" aria-label="${escapeHtml(`Pointer le départ de ${m.nom}`)}">Départ</button>
+                ${rowMenuHtml(m.nom, `<button type="button" data-click="cloturer-pointage" data-id="${escapeHtml(p.id)}">Corriger les heures</button>`)}
+            </span>
+        </li>`;
+    return `
+        <section class="stock-section" aria-labelledby="ptgEnCoursTitle">
+            <div class="stock-section-head"><h2 class="stock-section-title" id="ptgEnCoursTitle">En cours</h2></div>
+            <div class="stock-group"><ul class="ptg-list">${enCours.map(row).join('')}</ul></div>
+        </section>`;
+};
+
+// Case d'une personne pour un jour : heures du jour, saisie au toucher
+const pointageCaseHtml = (m, c, today) => {
+    const cls = ['ptg-cell'];
+    if (c.date === today) cls.push('is-today');
+    if (c.date > today) return `<span class="${cls.join(' ')} is-future" aria-hidden="true"></span>`;
+    if (c.minutes > 0) cls.push('has-hours');
+    if (c.aClore) cls.push('is-warning');
+    else if (c.enCours) cls.push('is-live');
+    const etat = c.aClore ? ', départ non saisi' : c.enCours ? ', en cours' : '';
+    const label = `${m.nom}, ${pointageJourLabel(c.date)} : ${c.minutes > 0 ? twinFmtDuration(c.minutes) : 'aucune heure'}${etat}. Saisir ou corriger`;
+    return `<button type="button" class="${cls.join(' ')}" data-click="pointage-jour" data-emp="${escapeHtml(m.id)}" data-date="${escapeHtml(c.date)}" aria-label="${escapeHtml(label)}">
+        <span class="ptg-cell-value">${c.minutes > 0 ? escapeHtml(twinFmtDuration(c.minutes)) : '+'}</span>
+        ${c.aClore || c.enCours ? '<span class="ptg-cell-mark" aria-hidden="true"></span>' : ''}
+    </button>`;
+};
+
+// Une plage dans le détail de la semaine
+const pointagePlageRowHtml = (p, m, now) => {
+    const debut = parseHHMM(p.heureDebut);
+    const fin = parseHHMM(p.heureFin);
+    const pause = Number(p.pause) || 0;
+    const oubli = pointageOubli(p, now);
+    const sub = [
+        `${p.heureDebut || '?'} → ${p.heureFin || (oubli ? 'départ non saisi' : 'en cours')}${debut !== null && fin !== null && fin < debut ? ' (lendemain)' : ''}`,
+        pause > 0 ? `pause ${pause} min` : ''
+    ].filter(Boolean).join(' · ');
+    const duree = p.heureFin ? twinFmtDuration(pointageDuree(p, now)) : (oubli ? '—' : 'en cours');
+    return `
+        <li class="ptg-row">
+            ${pointageAvatarHtml(m, !p.heureFin && !oubli)}
+            <span class="ptg-row-main">
+                <span class="ptg-row-name">${escapeHtml(m.nom)}</span>
+                <span class="ptg-row-sub">${escapeHtml(sub)}</span>
+                ${p.notes ? `<span class="ptg-row-note">${escapeHtml(p.notes)}</span>` : ''}
+            </span>
+            <strong class="ptg-row-total">${escapeHtml(duree)}</strong>
+            ${rowMenuHtml(`plage ${pointagePlageLabel(p)} de ${m.nom}`, `
+                <button type="button" data-click="pointage-jour" data-emp="${escapeHtml(p.employeId || '')}" data-date="${escapeHtml(p.date || '')}" data-focus="${escapeHtml(p.id)}">Modifier</button>
+                <button type="button" class="is-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>`)}
+        </li>`;
+};
+
+// Plages de la semaine, jour par jour (le plus récent d'abord), dans un bloc
+// repliable dont l'état est mémorisé sur l'appareil
+const pointageDetailSemaineHtml = (s, now) => {
+    if (s.plages.length === 0) return '';
+    const membres = new Map(s.lignes.map(l => [l.membre.id, l.membre]));
+    const nom = (p) => (membres.get(p.employeId) || POINTAGE_MEMBRE_INCONNU).nom;
+    const jours = [...s.jours].reverse().filter(d => s.plages.some(p => p.date === d));
+    const groupe = (d) => {
+        const duJour = s.plages.filter(p => p.date === d).sort((a, b) => pointageParDebut(a, b) || nom(a).localeCompare(nom(b), 'fr'));
+        const total = duJour.reduce((sum, p) => sum + pointageDuree(p, now), 0);
+        return `
+            <div class="stock-group">
+                <div class="stock-group-head ptg-day-head">
+                    <h3 class="stock-group-title">${escapeHtml(dashCapitalize(pointageJourLabel(d)))}</h3>
+                    <span class="stock-group-meta">${total > 0 ? escapeHtml(twinFmtDuration(total)) : ''}</span>
+                </div>
+                <ul class="ptg-list">${duJour.map(p => pointagePlageRowHtml(p, membres.get(p.employeId) || POINTAGE_MEMBRE_INCONNU, now)).join('')}</ul>
+            </div>`;
+    };
+    return `
+        <details class="ptg-plages"${DB.getFilter('pointage_plages') === 'open' ? ' open' : ''}>
+            <summary class="ptg-plages-summary">Plages de la semaine <span class="stock-section-meta">${escapeHtml(dashPlural(s.plages.length, 'plage'))}</span></summary>
+            ${jours.map(groupe).join('')}
+        </details>`;
+};
+
+// Vue Semaine : tableau personnes × jours, puis le détail des plages
+const pointageSemaineHtml = (now) => {
+    const today = toLocalDayKey(now.getTime());
+    const lundiCourant = pointageLundi(today);
+    const lundi = pointageLundiAffiche || lundiCourant;
+    const s = buildPointageSemaine(lundi, now);
+    const personnes = s.lignes.filter(l => l.total > 0).length;
+    const meta = s.total > 0 ? `${twinFmtDuration(s.total)} · ${dashPlural(personnes, 'personne')}` : 'aucune heure saisie';
+    const jourTete = (d) => `<span class="ptg-week-day${d === today ? ' is-today' : ''}">${escapeHtml(pointageJourLabel(d, { weekday: 'short' }))}<strong>${Number(d.slice(8))}</strong></span>`;
+    const ligne = (l) => `
+        <li class="ptg-week-row">
+            <span class="ptg-week-who">${pointageAvatarHtml(l.membre)}<span class="ptg-week-name">${escapeHtml(l.membre.nom)}</span>${l.membre.actif ? '' : '<span class="stock-tag">inactif</span>'}</span>
+            ${l.cases.map(c => pointageCaseHtml(l.membre, c, today)).join('')}
+            <span class="ptg-week-total"><span class="dash-sr">${escapeHtml(`Total de ${l.membre.nom} : `)}</span>${l.total > 0 ? escapeHtml(twinFmtDuration(l.total)) : '—'}</span>
+        </li>`;
+    const pied = s.lignes.length > 1 ? `
+        <li class="ptg-week-row ptg-week-foot">
+            <span class="ptg-week-who"><span class="ptg-week-name">Équipe</span></span>
+            ${s.totaux.map((t, i) => `<span class="ptg-week-sum">${t > 0 ? `<span class="dash-sr">${escapeHtml(`${pointageJourLabel(s.jours[i])} : `)}</span>${escapeHtml(twinFmtDuration(t))}` : ''}</span>`).join('')}
+            <span class="ptg-week-total">${s.total > 0 ? escapeHtml(twinFmtDuration(s.total)) : '—'}</span>
+        </li>` : '';
+    return `
+        <section class="stock-section" aria-labelledby="ptgPeriodeTitle">
+            ${pointageNavHtml(pointageTitreSemaine(s.jours), meta, lundi === lundiCourant, { prec: 'Semaine précédente', suiv: 'Semaine suivante', retour: 'Cette semaine' })}
+            ${s.lignes.length ? `
+                <div class="stock-group ptg-week-wrap">
+                    <div class="ptg-week-row ptg-week-head" aria-hidden="true">
+                        <span class="ptg-week-who"></span>${s.jours.map(jourTete).join('')}<span class="ptg-week-total">Total</span>
+                    </div>
+                    <ul class="ptg-week">${s.lignes.map(ligne).join('')}${pied}</ul>
+                </div>`
+            : '<div class="commande-empty">Aucun employé actif.</div>'}
+        </section>
+        ${pointageDetailSemaineHtml(s, now)}`;
+};
+
+// Vue Mois : total par personne, journées, moyenne, cumul et détail des journées
+const pointageMoisHtml = (now) => {
+    const today = toLocalDayKey(now.getTime());
+    const moisCourant = today.slice(0, 7);
+    const mois = pointageMoisAffiche || moisCourant;
+    const m = buildPointageMois(mois, now);
+    const titre = dashCapitalize(new Date(`${mois}-01T12:00:00`).toLocaleDateString('fr-CH', { month: 'long', year: 'numeric' }));
+    const meta = m.minutes > 0 ? `${twinFmtDuration(m.minutes)} · ${dashPlural(m.journees, 'journée')}` : 'aucune heure saisie';
+    const max = Math.max(1, ...m.membres.flatMap(x => x.parJour));
+    const row = (x) => {
+        const sub = x.minutes > 0
+            ? [dashPlural(x.journees, 'journée'), `moyenne ${twinFmtDuration(x.minutes / x.journees)}`, `depuis janvier ${twinFmtDuration(x.annee)}`].join(' · ')
+            : `Aucune heure ce mois${x.annee > 0 ? ` · depuis janvier ${twinFmtDuration(x.annee)}` : ''}`;
+        const jours = m.jours.filter((d, i) => x.parJour[i] > 0 || x.plages.some(p => p.date === d));
+        const barre = (d, i) => {
+            const v = x.parJour[i];
+            const weekEnd = [0, 6].includes(new Date(`${d}T12:00:00`).getDay());
+            return `<span class="ptg-strip-day${weekEnd ? ' is-weekend' : ''}${d === today ? ' is-today' : ''}" title="${escapeHtml(`${pointageJourCourt(d)} : ${v > 0 ? twinFmtDuration(v) : '—'}`)}"><span class="ptg-strip-bar" style="--h:${v > 0 ? Math.max(0.08, v / max).toFixed(3) : 0}"></span></span>`;
+        };
+        const journee = (d) => {
+            const i = m.jours.indexOf(d);
+            const plages = x.plages.filter(p => p.date === d).sort(pointageParDebut);
+            return `<li><button type="button" class="ptg-month-day" data-click="pointage-jour" data-emp="${escapeHtml(x.membre.id)}" data-date="${escapeHtml(d)}">
+                <span class="ptg-month-day-date">${escapeHtml(dashCapitalize(pointageJourCourt(d)))}</span>
+                <span class="ptg-month-day-plages">${escapeHtml(plages.map(pointagePlageLabel).join(', '))}</span>
+                <strong>${x.parJour[i] > 0 ? escapeHtml(twinFmtDuration(x.parJour[i])) : '—'}</strong>
+            </button></li>`;
+        };
+        return `
+            <li class="ptg-month-row">
+                <div class="ptg-row">
+                    ${pointageAvatarHtml(x.membre)}
+                    <span class="ptg-row-main">
+                        <span class="ptg-row-name">${escapeHtml(x.membre.nom)}${x.membre.actif ? '' : '<span class="stock-tag">inactif</span>'}</span>
+                        <span class="ptg-row-sub">${escapeHtml(sub)}</span>
+                    </span>
+                    <strong class="ptg-month-total">${x.minutes > 0 ? escapeHtml(twinFmtDuration(x.minutes)) : '—'}</strong>
+                </div>
+                <div class="ptg-strip" style="--ptg-jours:${m.jours.length}" aria-hidden="true">${m.jours.map(barre).join('')}</div>
+                ${jours.length ? `<details class="ptg-month-detail">
+                    <summary>Détail des journées</summary>
+                    <ul class="ptg-month-days">${jours.map(journee).join('')}</ul>
+                </details>` : ''}
+            </li>`;
+    };
+    return `
+        <section class="stock-section" aria-labelledby="ptgPeriodeTitle">
+            ${pointageNavHtml(titre, meta, mois === moisCourant, { prec: 'Mois précédent', suiv: 'Mois suivant', retour: 'Ce mois-ci' })}
+            ${m.membres.length
+                ? `<div class="stock-group"><ul class="ptg-month-list">${m.membres.map(row).join('')}</ul></div>`
+                : '<div class="commande-empty">Aucun employé actif.</div>'}
+        </section>`;
+};
+
+// Pointage view
+const renderPointage = () => {
+    const now = new Date();
+    const today = toLocalDayKey(now.getTime());
+    const vue = DB.getFilter('pointage_vue') === 'mois' ? 'mois' : 'semaine';
+    const pointages = DB.get('pointages') || [];
+    const actifs = (DB.get('employees') || []).filter(e => e.actif);
+    const vide = actifs.length === 0 && pointages.length === 0;
+
+    const segment = (value, label) => `<button type="button" class="segment${vue === value ? ' active' : ''}" data-click="pointage-vue" data-value="${value}" aria-pressed="${vue === value}">${label}</button>`;
+    const saisir = actifs.length ? '<button type="button" class="btn btn-primary" data-click="pointage-saisir">+ Saisir des heures</button>' : '';
+    const actions = vue === 'mois'
+        ? `<button type="button" class="btn btn-secondary" data-click="pointage-export">Exporter Excel</button>${saisir}`
+        : `${actifs.length ? '<button type="button" class="btn btn-secondary" data-click="pointage-maintenant-modal">Pointer maintenant</button>' : ''}${saisir}`;
+
+    safeRender(`
+        <div class="ptg">
+            ${vide ? '' : pageToolbar(actions, `<div class="segmented-filter" role="group" aria-label="Période affichée">${segment('semaine', 'Semaine')}${segment('mois', 'Mois')}</div>`)}
+            ${vide ? `
+                <div class="empty-state">
+                    <p>Aucun employé pour l'instant. Ajoutez l'équipe dans Paramètres › Employés pour saisir des heures.</p>
+                    <a href="#parametres" class="btn btn-primary">Paramètres</a>
+                </div>` : (vue === 'mois' ? pointageMoisHtml(now) : `${pointageEnCoursHtml(pointages, now)}${pointageSemaineHtml(now)}`)}
+        </div>
+    `);
+    document.querySelector('#content .ptg-plages')?.addEventListener('toggle', (e) => {
+        DB.setFilter('pointage_plages', e.target.open ? 'open' : '');
+    });
+    startPointageTicker(today);
+};
+
+// Durées « en cours » mises à jour toutes les 30 s ; nouveau jour → nouveau rendu
+const startPointageTicker = (jour) => {
+    clearInterval(pointageTicker);
+    pointageTicker = setInterval(() => {
+        const root = document.querySelector('#content .ptg');
+        if (!root) {
+            // L'utilisateur a quitté la page
+            clearInterval(pointageTicker);
+            pointageTicker = null;
+            return;
+        }
+        if (getLocalDateISOString() !== jour) {
+            renderPointage();
+            return;
+        }
+        root.querySelectorAll('[data-ptg-depuis]').forEach(el => {
+            el.textContent = twinFmtDuration((Date.now() - Number(el.getAttribute('data-ptg-depuis'))) / 60000);
+        });
+    }, 30000);
+};
+
+const pointageNaviguer = (dir) => {
+    const today = getLocalDateISOString();
+    if (DB.getFilter('pointage_vue') === 'mois') {
+        const courant = today.slice(0, 7);
+        const cible = dir ? pointageMoisDecale(pointageMoisAffiche || courant, dir) : courant;
+        pointageMoisAffiche = cible >= courant ? null : cible;
+    } else {
+        const courant = pointageLundi(today);
+        const cible = dir ? pointageJourDecale(pointageLundiAffiche || courant, 7 * dir) : courant;
+        pointageLundiAffiche = cible >= courant ? null : cible;
+    }
     renderPointage();
 };
 
-const getPointagesForDay = (pointages, day = new Date()) => {
-    const today = toLocalDayKey(day.getTime());
-    const previousDay = new Date(day);
-    previousDay.setDate(previousDay.getDate() - 1);
-    const yesterday = toLocalDayKey(previousDay.getTime());
-    return pointages.filter(p => {
-        if (p.date === today) return true;
-        if (p.date !== yesterday) return false;
-        if (!p.heureFin) return true;
-        const debutMin = parseHHMM(p.heureDebut);
-        const finMin = parseHHMM(p.heureFin);
-        return debutMin !== null && finMin !== null && finMin < debutMin;
+// Après un enregistrement depuis la page Pointage, afficher la période du jour saisi
+const pointageAfficherJour = (date) => {
+    if (window.location.hash.slice(1).split('?')[0] !== 'pointage') return;
+    const today = getLocalDateISOString();
+    const lundi = pointageLundi(date);
+    pointageLundiAffiche = lundi >= pointageLundi(today) ? null : lundi;
+    const mois = date.slice(0, 7);
+    pointageMoisAffiche = mois >= today.slice(0, 7) ? null : mois;
+};
+
+// --- Fenêtre « Heures de travail » : les plages d'une personne pour un jour ---
+const pointagePlageHtml = (p = {}) => {
+    const id = p.id || '';
+    const pause = Number(p.pause) || 0;
+    return `
+        <div class="ptg-plage"${id ? ` data-id="${escapeHtml(id)}"` : ''}${id && !p.heureFin ? ' data-ouvert="1"' : ''}>
+            <div class="ptg-plage-heures">
+                <label class="ptg-field"><span>Début</span><input type="time" name="debut" value="${escapeHtml(p.heureDebut || '')}"></label>
+                <label class="ptg-field"><span>Fin</span><input type="time" name="fin" value="${escapeHtml(p.heureFin || '')}"></label>
+                <label class="ptg-field ptg-field--pause"><span>Pause (min)</span><input type="number" name="pause" min="0" step="1" inputmode="numeric" placeholder="0" value="${pause > 0 ? pause : ''}"></label>
+                <button type="button" class="ptg-plage-del" data-click="pointage-plage-suppr" aria-label="Retirer cette plage">${dashIcon('croix')}</button>
+            </div>
+            <label class="ptg-field ptg-field--note"><span class="dash-sr">Note</span><input type="text" name="note" maxlength="200" placeholder="Note (facultatif)" value="${escapeHtml(p.notes || '')}"></label>
+            <p class="ptg-plage-info" data-role="info"></p>
+        </div>`;
+};
+
+const lirePlageJour = (row) => {
+    const val = (name) => (row.querySelector(`[name="${name}"]`)?.value || '').trim();
+    const debut = val('debut');
+    const fin = val('fin');
+    const pause = val('pause');
+    const note = val('note');
+    return { row, id: row.getAttribute('data-id') || '', ouvert: row.hasAttribute('data-ouvert'), debut, fin, pause, note, rempli: !!(debut || fin || pause || note) };
+};
+
+const showPointageJourModal = ({ employeId = '', date = '', focusId = '' } = {}) => {
+    const employees = DB.get('employees') || [];
+    const actifs = employees.filter(e => e.actif);
+    const memo = DB.getFilter('pointage_employe');
+    const empId = employeId || (actifs.some(e => e.id === memo) ? memo : actifs[0]?.id) || '';
+    if (!empId) {
+        showToast('Ajoutez d\'abord un employé dans Paramètres', 'error');
+        return;
+    }
+    const today = getLocalDateISOString();
+    const options = employees
+        .filter(e => e.actif || e.id === empId)
+        .map(e => ({ id: e.id, nom: `${e.prenom || ''} ${e.nom || ''}`.trim() || 'Employé' }));
+    if (!employees.some(e => e.id === empId)) options.push({ id: empId, nom: 'Employé supprimé' });
+
+    modal.show('Heures de travail', `
+        <form id="pointageJourForm" class="ptg-form" novalidate>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="ptgEmploye">Employé</label>
+                    <select id="ptgEmploye" name="employeId" data-change="pointage-jour-cible">
+                        ${options.map(o => `<option value="${escapeHtml(o.id)}"${o.id === empId ? ' selected' : ''}>${escapeHtml(o.nom)}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="ptgDate">Jour</label>
+                    <input type="date" id="ptgDate" name="date" value="${escapeHtml(date || today)}" max="${today}" data-change="pointage-jour-cible">
+                </div>
+            </div>
+            <div class="ptg-plages" id="ptgPlages"></div>
+            <button type="button" class="btn btn-ghost btn-sm ptg-add" data-click="pointage-plage-ajout">+ Ajouter une plage</button>
+            <p class="ptg-form-total" id="ptgTotal" aria-live="polite"></p>
+        </form>
+    `, `
+        <button type="button" class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button type="button" class="btn btn-primary" data-click="save-pointage-jour">Enregistrer</button>
+    `);
+    const form = document.getElementById('pointageJourForm');
+    form?.addEventListener('input', majPointageJourTotal);
+    // Entrée dans un champ : enregistrer la journée
+    form?.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.isComposing || !e.target.matches?.('input')) return;
+        e.preventDefault();
+        savePointageJour();
     });
+    chargerPlagesJour({ focusId, focus: true });
 };
 
-const pointageQuickArrivee = () => {
-    if (clockInEmployee(pointageSelectedEmployeId)) renderPointage();
+// Charge les plages enregistrées de la personne et du jour choisis ; les plages
+// ajoutées et pas encore enregistrées restent dans la fenêtre
+const chargerPlagesJour = ({ focusId = '', focus = false } = {}) => {
+    const form = document.getElementById('pointageJourForm');
+    const zone = document.getElementById('ptgPlages');
+    if (!form || !zone) return;
+    const empId = form.elements.employeId.value;
+    const date = form.elements.date.value;
+    const nouvelles = [...zone.querySelectorAll('.ptg-plage:not([data-id])')].filter(row => lirePlageJour(row).rempli);
+    const existantes = (DB.get('pointages') || [])
+        .filter(p => p.employeId === empId && p.date === date)
+        .sort(pointageParDebut);
+    form.dataset.charges = existantes.map(p => p.id).join(',');
+    zone.innerHTML = existantes.map(pointagePlageHtml).join('');
+    nouvelles.forEach(row => zone.appendChild(row));
+    if (!zone.querySelector('.ptg-plage')) zone.insertAdjacentHTML('beforeend', pointagePlageHtml());
+    majPointageJourTotal();
+    if (!focus) return;
+    // Focus sur la plage demandée ou restée ouverte, sinon la première à remplir.
+    // La transition d'ouverture rend la fenêtre visible un peu plus tard : on réessaie après.
+    const rows = [...zone.querySelectorAll('.ptg-plage')];
+    const cible = focusId ? rows.find(row => row.getAttribute('data-id') === focusId) : rows.find(row => row.hasAttribute('data-ouvert'));
+    const input = cible
+        ? cible.querySelector(cible.querySelector('[name="fin"]').value ? '[name="debut"]' : '[name="fin"]')
+        : [...zone.querySelectorAll('[name="debut"]')].find(i => !i.value);
+    if (!input) return;
+    setTimeout(() => {
+        input.focus();
+        if (document.activeElement !== input) setTimeout(() => input.focus(), 250);
+    }, 0);
 };
 
-const pointageQuickDepart = () => {
-    if (clockOutEmployee(pointageSelectedEmployeId)) renderPointage();
+// Durée de chaque plage et total de la journée, à chaque saisie
+const majPointageJourTotal = () => {
+    const form = document.getElementById('pointageJourForm');
+    if (!form) return;
+    const date = form.elements.date.value;
+    let total = 0;
+    form.querySelectorAll('.ptg-plage').forEach(row => {
+        const l = lirePlageJour(row);
+        const debut = parseHHMM(l.debut);
+        const fin = parseHHMM(l.fin);
+        const pause = Number(l.pause || 0);
+        let info = '';
+        if (debut !== null && fin !== null && fin !== debut) {
+            const minutes = computePointageMinutes(debut, fin, Number.isInteger(pause) && pause > 0 ? pause : 0);
+            if (minutes === null) {
+                info = 'La pause dépasse la durée de la plage';
+            } else {
+                total += minutes;
+                info = `${twinFmtDuration(minutes)}${fin < debut ? ' · se termine le lendemain' : ''}`;
+            }
+        } else if (debut !== null && !l.fin && l.ouvert) {
+            info = pointageOubli({ date, heureDebut: l.debut, heureFin: '' }) ? 'Départ non saisi' : 'En cours';
+        }
+        const el = row.querySelector('[data-role="info"]');
+        if (el) el.textContent = info;
+    });
+    const el = document.getElementById('ptgTotal');
+    if (el) el.textContent = total > 0 ? `Total de la journée : ${twinFmtDuration(total)}` : '';
 };
 
-// Clôture manuelle d'un pointage resté ouvert les jours précédents
-const showCloturePointageModal = (id) => {
+const ajouterPlageJour = () => {
+    const zone = document.getElementById('ptgPlages');
+    if (!zone) return;
+    zone.insertAdjacentHTML('beforeend', pointagePlageHtml());
+    zone.lastElementChild?.querySelector('[name="debut"]')?.focus();
+    majPointageJourTotal();
+};
+
+// Une plage enregistrée et retirée ici est supprimée à l'enregistrement
+const retirerPlageJour = (btn) => {
+    const zone = document.getElementById('ptgPlages');
+    btn.closest('.ptg-plage')?.remove();
+    if (zone && !zone.querySelector('.ptg-plage')) zone.insertAdjacentHTML('beforeend', pointagePlageHtml());
+    majPointageJourTotal();
+    document.querySelector('#pointageJourForm .ptg-add')?.focus();
+};
+
+const savePointageJour = () => {
+    const form = document.getElementById('pointageJourForm');
+    if (!form) return;
+    const now = new Date();
+    const today = getLocalDateISOString();
+    const employeId = form.elements.employeId.value;
+    const date = form.elements.date.value;
+    const erreur = (message, row, champ) => {
+        showToast(message, 'error');
+        (row?.querySelector(`[name="${champ}"]`) || (champ === 'date' ? form.elements.date : null))?.focus();
+    };
+    if (!employeId) return erreur('Choisissez un employé');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isValidDateOnly(date)) return erreur('Choisissez le jour travaillé', null, 'date');
+    if (date > today) return erreur('Les heures d\'un jour à venir ne peuvent pas encore être saisies', null, 'date');
+
+    // Contrôle de chaque plage
+    const plages = [];
+    for (const l of [...form.querySelectorAll('.ptg-plage')].map(lirePlageJour).filter(x => x.rempli)) {
+        const debut = parseHHMM(l.debut);
+        const fin = l.fin ? parseHHMM(l.fin) : null;
+        const pause = Number(l.pause || 0);
+        if (debut === null) return erreur('Indiquez l\'heure de début de chaque plage', l.row, 'debut');
+        if (!l.fin && !l.ouvert) return erreur(`Indiquez l'heure de fin de la plage commencée à ${l.debut}`, l.row, 'fin');
+        if (l.fin && fin === null) return erreur('Heure de fin invalide', l.row, 'fin');
+        if (fin !== null && fin === debut) return erreur(`La plage ${l.debut} – ${l.fin} est vide`, l.row, 'fin');
+        if (!Number.isInteger(pause) || pause < 0) return erreur('La pause doit être un nombre entier de minutes', l.row, 'pause');
+        if (fin !== null && computePointageMinutes(debut, fin, pause) === null) {
+            return erreur(`La pause dépasse la durée de la plage ${l.debut} – ${l.fin}`, l.row, 'pause');
+        }
+        plages.push({ row: l.row, id: l.id, heureDebut: l.debut, heureFin: l.fin, pause, notes: l.note });
+    }
+
+    // Relecture au moment d'enregistrer : seules les plages chargées dans la
+    // fenêtre peuvent être supprimées, celles ajoutées ailleurs entre-temps restent
+    const toutes = DB.get('pointages') || [];
+    const charges = new Set((form.dataset.charges || '').split(',').filter(Boolean));
+    if (plages.some(pl => pl.id && !toutes.some(p => p.id === pl.id))) {
+        showToast('Cette journée a été modifiée sur un autre appareil : vérifiez les plages puis enregistrez à nouveau', 'error');
+        chargerPlagesJour();
+        return;
+    }
+    if (plages.length === 0 && charges.size === 0) return erreur('Saisissez au moins une plage (début et fin)', form.querySelector('.ptg-plage'), 'debut');
+
+    // Chevauchements avec les autres plages de la personne (veille, jour et lendemain)
+    const voisins = [pointageJourDecale(date, -1), date, pointageJourDecale(date, 1)];
+    const elements = [
+        ...plages.map(pl => ({ p: { ...pl, date }, saisie: true, row: pl.row })),
+        ...toutes.filter(p => p.employeId === employeId && voisins.includes(p.date) && !charges.has(p.id)).map(p => ({ p, saisie: false }))
+    ].map(x => ({ ...x, iv: pointageIntervalle(x.p, date, now) })).filter(x => x.iv);
+    for (const a of elements.filter(x => x.saisie)) {
+        const b = elements.find(x => x !== a && x.iv[0] < a.iv[1] && a.iv[0] < x.iv[1]);
+        if (b) {
+            const jour = b.p.date !== date ? ` du ${formatDate(b.p.date)}` : '';
+            return erreur(`La plage ${pointagePlageLabel(a.p)} chevauche la plage ${pointagePlageLabel(b.p)}${jour}`, a.row, 'debut');
+        }
+    }
+
+    const gardes = new Set(plages.map(pl => pl.id).filter(Boolean));
+    const suivantes = toutes.filter(p => !charges.has(p.id) || gardes.has(p.id));
+    plages.forEach(pl => {
+        const rec = pl.id ? suivantes.find(p => p.id === pl.id) : null;
+        const champs = { employeId, date, heureDebut: pl.heureDebut, heureFin: pl.heureFin, pause: pl.pause };
+        if (pl.notes || rec?.notes) champs.notes = pl.notes;
+        if (rec) Object.assign(rec, champs);
+        else suivantes.push({ id: generateId(), ...champs });
+    });
+    DB.set('pointages', suivantes);
+
+    DB.setFilter('pointage_employe', employeId);
+    modal.hide();
+    const minutes = plages.reduce((s, pl) => s + pointageDuree({ ...pl, date }, now), 0);
+    const nom = form.elements.employeId.selectedOptions[0]?.textContent || 'Employé';
+    showToast(plages.length
+        ? `${nom} : ${twinFmtDuration(minutes)} le ${pointageJourLabel(date)}`
+        : `Plages du ${pointageJourLabel(date)} supprimées`);
+    pointageAfficherJour(date);
+    renderCurrentView();
+};
+
+const cloturerPointage = (id) => {
     const p = (DB.get('pointages') || []).find(x => x.id === id);
     if (!p) {
         showToast('Pointage non trouvé', 'error');
         return;
     }
-    const emp = (DB.get('employees') || []).find(e => e.id === p.employeId);
-    modal.show('Clôturer le pointage', `
-        <form id="cloturePointageForm">
-            <p><strong>${escapeHtml(((emp?.prenom || '') + ' ' + (emp?.nom || '')).trim() || 'N/A')}</strong> — arrivée le ${escapeHtml(formatDate(p.date))} à ${escapeHtml(p.heureDebut || '?')}</p>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Heure de départ</label>
-                    <input type="time" name="heureFin" required>
-                </div>
-                <div class="form-group">
-                    <label>Pause (min)</label>
-                    <input type="number" name="pause" value="${escapeHtml(String(parseInt(p.pause, 10) || 0))}" min="0">
-                </div>
-            </div>
-            <p style="font-size: 12px; color: var(--text-light);">Si le départ est avant l'arrivée, il est compté le lendemain (pointage de nuit).</p>
-        </form>
-    `, `
-        <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
-        <button class="btn btn-primary" data-click="save-cloture-pointage" data-id="${escapeHtml(id)}">Clôturer</button>
-    `);
+    showPointageJourModal({ employeId: p.employeId, date: p.date, focusId: p.id });
 };
 
-const saveCloturePointage = (id) => {
-    const form = document.getElementById('cloturePointageForm');
-    if (!form) return;
-    if (!form.checkValidity()) {
-        form.reportValidity();
-        return;
-    }
-    const formData = new FormData(form);
-    const heureFin = String(formData.get('heureFin') || '');
-    const pause = Number(formData.get('pause') || 0);
-    const finMin = parseHHMM(heureFin);
-    if (finMin === null) {
-        showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
-        return;
-    }
-    const pointages = DB.get('pointages') || [];
-    const p = pointages.find(x => x.id === id);
-    if (!p) {
-        showToast('Pointage non trouvé', 'error');
-        return;
-    }
-    const debutMin = parseHHMM(p.heureDebut);
-    if (debutMin === null || !Number.isInteger(pause) || pause < 0 || computePointageMinutes(debutMin, finMin, pause) === null) {
-        showToast('La pause doit être un nombre entier positif ou nul et ne pas dépasser la durée du pointage', 'error');
-        return;
-    }
-    p.heureFin = heureFin;
-    p.pause = pause;
-    DB.set('pointages', pointages);
-    modal.hide();
-    showToast('Pointage clôturé');
-    renderPointage();
-};
-
-const showPointageStatsModal = () => {
-    const pointages = DB.get('pointages') || [];
-    const employes = DB.get('employees') || [];
-    const employesActifs = employes.filter(e => e.actif);
-    const stats = getPointageStats(pointages, employes);
-    modal.show('Statistiques pointage',
-        `<div class="form-row" style="margin-bottom: 16px;">
-            <div class="form-group">
-                <label>Employé</label>
-                <select id="statsEmploye" onchange="refreshPointageStatsModal()">
-                    <option value="">Tous</option>
-${employesActifs.map(e => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Période</label>
-                <select id="statsPeriod" onchange="refreshPointageStatsModal()">
-                    <option value="week">Semaine en cours</option>
-                    <option value="month">Mois en cours</option>
-                    <option value="year">Année en cours</option>
-                </select>
-            </div>
-        </div>
-        <div id="statsModalBody">
-            <div class="dash-kpi-grid">
-                <div class="dash-kpi-card"><div class="dash-kpi-label">Total heures</div><div class="dash-kpi-value">${stats.totalHours}h</div></div>
-                <div class="dash-kpi-card"><div class="dash-kpi-label">Jours travaillés</div><div class="dash-kpi-value">${stats.daysWorked}</div></div>
-            </div>
-            <div class="dash-kpi-card" style="margin-bottom: 16px;"><div class="dash-kpi-label">Moyenne / jour</div><div class="dash-kpi-value">${stats.avgHours}h</div></div>
-            ${stats.employeeStats.length > 0 ? `
-                <h4 style="margin: 12px 0 8px; font-size: 15px;">Répartition par employé</h4>
-                <div class="bar-chart">
-                    ${stats.employeeStats.map((emp, i) => `
-                        <div class="bar-row">
-                            <span class="bar-label">${escapeHtml(emp.name)}</span>
-                            <div class="bar-container">
-                                <div class="bar" style="width: ${emp.percent}%; background: hsl(${i * 40 + 100}, 35%, 45%);"></div>
-                            </div>
-                            <span class="bar-value">${emp.hours}h</span>
-                        </div>
-                    `).join('')}
-                </div>` : ''}
-        </div>`,
-        `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`
-    );
-};
-
-const refreshPointageStatsModal = () => {
-    const employes = DB.get('employees') || [];
-    const pointages = DB.get('pointages') || [];
-    const stats = getPointageStats(pointages, employes);
-    const body = document.getElementById('statsModalBody');
-    if (!body) return;
-    body.innerHTML = `
-        <div class="dash-kpi-grid">
-            <div class="dash-kpi-card"><div class="dash-kpi-label">Total heures</div><div class="dash-kpi-value">${stats.totalHours}h</div></div>
-            <div class="dash-kpi-card"><div class="dash-kpi-label">Jours travaillés</div><div class="dash-kpi-value">${stats.daysWorked}</div></div>
-        </div>
-        <div class="dash-kpi-card" style="margin-bottom: 16px;"><div class="dash-kpi-label">Moyenne / jour</div><div class="dash-kpi-value">${stats.avgHours}h</div></div>
-        ${stats.employeeStats.length > 0 ? `
-            <h4 style="margin: 12px 0 8px; font-size: 15px;">Répartition par employé</h4>
-            <div class="bar-chart">
-                ${stats.employeeStats.map((emp, i) => `
-                    <div class="bar-row">
-                        <span class="bar-label">${escapeHtml(emp.name)}</span>
-                        <div class="bar-container">
-                            <div class="bar" style="width: ${emp.percent}%; background: hsl(${i * 40 + 100}, 35%, 45%);"></div>
-                        </div>
-                        <span class="bar-value">${emp.hours}h</span>
-                    </div>
-                `).join('')}
-            </div>` : ''}
-    `;
-};
-
-const showPointageHistoriqueModal = () => {
-    const employes = DB.get('employees') || [];
-    const employesActifs = employes.filter(e => e.actif);
-    const pointages = DB.get('pointages') || [];
-    modal.show('Historique complet',
-        `<div class="filters" style="margin-bottom: 12px;">
-            <select id="filterEmploye" onchange="refreshPointageHistoriqueModal()">
-                <option value="">Tous les employés</option>
-                ${employesActifs.map(e => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
-            </select>
-            <input type="date" id="filterDateFrom" placeholder="Du" onchange="refreshPointageHistoriqueModal()">
-            <input type="date" id="filterDateTo" placeholder="Au" onchange="refreshPointageHistoriqueModal()">
-        </div>
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr><th>Date</th><th>Employé</th><th>Début</th><th>Fin</th><th>Pause</th><th>Total</th><th></th></tr>
-                </thead>
-                <tbody id="historiqueModalBody">${renderHistoriqueTable(pointages, employes)}</tbody>
-            </table>
-        </div>`,
-        `<button class="btn btn-secondary" onclick="exportPointageExcel()">Exporter CSV</button>
-         <button class="btn btn-primary" onclick="modal.hide()">Fermer</button>`
-    );
-};
-
-const refreshPointageHistoriqueModal = () => {
-    const pointages = DB.get('pointages') || [];
-    const employes = DB.get('employees') || [];
-    const tbody = document.getElementById('historiqueModalBody');
-    if (tbody) tbody.innerHTML = renderHistoriqueTable(pointages, employes);
-};
-
-// Pointage view
-const renderPointage = (_tabIgnored) => {
-    // Backward-compat : si renderPointage est appelé avec 'historique'/'stats'/'employes' (anciens onglets),
-    // on ignore et on affiche la single-page. Les anciennes fonctionnalités sont accessibles via les modals.
-    const pointages = DB.get('pointages') || [];
-    const employes = DB.get('employees') || [];
+// Arrivée / départ à l'heure actuelle, pour chaque employé actif
+const showPointerMaintenantModal = () => {
     const today = getLocalDateISOString();
-
-    // Nettoyer l'ancien interval pour ne pas en accumuler
-    if (pointageClockInterval) {
-        clearInterval(pointageClockInterval);
-        pointageClockInterval = null;
-    }
-
-    const currentTime = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
-    const dateTxt = new Date().toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long' });
-
-    const employesActifs = employes.filter(e => e.actif);
-
-    // Auto-sélectionner le premier employé actif si rien n'est sélectionné ou que l'employé sélectionné n'existe plus
-    if (!pointageSelectedEmployeId || !employesActifs.some(e => e.id === pointageSelectedEmployeId)) {
-        pointageSelectedEmployeId = employesActifs[0]?.id || null;
-    }
-
-    const pointagesAujourdhui = getPointagesForDay(pointages);
-    const pointageEnCoursParEmp = {};
-    employesActifs.forEach(e => {
-        const enCours = findPointageEnCours(pointages, e.id, today);
-        if (enCours) pointageEnCoursParEmp[e.id] = enCours;
-    });
-
-    // Pointages restés ouverts les jours précédents (départ oublié ou à clôturer)
-    const pointagesOuverts = pointages
-        .filter(p => p.date && p.date < today && !p.heureFin)
-        .sort((a, b) => b.date.localeCompare(a.date) || (b.heureDebut || '').localeCompare(a.heureDebut || ''));
-
-    const selectedEmpId = pointageSelectedEmployeId;
-    const selectedEmp = employesActifs.find(e => e.id === selectedEmpId);
-    const pointageEnCours = selectedEmpId ? pointageEnCoursParEmp[selectedEmpId] : null;
-    const dejaArrive = !!pointageEnCours;
-
-    const initiales = (e) => {
-        if (!e) return '?';
-        const p = (e.prenom || '').trim();
-        const n = (e.nom || '').trim();
-        return ((p[0] || '') + (n[0] || '')).toUpperCase() || '?';
-    };
-
-    // Historique du jour : pointages déjà terminés (avec heureFin), triés par heure de début
-    const historiqueJour = pointagesAujourdhui
-        .slice()
-        .sort((a, b) => (a.heureDebut || '').localeCompare(b.heureDebut || ''));
-
-    safeRender(`
-        <div class="pointage-hero">
-            <div class="section-label">${selectedEmp ? escapeHtml(selectedEmp.prenom + ' ' + (selectedEmp.nom || '')) : 'Aucun employé sélectionné'}</div>
-            <div class="pointage-clock-big current-time">${currentTime}</div>
-            <div class="pointage-date">${escapeHtml(dateTxt)}</div>
-            <div class="pointage-actions">
-                <button type="button" class="btn btn-arrivee" ${dejaArrive || !selectedEmp ? 'disabled' : ''} onclick="pointageQuickArrivee()">
-                    ▶ Arrivée
-                </button>
-                <button type="button" class="btn btn-depart" ${!dejaArrive ? 'disabled' : ''} onclick="pointageQuickDepart()">
-                    ⏹ Départ
-                </button>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
-                <h3 class="card-title">Qui pointe ?</h3>
-            </div>
-            ${employesActifs.length === 0 ? '<p style="color: var(--text-light);">Aucun employé actif. Ajoute-en depuis Paramètres.</p>' : `
-                <div class="employee-grid">
-                    ${employesActifs.map(e => {
-                        const isSelected = e.id === selectedEmpId;
-                        const isLive = !!pointageEnCoursParEmp[e.id];
-                        return `<a href="#pointage" class="employee-card ${isSelected ? 'selected' : ''}" data-click="pointage-select-employee" data-id="${escapeHtml(e.id)}" data-prevent>
-                            <div class="avatar ${isLive ? 'avatar-live' : ''}">${escapeHtml(initiales(e))}</div>
-                            <div class="employee-info">
-                                <div class="employee-name">${escapeHtml(e.prenom)} ${escapeHtml(e.nom || '')}</div>
-                                <div class="employee-sub">${isLive ? '● en cours' : 'libre'}</div>
-                            </div>
-                        </a>`;
-                    }).join('')}
-                </div>
-            `}
-        </div>
-
-        <div class="card">
-            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
-                <h3 class="card-title">Saisie manuelle</h3>
-            </div>
-            <form id="quickPointageForm">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Employé</label>
-                        <select name="employeId" required>
-                            ${employesActifs.length === 0 ? '<option value="">Aucun employé</option>' :
-                              employesActifs.map(e => `<option value="${escapeHtml(e.id)}" ${e.id === selectedEmpId ? 'selected' : ''}>${escapeHtml(e.prenom + ' ' + (e.nom || ''))}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Date</label>
-                        <input type="date" name="date" value="${today}" required>
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Arrivée</label>
-                        <input type="time" name="heureDebut" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Départ</label>
-                        <input type="time" name="heureFin" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Pause (min)</label>
-                        <input type="number" name="pause" value="0" min="0">
-                    </div>
-                </div>
-                <button type="button" class="btn btn-primary" onclick="saveQuickPointage(event)">Enregistrer</button>
-            </form>
-        </div>
-
-        ${pointagesOuverts.length === 0 ? '' : `
-        <div class="card">
-            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
-                <h3 class="card-title">Pointages non clôturés</h3>
-                <span style="font-size: 12px; color: var(--text-light);">${pointagesOuverts.length} pointage${pointagesOuverts.length !== 1 ? 's' : ''} resté${pointagesOuverts.length !== 1 ? 's' : ''} ouvert${pointagesOuverts.length !== 1 ? 's' : ''}</span>
-            </div>
-            ${pointagesOuverts.map(p => {
-                const emp = employes.find(x => x.id === p.employeId);
-                return `<div class="history-row">
-                    <div class="avatar avatar-sm">${escapeHtml(initiales(emp))}</div>
-                    <div class="history-row-info">
-                        <div class="history-row-name">${escapeHtml((emp?.prenom || '') + ' ' + (emp?.nom || ''))}</div>
-                        <div class="history-row-times">${escapeHtml(formatDate(p.date))} • arrivée ${escapeHtml(p.heureDebut || '?')} → départ non pointé</div>
-                    </div>
-                    <div class="history-row-total">
-                        <button type="button" class="btn btn-sm btn-secondary" data-click="cloturer-pointage" data-id="${escapeHtml(p.id)}">Clôturer</button>
-                        ${rowMenuHtml(`pointage du ${formatDate(p.date)}`, `<button type="button" class="is-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>`)}
-                    </div>
-                </div>`;
-            }).join('')}
-        </div>`}
-
-        <div class="card">
-            <div class="card-header" style="margin-bottom: 12px; padding-bottom: 0; border: none;">
-                <h3 class="card-title">Historique du jour</h3>
-                <span style="font-size: 12px; color: var(--text-light);">${historiqueJour.length} pointage${historiqueJour.length !== 1 ? 's' : ''}</span>
-            </div>
-            ${historiqueJour.length === 0 ? '<p style="color: var(--text-light); font-size: 13px;">Aucun pointage aujourd\'hui pour l\'instant.</p>' : `
-                ${historiqueJour.map(p => {
-                    const emp = employes.find(x => x.id === p.employeId);
-                    const debutMin = parseHHMM(p.heureDebut);
-                    const finMin = parseHHMM(p.heureFin);
-                    const pause = parseInt(p.pause, 10) || 0;
-                    let totalLabel = '— en cours';
-                    if (debutMin !== null && finMin !== null) {
-                        const totalMin = computePointageMinutes(debutMin, finMin, pause);
-                        if (totalMin > 0) {
-                            const h = Math.floor(totalMin / 60);
-                            const m = totalMin % 60;
-                            totalLabel = `${h}h${m > 0 ? ' ' + m + 'min' : ''}`;
-                        }
-                    }
-                    return `<div class="history-row">
-                        <div class="avatar avatar-sm">${escapeHtml(initiales(emp))}</div>
-                        <div class="history-row-info">
-                            <div class="history-row-name">${escapeHtml((emp?.prenom || '') + ' ' + (emp?.nom || ''))}</div>
-                            <div class="history-row-times">${escapeHtml(p.heureDebut || '?')} → ${escapeHtml(p.heureFin || '...')}${pause ? ' • pause ' + pause + ' min' : ''}</div>
-                        </div>
-                        <div class="history-row-total">${totalLabel}</div>
-                    </div>`;
-                }).join('')}
-            `}
-        </div>
-
-        <div class="flex gap-4" style="margin-top: 16px; flex-wrap: wrap;">
-            <button type="button" class="btn btn-ghost btn-sm" onclick="showPointageStatsModal()">📊 Voir stats</button>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="showPointageHistoriqueModal()">📅 Historique complet</button>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="exportPointageExcel()">📤 Export CSV</button>
-        </div>
-    `);
-
-    // Update time every second
-    pointageClockInterval = setInterval(() => {
-        const timeEl = document.querySelector('.pointage-hero .current-time');
-        if (timeEl) {
-            if (getLocalDateISOString() !== today) {
-                renderPointage();
-                return;
-            }
-            timeEl.textContent = new Date().toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' });
-        } else {
-            // L'élément n'est plus dans le DOM → l'utilisateur a navigué ailleurs, on arrête
-            clearInterval(pointageClockInterval);
-            pointageClockInterval = null;
-        }
-    }, 1000);
-};
-
-const renderHistoriqueTable = (pointages, employes) => {
-    const filterEmploye = document.getElementById('filterEmploye')?.value || '';
-    const filterDateFrom = document.getElementById('filterDateFrom')?.value || '';
-    const filterDateTo = document.getElementById('filterDateTo')?.value || '';
-
-    const filtered = pointages
-        .filter(p => {
-            if (filterEmploye && p.employeId !== filterEmploye) return false;
-            if (filterDateFrom && p.date < filterDateFrom) return false;
-            if (filterDateTo && p.date > filterDateTo) return false;
-            return true;
-        })
-        .sort((a, b) => new Date(b.date) - new Date(a.date));
-
-    if (filtered.length === 0) {
-        return '<tr><td colspan="7" class="text-center">Aucun pointage</td></tr>';
-    }
-
-    return filtered.map(p => {
-        const emp = employes.find(e => e.id === p.employeId);
-        const debutMin = parseHHMM(p.heureDebut);
-        const finMin = parseHHMM(p.heureFin);
-        let totalMinutes = 0;
-        if (debutMin !== null && finMin !== null) {
-            totalMinutes = computePointageMinutes(debutMin, finMin, p.pause || 0);
-        }
-        const heures = Math.floor(totalMinutes / 60);
-        const mins = totalMinutes % 60;
-
-        return `
-            <tr>
-                <td>${formatDate(p.date)}</td>
-                <td>${emp ? escapeHtml(emp.prenom + ' ' + emp.nom) : 'N/A'}</td>
-                <td>${escapeHtml(p.heureDebut || '-')}</td>
-                <td>${escapeHtml(p.heureFin || '-')}</td>
-                <td>${escapeHtml(p.pause || 0)} min</td>
-                <td>${totalMinutes > 0 ? `${heures}h ${mins}min` : '-'}</td>
-                <td>
-                    <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" data-click="delete-pointage" data-id="${escapeHtml(p.id)}">Supprimer</button>
-                </td>
-            </tr>
-        `;
-    }).join('');
-};
-
-const getMonday = (d) => {
-    const dt = new Date(d);
-    const day = dt.getDay();
-    const diff = dt.getDate() - day + (day === 0 ? -6 : 1);
-    return new Date(dt.getFullYear(), dt.getMonth(), diff);
-};
-
-const getPointageStats = (pointages, employes) => {
-    const statsEmploye = document.getElementById('statsEmploye')?.value || '';
-    const statsPeriod = document.getElementById('statsPeriod')?.value || 'week';
-
-    const now = new Date();
-    let startDate, endDate;
-
-    if (statsPeriod === 'week') {
-        startDate = getMonday(now);
-        endDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 6);
-    } else if (statsPeriod === 'month') {
-        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    } else {
-        startDate = new Date(now.getFullYear(), 0, 1);
-        endDate = new Date(now.getFullYear(), 11, 31);
-    }
-
-    const formatDateISO = (d) => {
-        const cloned = new Date(d.getTime());
-        const offset = cloned.getTimezoneOffset();
-        cloned.setMinutes(cloned.getMinutes() - offset);
-        return cloned.toISOString().split('T')[0];
-    };
-
-    const startStr = formatDateISO(startDate);
-    const endStr = formatDateISO(endDate);
-
-    let filtered = pointages.filter(p => p.date >= startStr && p.date <= endStr && p.heureFin);
-
-    if (statsEmploye) {
-        filtered = filtered.filter(p => p.employeId === statsEmploye);
-    }
-
-    const totalMinutes = filtered.reduce((acc, p) => {
-        const debutMin = parseHHMM(p.heureDebut);
-        const finMin = parseHHMM(p.heureFin);
-        if (debutMin === null || finMin === null) return acc;
-        const diff = computePointageMinutes(debutMin, finMin, p.pause || 0);
-        return acc + (diff > 0 ? diff : 0);
-    }, 0);
-
-    const totalHours = (totalMinutes / 60).toFixed(1);
-    const daysWorked = new Set(filtered.map(p => p.date)).size;
-    const avgHours = daysWorked > 0 ? (totalMinutes / 60 / daysWorked).toFixed(1) : 0;
-
-    // Employee stats
-    const empStats = {};
-    filtered.forEach(p => {
-        if (!empStats[p.employeId]) empStats[p.employeId] = 0;
-        const debutMin = parseHHMM(p.heureDebut);
-        const finMin = parseHHMM(p.heureFin);
-        if (debutMin === null || finMin === null) return;
-        const diff = computePointageMinutes(debutMin, finMin, p.pause || 0);
-        if (diff > 0) empStats[p.employeId] += diff / 60;
-    });
-
-    const maxHours = Math.max(...Object.values(empStats), 1);
-    const employeeStats = Object.entries(empStats).map(([id, hours]) => {
-        const emp = employes.find(e => e.id === id);
-        return {
-            name: emp ? emp.prenom + ' ' + emp.nom : 'Inconnu',
-            hours: hours.toFixed(1),
-            percent: (hours / maxHours) * 100
-        };
-    }).sort((a, b) => parseFloat(b.hours) - parseFloat(a.hours));
-
-    return { totalHours, daysWorked, avgHours, employeeStats };
-};
-
-const saveQuickPointage = (event) => {
-    const reenable = disableSaveBtn(event);
-    try {
-        const form = document.getElementById('quickPointageForm');
-        if (!form?.reportValidity()) return;
-        const formData = new FormData(form);
-
-        const employeId = formData.get('employeId');
-        const date = formData.get('date');
-        const heureDebut = formData.get('heureDebut');
-        const heureFin = formData.get('heureFin');
-        const pause = Number(formData.get('pause') || 0);
-
-        if (!employeId || !date || !heureDebut || !heureFin) {
-            showToast('Veuillez remplir tous les champs', 'error');
-            return;
-        }
-        const debutMin = parseHHMM(heureDebut);
-        const finMin = parseHHMM(heureFin);
-        if (debutMin === null || finMin === null) {
-            showToast('Format d\'heure invalide (attendu HH:MM)', 'error');
-            return;
-        }
-        if (!Number.isInteger(pause) || pause < 0 || computePointageMinutes(debutMin, finMin, pause) === null) {
-            showToast('La pause doit être un nombre entier positif ou nul et ne pas dépasser la durée du pointage', 'error');
-            return;
-        }
-
-        const pointages = DB.get('pointages') || [];
-        const pointage = {
-            id: generateId(),
-            employeId,
-            date,
-            heureDebut,
-            heureFin,
-            pause
-        };
-        pointages.push(pointage);
-        DB.set('pointages', pointages);
-
-        form.reset();
-        document.querySelector('#quickPointageForm input[name="date"]').value = getLocalDateISOString();
-        showToast('Pointage ajouté');
-        renderPointage('pointage');
-    } catch (e) {
-        console.error('Error saving quick pointage:', e);
-        showToast('Erreur lors de l\'enregistrement du pointage', 'error');
-    } finally {
-        if (reenable) reenable();
-    }
-};
-
-const exportPointageExcel = () => {
     const pointages = DB.get('pointages') || [];
-    const employes = DB.get('employees') || [];
-    const filterEmploye = document.getElementById('filterEmploye')?.value || '';
-    const filterDateFrom = document.getElementById('filterDateFrom')?.value || '';
-    const filterDateTo = document.getElementById('filterDateTo')?.value || '';
+    const row = (m) => {
+        const enCours = findPointageEnCours(pointages, m.id, today);
+        return `
+            <li class="dash-member">
+                ${pointageAvatarHtml(m, !!enCours)}
+                <span class="dash-member-main">
+                    <span class="dash-member-name">${escapeHtml(m.nom)}</span>
+                    <span class="dash-member-sub">${escapeHtml(enCours ? `En cours depuis ${enCours.heureDebut}` : 'Pas de plage en cours')}</span>
+                </span>
+                <button type="button" class="btn btn-sm ${enCours ? 'btn-secondary' : 'btn-primary'}" data-click="pointage-maintenant" data-id="${escapeHtml(m.id)}" data-sens="${enCours ? 'depart' : 'arrivee'}"
+                    aria-label="${escapeHtml(`${enCours ? 'Pointer le départ' : 'Pointer l\'arrivée'} de ${m.nom}`)}">${enCours ? 'Départ' : 'Arrivée'}</button>
+            </li>`;
+    };
+    modal.show('Pointer maintenant', `<ul class="dash-team">${pointageEquipe([]).map(row).join('')}</ul>`,
+        '<button type="button" class="btn btn-secondary" data-click="close-modal">Fermer</button>');
+};
 
-    const filtered = pointages
-        .filter(p => {
-            if (filterEmploye && p.employeId !== filterEmploye) return false;
-            if (filterDateFrom && p.date < filterDateFrom) return false;
-            if (filterDateTo && p.date > filterDateTo) return false;
-            return true;
-        })
-        .sort((a, b) => new Date(b.date) - new Date(a.date));
-
-    // Create CSV content
-    let csv = '\uFEFFDate,Employé,Début,Fin,Pause,Durée\n';
-
-    filtered.forEach(p => {
-        const emp = employes.find(e => e.id === p.employeId);
-        const empName = emp ? emp.prenom + ' ' + emp.nom : 'N/A';
-
-        const debutMin = parseHHMM(p.heureDebut);
-        const finMin = parseHHMM(p.heureFin);
-        let totalMinutes = 0;
-        if (debutMin !== null && finMin !== null) {
-            totalMinutes = computePointageMinutes(debutMin, finMin, p.pause || 0);
-        }
-        const heures = Math.floor(totalMinutes / 60);
-        const mins = totalMinutes % 60;
-        const duree = totalMinutes > 0 ? `${heures}h ${mins}min` : '-';
-
-        csv += [p.date, empName, p.heureDebut || '-', p.heureFin || '-', p.pause || 0, duree].map(csvCell).join(',') + '\n';
-    });
-
-    // Download CSV
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `pointages_${getLocalDateISOString()}.csv`;
-    link.click();
-
-    showToast('Exporté en CSV');
+// Relevé du mois affiché : synthèse par personne et détail des plages
+const exportPointagesMois = () => {
+    if (typeof XLSX === 'undefined') {
+        showToast('Erreur: Bibliothèque Excel non chargée', 'error');
+        return;
+    }
+    const now = new Date();
+    const mois = pointageMoisAffiche || getLocalDateISOString().slice(0, 7);
+    const m = buildPointageMois(mois, now);
+    const heures = (minutes) => Math.round(minutes / 60 * 100) / 100;
+    const feuille = (rows) => XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ Information: 'Aucune heure saisie' }]);
+    const avecHeures = m.membres.filter(x => x.minutes > 0);
+    const synthese = avecHeures.map(x => ({
+        'Employé': x.membre.nom,
+        'Journées': x.journees,
+        'Heures': twinFmtDuration(x.minutes),
+        'Heures (décimal)': heures(x.minutes),
+        'Depuis janvier (h)': heures(x.annee)
+    }));
+    if (avecHeures.length > 1) {
+        synthese.push({
+            'Employé': 'Total',
+            'Journées': m.journees,
+            'Heures': twinFmtDuration(m.minutes),
+            'Heures (décimal)': heures(m.minutes),
+            'Depuis janvier (h)': heures(avecHeures.reduce((s, x) => s + x.annee, 0))
+        });
+    }
+    const noms = new Map(m.membres.map(x => [x.membre.id, x.membre.nom]));
+    const nom = (p) => noms.get(p.employeId) || POINTAGE_MEMBRE_INCONNU.nom;
+    const detail = [...m.plages]
+        .sort((a, b) => a.date.localeCompare(b.date) || nom(a).localeCompare(nom(b), 'fr') || pointageParDebut(a, b))
+        .map(p => {
+            const minutes = pointageDuree(p, now);
+            return {
+                'Date': formatDate(p.date),
+                'Jour': pointageJourLabel(p.date, { weekday: 'long' }),
+                'Employé': nom(p),
+                'Début': p.heureDebut || '',
+                'Fin': p.heureFin || (pointageOubli(p, now) ? 'non saisie' : 'en cours'),
+                'Pause (min)': Number(p.pause) || 0,
+                'Durée': twinFmtDuration(minutes),
+                'Durée (h)': heures(minutes),
+                'Note': p.notes || ''
+            };
+        });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, feuille(synthese), 'Synthèse');
+    XLSX.utils.book_append_sheet(wb, feuille(detail), 'Détail');
+    XLSX.writeFile(wb, `pointages_${mois}.xlsx`);
+    showToast('Export Excel des heures réussi');
 };
 
 const deletePointage = (id) => {
-    confirmDialog('Êtes-vous sûr de vouloir supprimer ce pointage ?', { danger: true }).then(ok => {
+    const p = (DB.get('pointages') || []).find(x => x.id === id);
+    if (!p) return;
+    confirmDialog(`Supprimer la plage ${pointagePlageLabel(p)} du ${formatDate(p.date)} ?`, { danger: true, confirmLabel: 'Supprimer' }).then(ok => {
         if (!ok) return;
-        const pointages = DB.get('pointages').filter(p => p.id !== id);
-        DB.set('pointages', pointages);
-        showToast('Pointage supprimé');
-        renderPointage();
+        // Relecture après la confirmation : une saisie faite entre-temps ailleurs est conservée
+        DB.set('pointages', (DB.get('pointages') || []).filter(x => x.id !== id));
+        showToast('Plage supprimée');
+        renderCurrentView();
     });
 };
 
@@ -13285,7 +13409,6 @@ const showLivraisonBouteillesModal = (commandeId) => {
             <div id="livLignes">${lignes.map(livraisonLigneHtml).join('')}</div>
             <div id="livHorsCommande" class="liv-hors" hidden></div>
             <p id="livReliquatNote" class="trace-alert" hidden></p>
-            <p class="liv-aide">Proposé : DLV la plus proche d'abord, sans toucher aux bouteilles prévues pour d'autres commandes. Modifiable.</p>
         </div>
     `, `
         ${rowMenuHtml('livraison', '<button type="button" data-click="livraison-hors-commande">Ajouter un article hors commande</button>')}
@@ -14025,7 +14148,7 @@ const showLivraisonDetails = (id) => {
             ${livraison.notes ? `<p class="bl-notes"><strong>Notes internes</strong>${escapeHtml(livraison.notes)}</p>` : ''}
 
             <section class="trace-section">
-                <h4 class="trace-section-title">Traçabilité interne <span class="trace-section-hint">non imprimée sur le BL</span></h4>
+                <h4 class="trace-section-title">Traçabilité interne</h4>
                 ${blTraceAlertHtml(totalItems, totalTrace, forcedTraceCount)}
                 ${lotsTraces.length ? blLotsHtml(lotsTraces, aromes) : '<p class="text-muted">Aucune trace de lot enregistrée pour ce BL.</p>'}
             </section>
@@ -14196,7 +14319,7 @@ const showPrepareBLExportModal = (livraisonId) => {
             ${blHeroHtml(livraison, client, commande)}
 
             <section class="trace-section">
-                <h4 class="trace-section-title">Caisses IFCO livrées <span class="trace-section-hint">imprimées sur le BL</span></h4>
+                <h4 class="trace-section-title">Caisses IFCO livrées</h4>
                 <div class="bl-counters">
                     ${compteur('blCaissesVertes', 'Caisses vertes', parseInt(livraison.caissesVertesLivrees, 10) || 0, 'verte')}
                     ${compteur('blCaissesNoires', 'Caisses noires', parseInt(livraison.caissesNoiresLivrees, 10) || 0, 'noire')}
@@ -15345,8 +15468,7 @@ const productionCommandesHtml = (plan) => {
             </div>
             ${aProduire.length === 0
                 ? `<div class="commande-empty">${escapeHtml(plan.commandes.length ? 'Le stock vendable couvre toutes les commandes ouvertes.' : 'Aucune commande ouverte.')}</div>`
-                : `<div class="stock-group"><ul class="prod-cmd-list" id="productionCommandeList">${aProduire.map(row).join('')}</ul></div>
-                   <p class="stock-hint">Une commande décochée sort du plan mais garde le stock qui lui est réservé (par date de livraison).</p>`}
+                : `<div class="stock-group"><ul class="prod-cmd-list" id="productionCommandeList">${aProduire.map(row).join('')}</ul></div>`}
         </section>`;
 };
 
@@ -15501,7 +15623,6 @@ const productionMatieresHtml = (plan) => {
             ${lignes.length
                 ? `<div class="stock-group"><ul class="prod-mat-list">${lignes.map(row).join('')}</ul></div>`
                 : '<div class="commande-empty">Aucun article de l\'inventaire n\'est concerné (recettes ou contenants absents).</div>'}
-            <p class="stock-hint">Recette × litres + ${escapeHtml(String(Math.round((CONSTANTS.PRODUCTION_LOSS - 1) * 1000) / 10).replace('.', ','))} % de pertes, bouteilles vides et bouchons (+${Math.round((CONSTANTS.BOUCHON_MARGIN - 1) * 100)} %) : exactement ce qui sera déduit de l'inventaire à la validation.</p>
         </section>`;
 };
 
@@ -15524,7 +15645,6 @@ const productionResultsHtml = (plan) => {
                 <span class="stock-section-meta">${escapeHtml(`${dashPlural(plan.brassins.length, 'arôme')} · par échéance`)}</span>
             </div>
             ${plan.brassins.map(productionBrassinHtml).join('')}
-            <p class="stock-hint">Volume brassé arrondi au demi-litre supérieur. « Produite » enregistre un récipient ; « Produire tout » le brassin entier.</p>
         </section>
         ${productionMatieresHtml(plan)}`;
 };
@@ -15624,8 +15744,7 @@ const productionJournalHtml = () => {
                 <a href="#historique" class="btn btn-sm btn-secondary stock-section-action">Tout l'historique</a>
             </div>
             ${visibles.length
-                ? `<div class="stock-group"><ul class="stock-lot-list">${visibles.map(row).join('')}</ul></div>
-                   <p class="stock-hint">Une production se défait tant que ses bouteilles sont toutes en stock : le lot est retiré, l'inventaire et les commandes reviennent à leur état d'avant.</p>`
+                ? `<div class="stock-group"><ul class="stock-lot-list">${visibles.map(row).join('')}</ul></div>`
                 : '<div class="commande-empty">Aucune production enregistrée.</div>'}
         </section>`;
 };
@@ -15922,7 +16041,7 @@ const showProductionModal = (brassinKey, recipientIndex = null) => {
                                 <input type="number" min="0" step="1" inputmode="numeric" data-format-id="${escapeHtml(String(f.id))}" value="${prefill[f.id] || 0}">
                             </label>`).join('') : '<p class="text-muted">Aucun format actif</p>'}
                     </div>
-                    <p class="stock-hint" id="prodModalTotal" aria-live="polite"></p>
+                    <p class="prod-modal-total" id="prodModalTotal" aria-live="polite"></p>
                 </div>
                 <div>
                     <h4 class="prod-modal-h">À peser pour ${escapeHtml(prodFmtL(volume))}</h4>
@@ -15960,7 +16079,7 @@ const majProductionModal = () => {
     if (total) {
         total.textContent = s.totalBouteilles
             ? `${twinFmtInt(s.totalBouteilles)} bt = ${prodFmtL(s.litresProduit)}${s.litresProduit > capacite + 1e-9 ? ` : plus que la capacité des récipients (${capacite} L)` : ''}`
-            : 'Saisissez au moins une quantité.';
+            : '';
         total.classList.toggle('is-danger', s.litresProduit > capacite + 1e-9);
     }
 
@@ -16002,8 +16121,7 @@ const majProductionModal = () => {
                     <input type="checkbox" data-commande-id="${escapeHtml(commande.id)}" ${avant.get(commande.id) === false ? '' : 'checked'}>
                     <span>#${escapeHtml(getCommandeNumero(commande))} · ${escapeHtml(getClientLabel(client))}</span>
                     ${prodEcheanceHtml(commande.dateLivraison)}
-                </label></li>`).join('')}</ul>
-               <p class="stock-hint">Les commandes cochées passent « produite » : leurs bouteilles leur sont réservées.</p>`
+                </label></li>`).join('')}</ul>`
             : '<p class="text-muted">Aucune commande en attente ne devient entièrement couverte.</p>';
     }
 };
@@ -16650,8 +16768,7 @@ const copierListeACommander = () => {
     }
     const texte = `À commander (${formatDate(new Date())})\n${lignes.join('\n')}`;
     const fenetre = () => modal.show('Liste à commander', `
-        <textarea class="inv-copy-text" rows="${Math.min(12, lignes.length + 2)}" readonly>${escapeHtml(texte)}</textarea>
-        <small class="text-muted">Sélectionnez le texte pour le copier.</small>`,
+        <textarea class="inv-copy-text" rows="${Math.min(12, lignes.length + 2)}" readonly>${escapeHtml(texte)}</textarea>`,
         '<button class="btn btn-secondary" data-click="close-modal">Fermer</button>');
     if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(texte)
@@ -16851,7 +16968,6 @@ const showReceptionModal = (itemId = '', retour = '', fournisseurPrecedent = '')
                 <div class="form-group">
                     <label for="recLot">N° de lot du fournisseur</label>
                     <input type="text" id="recLot" name="numLot" maxlength="60" autocomplete="off" placeholder="Ex. H-2026-044">
-                    <small class="text-muted">Inscrit sur le sac ou le carton. Il relie l'ingrédient aux lots de bouteilles produits avec.</small>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
@@ -17097,7 +17213,6 @@ const showInventaireModal = (categorie, id = null) => {
             <div class="form-group">
                 <label for="invNom">Nom</label>
                 <input type="text" id="invNom" name="nom" value="${escapeHtml(item?.nom || '')}" maxlength="80" required>
-                ${cat === 'equipement' ? '' : '<small class="text-muted">Les ingrédients sont suivis par lot fournisseur ; les bouteilles, bouchons et étiquettes sont comptés sans lot.</small>'}
             </div>
             <div class="form-row">
                 ${item ? '' : `<div class="form-group">
@@ -17109,13 +17224,11 @@ const showInventaireModal = (categorie, id = null) => {
                     <select id="invUnite" name="unite" required ${uniteBloquee ? 'disabled' : ''}>
                         ${unites.map(u => `<option value="${u}" ${displayUnit(item?.unite) === displayUnit(u) ? 'selected' : ''}>${u}</option>`).join('')}
                     </select>
-                    ${uniteBloquee ? '<small class="text-muted">Unité fixée tant que des lots sont en stock.</small>' : ''}
                 </div>
             </div>
             ${cat === 'equipement' ? '' : `<div class="form-group">
                 <label for="invSeuil">Seuil d'alerte</label>
                 <input type="number" id="invSeuil" name="seuilAlerte" value="${safeNumAttr(item?.seuilAlerte || 0)}" min="0" step="any">
-                <small class="text-muted">L'article passe « à commander » quand le stock, après la production prévue, descend sous ce seuil.</small>
             </div>`}
         </form>
     `, `
@@ -17358,9 +17471,6 @@ const renderParametres = () => {
                     <button class="btn btn-secondary" onclick="document.getElementById('importDataFile').click()">📂 Restaurer depuis JSON</button>
                     <input type="file" id="importDataFile" accept=".json" style="display:none" onchange="importAllData(event)">
                 </div>
-                <p class="text-muted" style="font-size: 12px; padding: 0 12px 12px;">
-                    La sauvegarde inclut les 12 tables et les modifications en conflit conservées pour vérification. La restauration remplace les données sur tous les appareils : elle affiche d'abord un bilan à confirmer et télécharge une sauvegarde de l'état actuel.
-                </p>
                 ${syncConflicts.length > 0 ? `<p class="text-warning" style="padding: 0 12px 12px;">${syncConflicts.length} modification(s) en conflit nécessitent une vérification. Sauvegardez-les avant toute intervention ; elles ne seront pas appliquées automatiquement.</p>` : ''}
             </div>
 
@@ -17373,9 +17483,6 @@ const renderParametres = () => {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                         Déconnexion
                     </button>
-                    <p style="margin-top: 8px; font-size: 12px; color: var(--text-light);">
-                        Fermer la session et revenir à l'écran de verrouillage.
-                    </p>
                 </div>
             </div>
         </div>
@@ -17440,7 +17547,12 @@ const saveEmploye = (event, id) => {
         const employes = DB.get('employees');
         if (id) {
             const index = employes.findIndex(e => e.id === id);
-            employes[index] = employe;
+            if (index === -1) {
+                showToast('Cet employé a été supprimé sur un autre appareil', 'error');
+                return;
+            }
+            // Conserver les champs que le formulaire n'affiche pas
+            employes[index] = { ...employes[index], ...employe };
         } else {
             employes.push(employe);
         }
@@ -18089,11 +18201,10 @@ const showClientModal = (id = null) => {
                         <input type="text" id="client_nom" name="nom" autocomplete="name" value="${escapeHtml(client?.nom || '')}" placeholder="Personne de contact">
                     </div>
                 </div>
-                <small class="text-muted">La société ou le nom suffit.</small>
             </fieldset>
 
             <fieldset class="form-section">
-                <legend class="trace-section-title">Adresse et contact <span class="trace-section-hint">imprimés sur le BL</span></legend>
+                <legend class="trace-section-title">Adresse et contact</legend>
                 <div class="form-group">
                     <label for="client_adresse">Adresse</label>
                     <input type="text" id="client_adresse" name="adresse" autocomplete="street-address" value="${escapeHtml(client?.adresse || '')}" placeholder="Rue et numéro">
@@ -18111,14 +18222,13 @@ const showClientModal = (id = null) => {
             </fieldset>
 
             <fieldset class="form-section">
-                <legend class="trace-section-title">Tarifs <span class="trace-section-hint">25 cl · 50 cl · 1 l</span></legend>
+                <legend class="trace-section-title">Tarifs</legend>
                 <div class="choice-cards">${categories}</div>
                 <div class="form-row form-row--3">
                     ${prix('prix25cl', 'Prix 25 cl')}
                     ${prix('prix50cl', 'Prix 50 cl')}
                     ${prix('prix100cl', 'Prix 1 l')}
                 </div>
-                <small class="text-muted">Choisir une catégorie remplit les prix ; modifier un prix passe en « Personnalisé ».</small>
             </fieldset>
 
             <fieldset class="form-section">
@@ -18136,7 +18246,6 @@ const showClientModal = (id = null) => {
                         </div>
                     </div>
                 </div>
-                <small class="text-muted">Les lots dont la DLV arrive avant ce délai ne sont pas proposés pour ce client.</small>
             </fieldset>
 
             <label class="switch-row">
