@@ -6,7 +6,7 @@ Guidance for agentic coding agents working in this repository.
 
 ThéCol Gestion is a single-page business management app for a cold tea company. The entire UI is in French. It is hosted on GitHub Pages with **no build step, no bundler, and no framework**. The application logic relies entirely on vanilla JavaScript, HTML, and CSS.
 
-**Current Version:** v13.1
+**Current Version:** v13.3
 
 ## 1. Build, Lint, and Test Commands
 
@@ -57,7 +57,7 @@ The `navigateTo(page)` function looks up the page name in a views map and calls 
 - `jumeau` - Jumeau numérique 3D de l'atelier (accueil depuis v12.0), rendu « maquette » des vraies pièces depuis v12.3 : labo (cuves, plaques), stock, expédition, réserve et chambre froide (consommables), vestiaire (équipe) ; inspecteur avec actions directes, menu de qualité du rendu
 - `dashboard` - Cockpit du jour (v12.6) : tuiles cliquables, priorités, livraisons sur 7 jours, production à lancer sur les postes de l'atelier, équipe, tâches ; puis « Chiffres & tendances » (CA ou bouteilles livrés sur 12 semaines / 12 mois, meilleurs clients, ventes par arôme). Lecture seule, réutilise `buildTwinModel()`
 - `stock` - Stock (v12.7) : bandeau « À traiter », tableau arôme × format des bouteilles libres / réservées / à produire (`buildStockOverview`), lots groupés par arôme × format triés par DLV, lots hors vente à part ; historique de production, statuts DLV/DLC
-- `pointage` - Saisie des heures employés avec tabs: pointage, historique, stats, employés
+- `pointage` - Pointage (v13.3) : heures saisies après coup, journée par journée (`showPointageJourModal`, plusieurs plages par jour, chevauchements refusés) ; vue Semaine (tableau personnes × jours, détail des plages) et vue Mois (total, journées, cumul annuel, export Excel) ; départs oubliés « à clôturer » ; Arrivée / Départ en direct (`clockInEmployee` / `clockOutEmployee`)
 - `commandes` - CRUD commandes clients avec système de statuts (en_attente, produite, livrée, annulée) ; livraison v13.0 : lots pré-remplis par la règle d'attribution commune (`planAttributionCommandes`, durée de vie minimale par client), livraison partielle avec reliquat, bouteilles en plus (⋯) facturées ou offertes, contrôle du stock avant « Marquer produite »
 - `livraisons` - Gestion des Bulletins de Livraison (BL) avec export Excel et PDF (design fidèle au template depuis v11.10)
 - `production` - Planificateur de production avec calcul automatique des ingrédients et gestion des cuves

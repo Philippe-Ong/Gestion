@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v13.1**
+**v13.3**
 
 ## Adresse
 
@@ -27,12 +27,11 @@ Application de gestion pour votre entreprise de thé froid.
 - Lots groupés par arôme × format, triés par DLV ; lots hors vente à part
 
 ### Pointage
-- Saisie des heures de travail
-- Horloge temps réel
-- Historique des pointages avec filtres
-- Statistiques: heures totales, jours travaillés, moyenne/jour
-- Graphique de répartition par employé
-- Export Excel
+- Saisie des heures après le travail : une ou plusieurs plages par jour (début, fin, pause, note)
+- Semaine : tableau personnes × jours, une case ouvre la journée ; détail des plages
+- Mois : heures, journées, moyenne et cumul depuis janvier par personne
+- Export Excel du mois (synthèse et détail)
+- Arrivée / départ en direct, départs oubliés signalés
 
 ### Commandes
 - Gestion des commandes clients
@@ -118,6 +117,18 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v13.3
+
+Refonte du pointage, pensée pour remplir ses heures après le travail.
+
+- **🗓️ Semaine** — Un tableau personnes × jours avec le total de chacun et de l'équipe. Touchez une case pour saisir ou corriger la journée ; les jours à venir ne sont pas saisissables. En dessous, les plages de la semaine jour par jour, dans un bloc repliable, avec Modifier et Supprimer dans le menu ⋯.
+- **✍️ Une journée en une fois** — La fenêtre « Heures de travail » montre toutes les plages d'une personne pour un jour (ex. 08:30–12:00 et 13:00–17:15), avec la pause et une note facultatives, la durée de chaque plage et le total. Entrée enregistre ; l'employé choisi est retenu sur l'appareil.
+- **🛡️ Contrôles** — Une plage qui en chevauche une autre (y compris une plage de nuit de la veille), une pause plus longue que la plage ou un jour à venir sont refusés avec un message clair. L'enregistrement ne touche qu'à la journée ouverte : une saisie faite entre-temps sur un autre appareil n'est pas effacée.
+- **📅 Mois** — Heures, journées travaillées, moyenne et cumul depuis janvier par personne, bande des jours et détail des journées. **Exporter Excel** remplace le CSV : synthèse et détail du mois, heures en h:mm et en décimal.
+- **⏱️ En direct, toujours possible** — « Pointer maintenant », le tableau de bord, le jumeau et la palette pointent l'arrivée et le départ. Une plage restée ouverte plus de 16 h devient un départ oublié, signalé par un « ! » dans le tableau de la semaine et dans les priorités du tableau de bord, au lieu de bloquer l'arrivée du lendemain.
+- **👤 Employés** — Modifier un employé ne perd plus les champs que le formulaire n'affiche pas, et ne recrée plus un employé supprimé sur un autre appareil.
+- **🧹 Interface épurée** — Plus aucun texte d'aide dans l'application : les phrases grises sous les tableaux (Stock, Production, Pointage), les notes sous les champs (lots, inventaire, clients, paramètres), la légende du graphique du tableau de bord, l'aide aux gestes et les descriptions du menu Qualité du jumeau 3D disparaissent.
 
 ### Nouveautés v13.1
 
