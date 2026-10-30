@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v13.1
+**Version:** v13.2
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -393,7 +393,12 @@ validation, y compris pour les anciennes données locales.
   "commandeId": "string (RESTAURE- uniquement, v11.12)",
   "commandeNumero": "string (RESTAURE- uniquement, v11.12)",
   "numeroBL": "string (RESTAURE- uniquement, v11.12 — n° du BL supprimé, jamais réattribué)",
-  "dateLivraison": "datetime ou date (RESTAURE- uniquement, v11.12 — date de la livraison annulée)"
+  "dateLivraison": "datetime ou date (RESTAURE- uniquement, v11.12 — date de la livraison annulée)",
+  "productionId": "string (PROD- du planificateur, v12.9 — commun aux formats d'une même production)",
+  "ingredients": "[{ itemId, article, unite, numLot, fournisseur, quantite }] (PROD-, v12.9 ; itemId v13.2)",
+  "litres": "number (PROD-, v13.2 — litres en bouteilles de toute la production)",
+  "contenants": "[{ itemId, article, unite, quantite }] (PROD-, v13.2 — bouteilles vides et bouchons déduits)",
+  "commandes": "[{ id, numero }] (PROD-, v13.2 — commandes passées « produite » par cette production)"
 }
 ```
 
@@ -422,13 +427,13 @@ Les entrées d'historique sont créées par `buildLotHistoryEntry(prefixe, lot, 
 - Stock
 - Pointage (heures)
 - Commandes
-- Production (planificateur)
+- Production (plan, atelier, matières, journal)
 - Paramètres (employés, aromes, recettes, clients)
 
 ### 3.0 Jumeau numérique 3D (v12.0)
 Vue 3D de l'atelier, reconstruite par `buildTwinModel()` (lecture seule) à chaque rendu de `renderJumeau()`. Les re-rendus (snapshots V11, actions) mettent à jour la scène sur place sans recréer le contexte WebGL.
 - **Zones** (`TWIN_ZONES`) : Production (labo : cuves et plaques), Entrepôt (piles de casiers arôme × format), Expédition (commandes `en_attente`/`produite`), Consommables (réserve et chambre froide, articles d'inventaire `consommable`), Équipe (employés actifs, présents = pointage du jour sans `heureFin`).
-- **Équipement réel (v12.1)** : `CONSTANTS.ATELIER_CUVES` cuves de `CUVE_MAX_L` (4 × 25 L) et une casserole par plaque à induction (`CONSTANTS.ATELIER_CASSEROLES_L` = [9, 4] → plaque 1 : 9 L, plaque 2 : 4 L). Les litres à produire par arôme (Σ max(0, demande des commandes actives − stock vendable à leur date de livraison, cf. `createStockPool`) × contenance) sont découpés par `getProductionRecipients()` (même logique que le planificateur), puis affectés aux postes libres par échéance du manque — la première livraison dont une ligne n'est pas couverte par le stock (v12.6 ; auparavant la première commande contenant l'arôme, même couverte) ; le surplus forme la « prochaine fournée ». Items : `equip:cuve-N` / `equip:casserole-N` (statut `planned` ou `idle`), détail dans `model.production`.
+- **Équipement réel (v12.1)** : `CONSTANTS.ATELIER_CUVES` cuves de `CUVE_MAX_L` (4 × 25 L) et une casserole par plaque à induction (`CONSTANTS.ATELIER_CASSEROLES_L` = [9, 4] → plaque 1 : 9 L, plaque 2 : 4 L). Depuis v13.2, le jumeau lit le plan commun `buildProductionPlan()` (manques de `planAttributionCommandes`, brassins par échéance du manque, `planifierAtelier`) : la 1re fournée occupe les postes, les récipients des fournées suivantes sont « en attente ». Items : `equip:cuve-N` / `equip:casserole-N` (statut `planned` ou `idle`), détail dans `model.production`.
 - **Plan de l'étage (v12.3)** : 1 unité = 1 m ; étage d'environ 24 × 16 m (`TWIN_PLAN`) posé sur un rez-de-chaussée vitré, d'après les photos de l'atelier : labo de production, laverie et stock côté fenêtres, couloir central, réserve avec chambre froide, vestiaire-bureau et expédition (monte-charge). Les cloisons (`TWIN_PARTITIONS`) sont coupées à 1,10 m avec un chapeau sombre ; la partie haute fenêtrée de chaque façade (`TWIN_FACADES`) est masquée quand la caméra est du côté extérieur de ce mur (`twinUpdateCutaways`).
 - **Modèles 3D (v12.3)** : paillasse de labo (caissons blancs, lisse vert-de-gris à clips rouges, plan en résine sauge, évier et robinetterie de labo), îlot d'embouteillage, armoires hautes avec cartons d'Einkochautomat ; cuves 25 L inox à robinet et thermostat posées sur la paillasse (Ø 38 cm, `TWIN_CUVE`, couvercle relevé et thé visible si planifiée), casseroles 9 L / 4 L (`TWIN_POTS`) sur plaques à induction avec vapeur ; stock en piles de casiers noirs (8 par couche, ~1,9 m au plus), bouteilles en verre au thé ambré, étiquette ThéCol par arôme et bouchon noir (`twinBottleSpec()`) ; commandes en caisses vertes ajourées sur chariots bleus avec bon de livraison (bouteilles visibles si produite) ; consommables rangés par nature (`twinBinKind`) sur étagères inox (ingrédients, chambre froide) ou rayonnages noirs (emballages) : boîtes hermétiques dont le niveau suit le stock, sacs kraft, packs de bouteilles sous film, cartons de bouchons, rouleaux d'étiquettes, bidons ; mannequins en blouse, charlotte, gants et tablier à la couleur de l'employé ; absent = blouse suspendue au portant du vestiaire. Les pièces répétées sont instanciées (`InstancedMesh`) et la sélection passe par des volumes invisibles hors scène.
 - **Statuts** (`getLotStatus`) : lot expiré (DLC) ou invendable (DLV dépassée) → halo rouge pulsé ; DLV proche → halo orange pâle ; stock < demande → halo orange, emplacement vide hachuré si plus rien ; commande en retard (date passée) ou urgente (`en_attente`, ≤ 3 j) → gyrophare ; consommable ≤ seuil → critique, ≤ 2 × seuil → bas (bande d'état et voyant sur l'étiquette de rayon).
@@ -449,7 +454,7 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - **Tuiles** (liens vers la page concernée) : À produire (litres, bouteilles, postes occupés) ; Livraisons · 7 j (commandes `en_attente` / `produite` en retard ou dues dans les 7 jours ; retards, sinon prêtes / total) ; Stock vendable (lots expirés, invendables ou à DLV proche, sinon bouteilles produites sur 7 jours d'après les entrées `PROD-`) ; Équipe (sur place / effectif actif, heures pointées du jour) ; Livré ce mois (CA des commandes livrées depuis le 1er, comparé aux mêmes jours du mois précédent ; en bouteilles quand aucun tarif n'est connu).
 - **Priorités** : alertes du jumeau (commandes en retard ou urgentes, lots expirés / invendables / DLV proche, consommables sous le seuil ou bas) et pointages restés ouverts les jours précédents, triés critique → attention → à surveiller (icône + libellé, jamais la couleur seule) ; 6 visibles puis « Voir N autres ». Chaque ligne ouvre l'action existante : `show-commande-details`, `twin-goto-stock` (stock filtré), `show-inventaire-modal`, `cloturer-pointage`. Les besoins de production ont leur propre carte.
 - **Livraisons · 7 jours** : bande des 7 jours (commandes et bouteilles par jour ; un jour ouvre Commandes filtrée sur ce jour via `weekCalendarSelectedDate`) puis les 6 prochaines commandes, retards en tête.
-- **Production à lancer** : les postes de l'atelier (4 cuves, 2 casseroles) remplis à la couleur de l'arôme selon le plan du jumeau, puis par arôme : litres, bouteilles, postes (ou « En attente »), recette manquante, échéance du manque et détail par format ; « Planifier » ouvre le planificateur.
+- **Production à lancer** : les postes de l'atelier (4 cuves, 2 casseroles) remplis à la couleur de l'arôme selon le plan du jumeau, puis par arôme : litres, bouteilles, postes (ou « Fournée N »), recette manquante, échéance du manque et détail par format ; « Planifier » ouvre le planificateur.
 - **Équipe** : pointer l'arrivée ou le départ (`clockInEmployee` / `clockOutEmployee`).
 - **À faire** : tâches (`todos`) ; « Effacer les terminées » demande confirmation et relit la table après l'attente. La saisie en cours et le focus clavier survivent aux re-rendus temps réel.
 - **Chiffres & tendances** : commandes livrées, datées par `dateLivraisonEffective` (repli sur `dateLivraison`) ; période 12 semaines (lundi → dimanche) ou 12 mois et mesure CA ou bouteilles (CA désactivé sans tarif), préférences locales `thecol_filter_dash_periode` / `thecol_filter_dash_mesure`. Chiffres de la fenêtre : CA (livraisons sans tarif signalées), bouteilles livrées (+ ventes directes `VENTE-`), livraisons, panier moyen, bouteilles produites (`PROD-`). Histogramme à une série (période en cours plus claire ; infobulle au survol, au toucher ou au clavier avec ← → ; tableau « Voir les données »), meilleurs clients (5) et ventes par arôme (6, part en %).
@@ -480,13 +485,15 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 - Statut modifiable
 - **« ✓ Stock » (v12.4) :** passe en « produite » les commandes en attente couvertes par le stock libre, par date de livraison. Les bouteilles des commandes déjà « produites » (pas encore livrées, donc toujours dans les lots) leur restent réservées et ne comptent pas comme libres.
 
-### 3.5 Planificateur de Production
-- Sélectionner période (commandes à produire)
-- **Sélection optionnelle** des commandes à inclure (panneau dépliant avec cases à cocher, « Tout sélectionner » / « Tout désélectionner »)
-- Calcul automatique:
-  - Litres par arôme nécessaires
-  - Ingrédients nécessaires par recette
-- Générer liste de production
+### 3.5 Production (v13.2)
+- **Deux modes** (`thecol_filter_productionMode`) : « Commandes » (auto) et « Manuel » (bouteilles saisies pour le stock).
+- **Plan commun** `buildProductionPlan()` : utilisé par la page, le tableau de bord (« Production à lancer ») et le jumeau 3D. En mode auto, les bouteilles à produire sont les manques de `planAttributionCommandes` (commandes « produites » d'abord, puis par date de livraison, lots vendables à la livraison, `dureeVieMinJours` du client) — la même règle que la page Stock.
+- **Commandes à couvrir** : seules les commandes avec un manque sont listées, avec case à cocher. Une commande décochée sort du plan mais garde le stock qui lui est réservé.
+- **Brassins** : un par arôme, triés par échéance (première livraison non couverte). Volume brassé = litres en bouteilles arrondis au demi-litre supérieur, découpé par `getProductionRecipients()`. Les bouteilles de chaque format sont réparties entre récipients au prorata des litres (plus forts restes, total exact). Curseur par récipient (les autres compensent).
+- **Planning de l'atelier** (`planifierAtelier`) : récipients placés sur `ATELIER_CUVES` cuves et les casseroles `ATELIER_CASSEROLES_L`, fournée après fournée (premier poste libre de la première fournée qui a de la place ; une casserole sans plaque libre prend une cuve libre).
+- **Matières nécessaires** (`controlerMatieresProduction`) : la déduction réelle (`deduireInventaireProduction` : recette × litres × `PRODUCTION_LOSS`, bouteilles vides, bouchons + `BOUCHON_MARGIN`) simulée sur une copie de l'inventaire, brassin après brassin ; besoin, stock, reste ou manque par article.
+- **Validation** (`showProductionModal` → `finaliserProductionFormats`) : un récipient (« Produite ») ou tout le brassin (« Produire tout »). La fenêtre affiche postes, n° de lot et DLV/DLC prévus, bouteilles modifiables, ingrédients à peser, déduction d'inventaire en direct et les commandes en attente que la production rend entièrement couvertes (`commandesPretesApresProduction`, attribution rejouée avec les lots simulés) : celles cochées passent « produite ». En mode manuel, les quantités produites sortent de la saisie.
+- **Journal des productions** (`getProductionsJournal`) : entrées `PROD-` groupées par `productionId` (12 dernières). « Annuler la production » (menu ⋯, `annulerProduction`) tant que toutes les bouteilles sont encore dans leurs lots et qu'aucune commande liée n'est livrée : lots diminués (supprimés à 0), ingrédients rendus à leurs lots fournisseur, contenants rendus, commandes liées remises « en attente », entrées `PROD-` retirées. Les productions antérieures à v13.2 (sans `contenants`) et les lots saisis à la main ne s'annulent pas.
 
 ### 3.6 Paramètres
 - **Employés:** CRUD, activer/désactiver
@@ -534,22 +541,11 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 ## 5. Fonctionnalités clés
 
 ### Production Planner
-1. Sélectionner date de commande(start/end)
-2. **Sélection optionnelle des commandes :** panneau dépliant listant toutes les commandes éligibles (non livrées, non annulées) avec cases à cocher individuelles, boutons « Tout sélectionner » / « Tout désélectionner ». Par défaut, toutes les commandes éligibles sont incluses.
-3. Agréger les commandes sélectionnées de la période
-4. Pour chaque arôme:
-   - Calculer total bouteilles par format
-   - Convertir en litres
-   - Appliquer recette pour ingrédients
-5. Répartir les litres par récipients:
-   - Jusqu'à 25L: cuve 25L partielle ou pleine
-   - Reste jusqu'à 4L: casserole 4L
-   - Reste jusqu'à 9L: casserole 9L
-   - Reste supérieur à 9L: cuves 25L équilibrées
-6. Afficher résumé:
-   - Bouteilles par arôme/format
-   - Litres totaux par arôme
-   - Ingrédients requis
+Voir §3.5 (v13.2). Répartition d'un brassin en récipients (`getProductionRecipients`) :
+- Jusqu'à 25L: cuve 25L partielle ou pleine
+- Reste jusqu'à 4L: casserole 4L
+- Reste jusqu'à 9L: casserole 9L
+- Reste supérieur à 9L: cuves 25L équilibrées
 
 7. **Déduction des bouchons :** Lors de la confirmation de production, les bouchons sont déduits de l'inventaire par taille :
    - **"Bouchons 25cl"** pour les formats dont la contenance est < 50 cl
