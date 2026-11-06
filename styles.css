@@ -3512,7 +3512,8 @@ input[type="checkbox"] {
 
 /* Plages de la semaine : bloc repliable, présenté comme « Équipement » dans l'Inventaire */
 .ptg-plages { margin-bottom: 22px; }
-.ptg-plages-summary {
+.ptg-plages-summary,
+.inv-equip-summary {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -3524,9 +3525,12 @@ input[type="checkbox"] {
     font-weight: 700;
     color: var(--text);
 }
-.ptg-plages-summary::-webkit-details-marker { display: none; }
-.ptg-plages-summary::after { content: '▸'; margin-left: auto; color: var(--text-light); transition: transform 0.15s; }
-.ptg-plages[open] .ptg-plages-summary::after { transform: rotate(90deg); }
+.ptg-plages-summary::-webkit-details-marker,
+.inv-equip-summary::-webkit-details-marker { display: none; }
+.ptg-plages-summary::after,
+.inv-equip-summary::after { content: '▸'; margin-left: auto; color: var(--text-light); transition: transform 0.15s; }
+.ptg-plages[open] .ptg-plages-summary::after,
+.inv-equip[open] .inv-equip-summary::after { transform: rotate(90deg); }
 
 /* Listes : en cours, plages de la semaine (total du jour sur la ligne du titre, même sur téléphone) */
 .stock-group-head.ptg-day-head { flex-wrap: nowrap; }
@@ -5224,21 +5228,6 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 .inv-order-foot { display: flex; justify-content: flex-end; padding: 8px 14px; border-top: 1px solid var(--border-light); }
 
 .inv-equip { margin-bottom: 14px; }
-.inv-equip-summary {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 36px;
-    margin-bottom: 10px;
-    list-style: none;
-    cursor: pointer;
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text);
-}
-.inv-equip-summary::-webkit-details-marker { display: none; }
-.inv-equip-summary::after { content: '▸'; margin-left: auto; color: var(--text-light); transition: transform 0.15s; }
-.inv-equip[open] .inv-equip-summary::after { transform: rotate(90deg); }
 .inv-add-equip { margin-bottom: 18px; }
 
 /* Fenêtres : ajuster, lots d'un ingrédient, réception */

@@ -1152,6 +1152,13 @@ CLICK_HANDLERS['stock-select-cell'] = (el) => selectStockCell(el.getAttribute('d
 CLICK_HANDLERS['stock-focus'] = (el) => toggleStockFocus(el.getAttribute('data-value') || '');
 CLICK_HANDLERS['stock-goto-production'] = () => { window.location.hash = '#production'; };
 CLICK_HANDLERS['stock-goto-hors-vente'] = () => showStockHorsVente();
+CHANGE_HANDLERS['update-lot-dates'] = (el) => {
+    const form = el.form;
+    if (!form || !el.value) return;
+    const dates = calculateDates(el.value);
+    form.elements.dlv.value = dates.dlv;
+    form.elements.dlc.value = dates.dlc;
+};
 CLICK_HANDLERS['show-lot-trace'] = (el) => showLotTraceModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['sell-lot'] = (el) => showVendreModal(el.getAttribute('data-id'));
 CLICK_HANDLERS['edit-lot'] = (el) => showEditLotModal(el.getAttribute('data-id'));
@@ -2726,89 +2733,72 @@ const v11OverlayQueueOnCache = () => {
     }
 };
 
-// --- Dynamic Firebase init (retryable) ---
-// Fallback utilisé quand le module script d'index.html n'a pas pu se charger
-// (réseau lent, cache manquant). Configure à la fois Firestore et Auth pour
-// garantir que le callback onAuthStateChanged restaure la session persistée.
-// N'appelle JAMAIS initializeApp si une app existe déjà (getApps/getApp).
-// Ne montre JAMAIS le bouton Sync — seul le callback auth le fait.
+const configureFirebase = (appSdk, firestoreSdk, authSdk) => {
+    if (window.firebaseDb && window.firebaseAuth) return;
+    const { initializeApp, getApps, getApp } = appSdk;
+    const {
+        getFirestore, doc, setDoc, getDoc, getDocs, collection,
+        onSnapshot, deleteDoc, writeBatch, runTransaction
+    } = firestoreSdk;
+    const {
+        getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged,
+        setPersistence, browserLocalPersistence
+    } = authSdk;
+
+    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+    onAuthStateChanged(auth, (user) => {
+        if (!user) {
+            resetAppSession();
+            return;
+        }
+
+        window.firebaseReady = true;
+        unlockShell();
+        const loginScreen = document.getElementById('loginScreen');
+        const loginPassword = document.getElementById('loginPassword');
+        const loginError = document.getElementById('loginError');
+        const loginBusy = document.getElementById('loginBusy');
+        const loginBtn = document.getElementById('loginBtn');
+        const syncBtn = document.getElementById('syncBtn');
+        if (loginScreen) loginScreen.style.display = 'none';
+        if (loginPassword) loginPassword.value = '';
+        if (loginError) { loginError.textContent = ''; loginError.style.display = 'none'; }
+        if (loginBusy) loginBusy.style.display = 'none';
+        if (loginBtn) loginBtn.style.display = 'inline-flex';
+        if (syncBtn) syncBtn.style.display = 'inline-flex';
+        window.startApp();
+    });
+
+    window.firebaseApi = {
+        doc, setDoc, getDoc, getDocs, collection,
+        onSnapshot, deleteDoc, writeBatch, runTransaction
+    };
+    window.firebaseDb = db;
+    window.firebaseAuth = {
+        signIn: (password) => signInWithEmailAndPassword(auth, FIREBASE_AUTH_EMAIL, password),
+        signOut: () => signOut(auth),
+        isAuthenticated: () => !!auth.currentUser
+    };
+};
+
 window.initFirebase = async (maxRetries = 3) => {
-    if (window.firebaseReady && window.firebaseDb) return true;
+    if (window.firebaseDb && window.firebaseAuth) return true;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            const { initializeApp, getApps, getApp } = await import('https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js');
-            const {
-                getFirestore, doc, setDoc, getDoc, getDocs, collection,
-                onSnapshot, deleteDoc, writeBatch, runTransaction
-            } = await import('https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js');
-            const {
-                getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged,
-                setPersistence, browserLocalPersistence
-            } = await import('https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js');
-
-            const firebaseConfig = {
-                apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
-                authDomain: "thecol-gestion.firebaseapp.com",
-                projectId: "thecol-gestion",
-                storageBucket: "thecol-gestion.firebasestorage.app",
-                messagingSenderId: "882272705805",
-                appId: "1:882272705805:web:542b45499ff27b12a4e444",
-                measurementId: "G-E67CGE3Y57"
-            };
-
-            // Éviter double initializeApp si le module script a déjà créé l'app
-            const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-            const db = getFirestore(app);
-            const auth = getAuth(app);
-            setPersistence(auth, browserLocalPersistence).catch(() => {});
-
-            window.firebaseApi = {
-                doc, setDoc, getDoc, getDocs, collection,
-                onSnapshot, deleteDoc, writeBatch, runTransaction
-            };
-            window.firebaseDb = db;
-
-            // Exposer l'auth si pas déjà fait
-            if (!window.firebaseAuth) {
-                window.firebaseAuth = {
-                    signIn: (password) => signInWithEmailAndPassword(auth, 'gestion@thecol.ch', password),
-                    signOut: () => signOut(auth),
-                    isAuthenticated: () => !!(auth && auth.currentUser)
-                };
-            } else if (typeof window.firebaseAuth.isAuthenticated !== 'function') {
-                // Si l'init module a exposé l'objet avant ce fallback, ajouter
-                // la méthode isAuthenticated en s'appuyant sur cet auth.
-                window.firebaseAuth.isAuthenticated = () => !!(auth && auth.currentUser);
-            }
-
-            // Restaurer la session persistée — ce callback est essentiel pour
-            // que firebaseReady ne devienne true qu'après authentification.
-            // Sans lui, initFirebase contournerait l'écran de verrouillage.
-            // Le bouton Sync n'est affiché que par ce callback, jamais ici.
-            onAuthStateChanged(auth, (user) => {
-                const loginScreen = document.getElementById('loginScreen');
-                const loginLoading = document.getElementById('loginLoading');
-                const loginForm = document.getElementById('loginForm');
-
-                if (user) {
-                    window.firebaseReady = true;
-                    if (loginScreen) { loginScreen.style.display = 'none'; unlockShell(); }
-                    const pwdField = document.getElementById('loginPassword');
-                    if (pwdField) pwdField.value = '';
-                    document.getElementById('loginError')?.removeAttribute('style');
-                    if (typeof window.startApp === 'function') {
-                        window.startApp();
-                    }
-                } else {
-                    resetAppSession();
-                }
-            });
-
-            console.log('Firebase connecté (dynamique avec Auth)');
+            const [appSdk, firestoreSdk, authSdk] = await Promise.all([
+                import('https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js'),
+                import('https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js'),
+                import('https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js')
+            ]);
+            configureFirebase(appSdk, firestoreSdk, authSdk);
             return true;
         } catch (e) {
+            if (window.firebaseDb && window.firebaseAuth) return true;
             console.error('[initFirebase] Tentative ' + (attempt + 1) + '/' + maxRetries + ' échouée:', e);
-            window.firebaseReady = false;
             if (attempt < maxRetries - 1) {
                 await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
             }
@@ -3731,12 +3721,7 @@ const navigateTo = (page) => {
 };
 
 // Render Current View dynamically
-const renderCurrentView = () => {
-    if (!window.firebaseReady || !window._appStarted) return;
-    const hash = window.location.hash.slice(1) || 'jumeau';
-    const page = hash.split('?')[0];
-    navigateTo(page);
-};
+const renderCurrentView = router;
 
 // Global Error Handling
 window.addEventListener('error', (e) => {
@@ -4146,17 +4131,24 @@ const dashKpisHtml = (m) => {
     ].join('');
 };
 
+const dashPrioriteRowHtml = (p) => `
+    <li><button type="button" class="dash-prio dash-prio--${p.level}" ${dashAttrs(p.attrs)}>
+        <span class="dash-prio-icon">${dashIcon(p.icon || DASH_LEVELS[p.level].icon)}</span>
+        <span class="dash-prio-body">
+            <span class="dash-prio-title"><span class="dash-sr">${DASH_LEVELS[p.level].label} : </span>${escapeHtml(p.title)}</span>
+            <span class="dash-prio-text">${escapeHtml(p.text)}</span>
+        </span>
+        <span class="dash-prio-chev">${dashIcon('chevron')}</span>
+    </button></li>`;
+
+const dashAlertesSectionHtml = (items, titleId) => items.length ? `
+    <section class="stock-section" aria-labelledby="${titleId}">
+        <div class="stock-section-head"><h2 class="stock-section-title" id="${titleId}">À traiter</h2></div>
+        <ul class="dash-prio-list">${items.map(dashPrioriteRowHtml).join('')}</ul>
+    </section>` : '';
+
 const dashPrioritesHtml = (m) => {
     const items = m.priorites;
-    const row = (p) => `
-        <li><button type="button" class="dash-prio dash-prio--${p.level}" ${dashAttrs(p.attrs)}>
-            <span class="dash-prio-icon">${dashIcon(DASH_LEVELS[p.level].icon)}</span>
-            <span class="dash-prio-body">
-                <span class="dash-prio-title"><span class="dash-sr">${DASH_LEVELS[p.level].label} : </span>${escapeHtml(p.title)}</span>
-                <span class="dash-prio-text">${escapeHtml(p.text)}</span>
-            </span>
-            <span class="dash-prio-chev">${dashIcon('chevron')}</span>
-        </button></li>`;
     const reste = items.slice(DASH_PRIORITES_MAX);
     return `
         <section class="card dash-panel" aria-labelledby="dashPrioTitle">
@@ -4166,11 +4158,11 @@ const dashPrioritesHtml = (m) => {
             </div>
             <div class="dash-panel-body">
                 ${items.length === 0 ? dashEmptyHtml('check', "Rien d'urgent", 'Aucune commande en retard, aucun lot ni consommable à surveiller.') : `
-                    <ul class="dash-prio-list">${items.slice(0, DASH_PRIORITES_MAX).map(row).join('')}</ul>
+                    <ul class="dash-prio-list">${items.slice(0, DASH_PRIORITES_MAX).map(dashPrioriteRowHtml).join('')}</ul>
                     ${reste.length ? `
                         <details class="dash-more" data-dash-key="prio"${dashOpenAttr('prio')}>
                             <summary>Voir ${dashPlural(reste.length, 'autre priorité', 'autres priorités')}</summary>
-                            <ul class="dash-prio-list">${reste.map(row).join('')}</ul>
+                            <ul class="dash-prio-list">${reste.map(dashPrioriteRowHtml).join('')}</ul>
                         </details>` : ''}
                 `}
             </div>
@@ -9250,21 +9242,7 @@ const stockAlertsHtml = (ov) => {
             attrs: { 'data-click': 'stock-select-cell', 'data-key': stockCellKey(ov.inconnus[0].arome, ov.inconnus[0].format), 'data-force': '1' }
         });
     }
-    if (items.length === 0) return '';
-    const row = (p) => `
-        <li><button type="button" class="dash-prio dash-prio--${p.level}" ${dashAttrs(p.attrs)}>
-            <span class="dash-prio-icon">${dashIcon(p.icon)}</span>
-            <span class="dash-prio-body">
-                <span class="dash-prio-title"><span class="dash-sr">${DASH_LEVELS[p.level].label} : </span>${escapeHtml(p.title)}</span>
-                <span class="dash-prio-text">${escapeHtml(p.text)}</span>
-            </span>
-            <span class="dash-prio-chev">${dashIcon('chevron')}</span>
-        </button></li>`;
-    return `
-        <section class="stock-section" aria-labelledby="stockAlertsTitle">
-            <div class="stock-section-head"><h2 class="stock-section-title" id="stockAlertsTitle">À traiter</h2></div>
-            <ul class="dash-prio-list">${items.map(row).join('')}</ul>
-        </section>`;
+    return dashAlertesSectionHtml(items, 'stockAlertsTitle');
 };
 
 // Tableau arôme × format : bouteilles libres en grand, réservées, à produire, DLV proche
@@ -9584,7 +9562,7 @@ const showNouveauLotModal = () => {
                 </div>
                 <div class="form-group">
                     <label>Date de production</label>
-                    <input type="date" name="dateProduction" value="${prodDate}" onchange="updateLotDates()" required>
+                    <input type="date" name="dateProduction" value="${prodDate}" data-change="update-lot-dates" required>
                 </div>
             </div>
             <div class="form-row">
@@ -9602,15 +9580,6 @@ const showNouveauLotModal = () => {
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
         <button class="btn btn-primary" onclick="saveLot(event)">Créer le lot</button>
     `);
-};
-
-const updateLotDates = () => {
-    const prodDate = document.querySelector('input[name="dateProduction"]').value;
-    if (prodDate) {
-        const dates = calculateDates(prodDate);
-        document.querySelector('input[name="dlv"]').value = dates.dlv;
-        document.querySelector('input[name="dlc"]').value = dates.dlc;
-    }
 };
 
 // Applique/retire un filtre de l'historique (toggle) puis re-rend la page
@@ -11134,7 +11103,7 @@ const showEditLotModal = (lotId) => {
             </div>
             <div class="form-group">
                 <label>Date de production</label>
-                <input type="date" name="dateProduction" value="${escapeHtml(lot.dateProduction)}" onchange="updateEditLotDates()" required>
+                <input type="date" name="dateProduction" value="${escapeHtml(lot.dateProduction)}" data-change="update-lot-dates" required>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -11155,15 +11124,6 @@ const showEditLotModal = (lotId) => {
         <button class="btn btn-secondary" onclick="modal.hide()">Annuler</button>
         <button class="btn btn-primary" data-click="edit-lot-save" data-id="${escapeHtml(lotId)}">Enregistrer</button>
     `);
-};
-
-const updateEditLotDates = () => {
-    const prodDate = document.querySelector('#editLotForm input[name="dateProduction"]').value;
-    if (prodDate) {
-        const dates = calculateDates(prodDate);
-        document.querySelector('#editLotForm input[name="dlv"]').value = dates.dlv;
-        document.querySelector('#editLotForm input[name="dlc"]').value = dates.dlc;
-    }
 };
 
 const saveEditLot = (event, lotId) => {
@@ -15008,10 +14968,8 @@ const deleteLivraison = (id) => {
     });
 };
 
-const getAromeBLName = (nom) => {
+const getAromeBLName = (nom, aromes) => {
     if (!nom) return nom;
-    // Look up canonical display name from DB aromes — accepte tout arôme (actif ou inactif)
-    const aromes = DB.get('aromes') || [];
     const lower = nom.toLowerCase().trim();
     const found = aromes.find(a => a.nom && a.nom.toLowerCase().trim() === lower);
     return found ? found.nom : nom;
@@ -15190,7 +15148,7 @@ const generateBL = async (commandeId) => {
         const f = formats.find(fmt => fmt.id === item.formatId);
         return {
             aromeId: item.aromeId,
-            aromeNom: getAromeBLName(a?.nom) || item.aromeId,
+            aromeNom: getAromeBLName(a?.nom, aromes) || item.aromeId,
             formatId: item.formatId,
             formatNom: f ? f.contenanceCl + ' cl' : item.formatId,
             quantite: item.quantite
@@ -15256,70 +15214,74 @@ const loadBLTemplateAsset = (file) => {
     return BL_PDF_ASSETS[file];
 };
 
+const prepareBLExport = (livraisonId) => {
+    const livraison = DB.get('livraisons').find(l => l.id === livraisonId);
+    if (!livraison) {
+        showToast('Livraison non trouvée', 'error');
+        return null;
+    }
+
+    const formats = DB.get('formats');
+    const aromes = DB.get('aromes');
+    const merged = new Map();
+    let skippedCount = 0;
+    for (const ligne of livraison.lignes || []) {
+        const quantite = Number(ligne.quantite);
+        if (!Number.isFinite(quantite) || quantite <= 0) continue;
+        const format = formats.find(f => f.id === ligne.formatId);
+        const formatNom = format ? `${format.contenanceCl} cl` : String(ligne.formatNom ?? '').trim();
+        if (!formatNom) {
+            skippedCount++;
+            continue;
+        }
+        const aromeNom = getAromeBLName(ligne.aromeNom || '', aromes);
+        const key = JSON.stringify([aromeNom, formatNom]);
+        const item = merged.get(key);
+        if (item) item.quantite += quantite;
+        else merged.set(key, { aromeNom, formatNom, quantite });
+    }
+
+    if (skippedCount > 0) {
+        showToast(`${skippedCount} article(s) ignoré(s) — libellé de format indisponible`, 'warning');
+    }
+    if (!merged.size) {
+        if (skippedCount) {
+            showToast('Aucune ligne exploitable pour générer le BL — tous les articles ont été ignorés (format manquant)', 'error');
+        } else {
+            showToast('Aucun article à livrer', 'warning');
+        }
+        return null;
+    }
+
+    const sortedItems = [...merged.values()].sort((a, b) => {
+        const aN = a.aromeNom.toLowerCase();
+        const bN = b.aromeNom.toLowerCase();
+        if (aN < bN) return -1;
+        if (aN > bN) return 1;
+        return a.formatNom.localeCompare(b.formatNom);
+    });
+    const client = DB.get('clients').find(c => c.id === livraison.clientId);
+    return {
+        livraison, sortedItems,
+        blNum: getBLNumero(livraison),
+        blDate: livraison.dateBL || '',
+        cVerte: parseInt(livraison.caissesVertesLivrees, 10) || 0,
+        cNoire: parseInt(livraison.caissesNoiresLivrees, 10) || 0,
+        clientSociete: client?.societe || '',
+        clientContact: client?.nom || '',
+        clientAdresse: client?.adresse || '',
+        clientLocalite: `${client?.npa || ''} ${client?.localite || ''}`.trim()
+    };
+};
+
 const exportBLPDF = (livraisonId) => {
     try {
-        const livraisons = DB.get('livraisons') || [];
-        const clients = DB.get('clients') || [];
-        const formats = DB.get('formats') || [];
-
-        const livraison = livraisons.find(l => l.id === livraisonId);
-        if (!livraison) {
-            showToast('Livraison non trouvée', 'error');
-            return;
-        }
-
-        const client = clients.find(c => c.id === livraison.clientId);
-
-        const lignesFiltered = (livraison.lignes || []).filter(l => Number(l.quantite) > 0);
-        if (lignesFiltered.length === 0) {
-            showToast('Aucun article à livrer', 'warning');
-            return;
-        }
-
-        const merged = {};
-        let skippedCount = 0;
-        lignesFiltered.forEach(l => {
-            const fmt = formats.find(f => f.id === l.formatId);
-            const fmtLabel = fmt ? `${fmt.contenanceCl} cl` : (l.formatNom || '');
-            if (!fmtLabel || !fmtLabel.trim()) {
-                skippedCount++;
-                return;
-            }
-            const canonicalArome = getAromeBLName(l.aromeNom || '') || l.aromeNom || '';
-            const key = `${canonicalArome}|${fmtLabel}`;
-            if (merged[key]) {
-                merged[key].quantite += Number(l.quantite) || 0;
-            } else {
-                merged[key] = { aromeNom: canonicalArome, formatNom: fmtLabel, quantite: Number(l.quantite) || 0 };
-            }
-        });
-
-        if (skippedCount > 0) {
-            showToast(`${skippedCount} article(s) ignoré(s) — libellé de format indisponible`, 'warning');
-        }
-
-        const sortedItems = Object.values(merged).sort((a, b) => {
-            const aN = (a.aromeNom || '').toLowerCase();
-            const bN = (b.aromeNom || '').toLowerCase();
-            if (aN < bN) return -1;
-            if (aN > bN) return 1;
-            return (a.formatNom || '').localeCompare(b.formatNom || '');
-        });
-
-        if (sortedItems.length === 0) {
-            showToast('Aucune ligne exploitable pour générer le BL — tous les articles ont été ignorés (format manquant)', 'error');
-            return;
-        }
-
-        const cVerte = parseInt(livraison.caissesVertesLivrees, 10) || 0;
-        const cNoire = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
-
-        const clientSociete = client ? (client.societe || '') : '';
-        const clientContact = client ? (client.nom || '') : '';
-        const clientAdresse = client ? (client.adresse || '') : '';
-        const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
-        const blNum = getBLNumero(livraison);
-        const blDate = livraison.dateBL || '';
+        const data = prepareBLExport(livraisonId);
+        if (!data) return;
+        const {
+            livraison, sortedItems, blNum, blDate, cVerte, cNoire,
+            clientSociete, clientContact, clientAdresse, clientLocalite
+        } = data;
 
         const PER_PAGE = 18;
         const LAST_PAGE_MAX = 5;
@@ -15434,7 +15396,7 @@ const exportBLPDF = (livraisonId) => {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `BL-${blNum}_${livraison.dateBL}.pdf`;
+            a.download = `BL-${blNum}_${blDate}.pdf`;
             a.click();
             URL.revokeObjectURL(url);
             recordBLExportDate(livraisonId);
@@ -15453,45 +15415,12 @@ const exportBLPDF = (livraisonId) => {
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
 const exportBLExcel = (livraisonId) => {
-    const livraisons = DB.get('livraisons') || [];
-    const clients = DB.get('clients') || [];
-    const formats = DB.get('formats') || [];
-
-    const livraison = livraisons.find(l => l.id === livraisonId);
-    if (!livraison) {
-        showToast('Livraison non trouvée', 'error');
-        return;
-    }
-
-    const client = clients.find(c => c.id === livraison.clientId);
-
-    const lignesFiltered = (livraison.lignes || []).filter(l => l.quantite > 0);
-    if (lignesFiltered.length === 0) {
-        showToast('Aucun article à livrer', 'warning');
-        return;
-    }
-
-    const merged = {};
-    let skippedCount = 0;
-    lignesFiltered.forEach(l => {
-        const fmt = formats.find(f => f.id === l.formatId);
-        if (!fmt) {
-            skippedCount++;
-            return;
-        }
-        const fmtLabel = fmt.contenanceCl + ' cl';
-        const canonicalArome = getAromeBLName(l.aromeNom || '') || l.aromeNom || '';
-        const key = `${canonicalArome}|${fmtLabel}`;
-        if (merged[key]) {
-            merged[key].quantite += l.quantite;
-        } else {
-            merged[key] = { aromeNom: l.aromeNom, formatNom: fmtLabel, quantite: l.quantite };
-        }
-    });
-
-    if (skippedCount > 0) {
-        showToast(`${skippedCount} article(s) ignoré(s) — format introuvable`, 'warning');
-    }
+    const data = prepareBLExport(livraisonId);
+    if (!data) return;
+    const {
+        livraison, sortedItems, blNum, blDate, cVerte, cNoire,
+        clientSociete, clientContact, clientAdresse, clientLocalite
+    } = data;
 
     const templatePath = 'templates/bl_template.xlsx';
     const xhr = new XMLHttpRequest();
@@ -15552,15 +15481,6 @@ const exportBLExcel = (livraisonId) => {
                     return idx;
                 };
 
-                const blNum = `BL-${getBLNumero(livraison)}`;
-                const blDate = livraison.dateBL;
-                const clientSociete = client ? (client.societe || '') : '';
-                const clientContact = client ? (client.nom || '') : '';
-                const clientAdresse = client ? (client.adresse || '') : '';
-                const clientLocalite = client ? (`${client.npa || ''} ${client.localite || ''}`.trim()) : '';
-                const cVerteLivree = parseInt(livraison.caissesVertesLivrees, 10) || 0;
-                const cNoireLivree = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
-
                 const setCellTextDom = (cell, text) => {
                     cell.setAttribute('t', 's');
                     const fEls = cell.getElementsByTagName('f');
@@ -15603,14 +15523,6 @@ const exportBLExcel = (livraisonId) => {
                 };
 
                 const allRows = sheetDoc.getElementsByTagName('row');
-
-                const sortedItems = Object.values(merged).sort((a, b) => {
-                    const aN = (a.aromeNom || '').toLowerCase();
-                    const bN = (b.aromeNom || '').toLowerCase();
-                    if (aN < bN) return -1;
-                    if (aN > bN) return 1;
-                    return (a.formatNom || '').localeCompare(b.formatNom || '');
-                });
 
                 const DATA_START = 15;
                 const DATA_END = 38;
@@ -15738,7 +15650,7 @@ const exportBLExcel = (livraisonId) => {
                             cellC2.setAttribute('r', 'C2');
                             row.appendChild(cellC2);
                         }
-                        setCellTextDom(cellC2, blNum);
+                        setCellTextDom(cellC2, `BL-${blNum}`);
                     }
 
                     if (rowNum === 5) {
@@ -15787,9 +15699,9 @@ const exportBLExcel = (livraisonId) => {
                         const cellA = findCellByRef(row, 'A' + rowNum);
                         if (cellA) {
                             if (rowNum === 48 + FO) {
-                                setCellValueDom(cellA, cVerteLivree);
+                                setCellValueDom(cellA, cVerte);
                             } else if (rowNum === 49 + FO) {
-                                setCellValueDom(cellA, cNoireLivree);
+                                setCellValueDom(cellA, cNoire);
                             } else {
                                 clearCellDom(cellA);
                             }
@@ -15833,7 +15745,7 @@ const exportBLExcel = (livraisonId) => {
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `BL-${getBLNumero(livraison)}_${livraison.dateBL}.xlsx`;
+                    a.download = `BL-${blNum}_${blDate}.xlsx`;
                     a.click();
                     URL.revokeObjectURL(url);
                     recordBLExportDate(livraison.id);
@@ -16247,21 +16159,7 @@ const productionAlertsHtml = (plan) => {
             attrs: { 'data-click': 'production-reveal', 'data-target': 'prodAtelierTitle' }
         });
     }
-    if (items.length === 0) return '';
-    const row = (p) => `
-        <li><button type="button" class="dash-prio dash-prio--${p.level}" ${dashAttrs(p.attrs)}>
-            <span class="dash-prio-icon">${dashIcon(p.icon)}</span>
-            <span class="dash-prio-body">
-                <span class="dash-prio-title"><span class="dash-sr">${DASH_LEVELS[p.level].label} : </span>${escapeHtml(p.title)}</span>
-                <span class="dash-prio-text">${escapeHtml(p.text)}</span>
-            </span>
-            <span class="dash-prio-chev">${dashIcon('chevron')}</span>
-        </button></li>`;
-    return `
-        <section class="stock-section" aria-labelledby="prodAlertsTitle">
-            <div class="stock-section-head"><h2 class="stock-section-title" id="prodAlertsTitle">À traiter</h2></div>
-            <ul class="dash-prio-list">${items.map(row).join('')}</ul>
-        </section>`;
+    return dashAlertesSectionHtml(items, 'prodAlertsTitle');
 };
 
 // Mode auto : commandes qui demandent une production (case = retenue dans le plan)

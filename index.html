@@ -23,7 +23,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=13.4">
+    <link rel="stylesheet" href="styles.css?v=13.5">
 </head>
 <body class="body--locked">
     <aside class="sidebar">
@@ -95,7 +95,7 @@
                     <span class="cmdk-trigger-label">Actions</span>
                     <kbd class="cmdk-trigger-key">Ctrl K</kbd>
                 </button>
-                <span style="font-size: 11px; color: var(--text-lighter);">v13.4</span>
+                <span style="font-size: 11px; color: var(--text-lighter);">v13.5</span>
                 <button id="syncBtn" class="btn btn-sm btn-secondary" onclick="window.forceFirebaseSync()" style="display:none;">
                     🔄 Sync
                 </button>
@@ -239,20 +239,9 @@
          pour un démarrage hors ligne quand le SDK est déjà chargé. -->
     <script>
         window.firebaseReady = false;
-    </script>
-    <script type="module">
-        import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js';
-        import {
-            getFirestore, doc, setDoc, getDoc, getDocs, collection,
-            onSnapshot, deleteDoc, writeBatch, runTransaction
-        } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
-        import {
-            getAuth, signInWithEmailAndPassword, signOut,
-            onAuthStateChanged, setPersistence, browserLocalPersistence
-        } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
 
         const FIREBASE_AUTH_EMAIL = 'gestion@thecol.ch';
-        
+
         const firebaseConfig = {
             apiKey: "AIzaSyDnENEDX6e9P3KLkuY85qTpSNuAUy3Cb7Y",
             authDomain: "thecol-gestion.firebaseapp.com",
@@ -262,93 +251,16 @@
             appId: "1:882272705805:web:542b45499ff27b12a4e444",
             measurementId: "G-E67CGE3Y57"
         };
+    </script>
+    <script type="module">
+        import * as appSdk from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js';
+        import * as firestoreSdk from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
+        import * as authSdk from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
 
-        let app, db, auth;
         try {
-            app = initializeApp(firebaseConfig);
-            db = getFirestore(app);
-            auth = getAuth(app);
-
-            // Persister la session dans IndexedDB (permet le démarrage hors ligne
-            // si le SDK est déjà chargé)
-            setPersistence(auth, browserLocalPersistence).catch(() => {});
-
-            // Exposer Firestore (une seule fois — app.js ne doit jamais
-            // ré-importer le SDK au runtime car un import dynamique échoue hors-ligne)
-            window.firebaseApi = {
-                doc, setDoc, getDoc, getDocs, collection,
-                onSnapshot, deleteDoc, writeBatch, runTransaction
-            };
-            window.firebaseDb = db;
-
-            // Exposer Auth de façon minimale : aucune fuite de l'email technique
-            // ni du mot de passe. Seules les fonctions nécessaires sont exposées.
-            window.firebaseAuth = {
-                signIn: (password) => signInWithEmailAndPassword(auth, FIREBASE_AUTH_EMAIL, password),
-                signOut: () => signOut(auth),
-                isAuthenticated: () => !!(auth && auth.currentUser)
-            };
-
-            // Le bouton Sync n'est visible qu'après authentification
-            window.showSyncButton = () => {
-                const btn = document.getElementById('syncBtn');
-                if (btn) btn.style.display = 'inline-flex';
-            };
-
-            // Surveiller l'état d'authentification — firebaseReady ne devient
-            // true qu'après une session active. Tant que l'utilisateur n'est
-            // pas connecté, aucune opération Firestore ni vue métier ne démarre.
-            const loginScreen = document.getElementById('loginScreen');
-            const loginLoading = document.getElementById('loginLoading');
-            const loginForm = document.getElementById('loginForm');
-            const loginPassword = document.getElementById('loginPassword');
-            const loginError = document.getElementById('loginError');
-            const loginBusy = document.getElementById('loginBusy');
-            const loginBtn = document.getElementById('loginBtn');
-
-            onAuthStateChanged(auth, (user) => {
-                if (user) {
-                    // Session active (restaurée depuis la persistance ou
-                    // connexion réussie)
-                    window.firebaseReady = true;
-
-                    // Déverrouiller le shell : visible, accessible aux
-                    // lecteurs d'écran, masquer l'écran de connexion
-                    if (typeof window.unlockShell === 'function') {
-                        window.unlockShell();
-                    }
-
-                    // Masquer l'écran de verrouillage
-                    if (loginScreen) loginScreen.style.display = 'none';
-
-                    // Réinitialiser le formulaire pour la prochaine déconnexion
-                    if (loginPassword) loginPassword.value = '';
-                    if (loginError) loginError.textContent = '';
-                    if (loginError) loginError.style.display = 'none';
-                    if (loginBusy) loginBusy.style.display = 'none';
-                    if (loginBtn) loginBtn.style.display = 'inline-flex';
-
-                    // Afficher le bouton Sync dans l'en-tête
-                    window.showSyncButton?.();
-
-                    // Lancer l'application (local d'abord, puis Firebase)
-                    if (typeof window.startApp === 'function') {
-                        window.startApp();
-                    }
-
-                    console.log('Authentifié — session active');
-                } else {
-                    // Aucune session active — transition centralisée
-                    if (typeof window.resetAppSession === 'function') {
-                        window.resetAppSession();
-                    }
-                    console.log('Déconnecté — écran de verrouillage');
-                }
-            });
-
-            console.log('Firebase connecté (App + Auth + Firestore)');
-        } catch(e) {
-            console.log('Erreur Firebase:', e);
+            configureFirebase(appSdk, firestoreSdk, authSdk);
+        } catch (e) {
+            console.error('Erreur Firebase:', e);
             window.firebaseReady = false;
             // Verrouiller le shell (body--locked est déjà dans le HTML,
             // mais on le ré-applique par sécurité)
@@ -364,6 +276,6 @@
             if (err) { err.textContent = 'Erreur de connexion au service. Vérifiez votre réseau.'; err.style.display = 'block'; }
         }
     </script>
-    <script src="app.js?v=13.4"></script>
+    <script src="app.js?v=13.5"></script>
 </body>
 </html>
