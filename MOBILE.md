@@ -2,6 +2,8 @@
 
 L'appli web est emballée via **Capacitor**. `scripts/copy-web.js` copie les fichiers source de la racine, dont `app.js` et les scripts `app-*.js`, dans `www/`. Capacitor synchronise ensuite ce dossier vers les projets natifs `android/` et `ios/`.
 
+`npm run copy:web` génère `www/` pour vérifier la copie seule. Pour synchroniser les projets natifs, utilise `npm run sync`. Les scripts chargés par `index.html` doivent aussi figurer dans `scripts/copy-web.js`.
+
 ## Workflow de dev
 
 1. Modifie les fichiers à la racine comme avant.
@@ -63,9 +65,9 @@ Puis dans Xcode : Product → Archive → Distribute App.
 ## Notes importantes
 
 - **localStorage fonctionne** dans Capacitor (il utilise WebView native).
-- **Firebase fonctionne** aussi mais l'auth web peut nécessiter des plugins natifs pour OAuth.
-- **CDN externes** (Outfit font, XLSX, Firebase SDK) : le téléphone doit avoir internet au moins au premier lancement pour les charger. Pour offline complet, on peut télécharger ces libs en local plus tard.
-- **Export PDF (`window.print()`)** : l'export PDF des BL utilise la boîte de dialogue d'impression du navigateur. Il est pris en charge dans les navigateurs et PWA qui exposent le dialogue d'impression système. Dans les WebViews natives Capacitor (Android WebView, iOS WKWebView), la disponibilité de `window.print()` dépend de la plateforme et doit être testée sur chaque cible. Si le dialogue d'impression est absent, un plugin natif (ex. Capacitor Print) ou une génération de fichier PDF avec partage natif peut être nécessaire. L'export Excel reste l'alternative disponible sur toutes les plateformes.
+- **Firebase Auth** utilise le compte technique avec la méthode Email/Password, comme sur le Web.
+- **Ressources externes.** Le SDK Firebase, Outfit, XLSX, JSZip et jsPDF sont chargés depuis des CDN. Une connexion est nécessaire lorsque ces ressources ne sont pas en cache.
+- **Téléchargements.** L’export PDF des BL génère un fichier avec jsPDF. Le PDF, l’Excel du BL et la sauvegarde JSON sont téléchargés via une URL temporaire de fichier (`Blob`). Vérifie le téléchargement dans la WebView de chaque plateforme cible.
 - L'**ID de l'app** est `ch.thecol.gestion` (modifiable dans `capacitor.config.json` + projets natifs).
 
 ## Pour mettre à jour après modif du code web
@@ -73,4 +75,4 @@ Puis dans Xcode : Product → Archive → Distribute App.
 ```
 npm run sync
 ```
-Puis relance l'APK (ou Live Reload depuis Android Studio).
+Puis recompile et réinstalle l’application native, ou relance Live Reload dans ton environnement de développement.

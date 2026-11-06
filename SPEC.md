@@ -2,12 +2,23 @@
 
 ## 1. Aperçu du projet
 
-**Nom:** ThéCol Gestion  
-**Type:** Application web SPA (Single Page Application)  
-**Hébergement:** GitHub Pages  
-**Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v13.4
-**Style:** Minimaliste, éco-responsable (style thecol.ch)
+- Application web monopage ThéCol Gestion, version v13.4
+- Hébergement sur GitHub Pages
+- Stockage local dans `localStorage` et synchronisation via Firebase Firestore
+- Style minimaliste inspiré de thecol.ch
+
+### Organisation et démarrage
+
+`index.html` charge les scripts classiques dans l'ordre déclaré. `app-core.js`, `app-sync.js`
+et `app-ui.js` fournissent les fonctions communes, la synchronisation et l'interface partagée.
+Les scripts métier suivent, puis `app.js` pilote le démarrage et la session. Les déclarations
+partagées entre fichiers dépendent de cet ordre de chargement.
+
+Le module Firebase d'`index.html` appelle `configureFirebase` après l'exécution des scripts
+classiques. Une session active déverrouille l'interface et déclenche `window.startApp()`.
+`bootLocal()` initialise les données locales, active la délégation d'événements et affiche la
+page indiquée par le fragment d'URL. La synchronisation Firestore V11 démarre ensuite en
+arrière-plan.
 
 ## 2. Structure des données
 
@@ -149,13 +160,13 @@ v11BootFirebase() → waitForFirebase → check syncMeta/schema
   │               (lock → valider IDs → merge legacy+local → batch write → schema.ready)
   └─ migré     → v11LoadTableRecords() → v11OverlayQueueOnCache() → v11FlushQueue()
                  → v11StartAllListeners() (onSnapshot par table)
+```
 
 **Rendu différé (v11.6) :** les snapshots `onSnapshot` n'écrasent plus `#content` si un champ de saisie y est actif. Le re-rendu est différé et rejoué automatiquement au blur (`focusout`). Le flag `V11._pendingRender` et `_renderCurrentViewSafe()` coordonnent ce mécanisme.
 
-**Legacy ignoré en mode V11 (v11.6) :** `DB.loadFromFirebase()` retourne immédiatement si `V11._isReady === true` (ligne 751). Les documents `data/<table>` ne sont plus lus ni écrits en local une fois le schéma V11 actif.
+**Accès legacy (v11.6).** Dans `app-sync.js`, `DB.loadFromFirebase()` retourne immédiatement si `V11._isReady === true`. Le schéma V11 actif utilise les documents de `tables/<table>/records/`.
 
 **Écho local supprimé (v11.7) :** le snapshot `onSnapshot` ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique (`JSON.stringify`) au payload de l'opération locale en attente (self-echo). Seuls les vrais conflits concurrents — divergence réelle entre appareils — sont signalés.
-```
 
 **Écritures de table entière (v12.4) :** `DB.set(key, data)` compare `data` au localStorage courant : tout enregistrement absent de `data` devient une suppression, tout enregistrement différent une réécriture, sans conflit signalé si un instantané distant est arrivé entre-temps (la version connue est déjà à jour). Une fonction qui attend (`await confirmDialog(...)`, `.then(...)`) relit donc ses tables **après** l'attente avant d'écrire : `finaliserProductionFormats`, `restaurerCommande`, `resetClients`.
 
@@ -313,7 +324,17 @@ renuméroté automatiquement.
 }
 ```
 
-`lotsTraces` est une copie de `commande.lotsUtilises` (`buildLotsTracesForCommande`), resynchronisée par `syncBLTraceFromCommande` à chaque préparation/export du BL. Les n° de lot ne sont pas imprimés sur le BL client (traçabilité interne). Depuis v13.1, les compteurs transactionnels tiennent compte des `numeroBL` des BL existants, des commandes et de l'historique (entrées `RESTAURE-`) : un numéro supprimé n'est jamais attribué à une autre livraison.
+`buildLotsTracesForCommande` prépare `lotsTraces` à partir des allocations de quantité positive
+de `commande.lotsUtilises`. Pour les modales Détails et Préparer BL, `buildBLTraceSummary` retient
+les traces enregistrées si la liste contient des éléments et utilise sinon celles de la commande.
+Il calcule les totaux de bouteilles livrées et tracées ainsi que le nombre de lignes avec stock
+insuffisant confirmé. Lors de l'enregistrement de la préparation ou de l'ouverture d'un BL
+existant depuis sa commande, `syncBLTraceFromCommande` privilégie les traces de la commande et
+conserve les traces enregistrées si la commande n'en fournit aucune.
+
+Les numéros de lot restent dans la fiche interne. Depuis v13.1, les compteurs transactionnels
+tiennent compte des `numeroBL` des BL existants, des commandes et de l'historique
+(`RESTAURE-`). Un numéro supprimé reste réservé à sa livraison.
 
 **Export PDF des BL (`exportBLPDF`, v11.12 — vrai fichier PDF via jsPDF) :**
 Génère et télécharge directement un fichier `.pdf` nommé `BL-XXXXX_YYYY-MM-DD.pdf` (même mécanisme de téléchargement que l'export Excel), sans fenêtre d'impression ni popup. La bibliothèque **jsPDF 3.0.3** est chargée via CDN dans `index.html` (cdnjs, empreinte SRI, hôte déjà autorisé par le CSP). Le rendu reste **pixel-perfect** : les données variables sont dessinées en vectoriel (texte net, sélectionnable) par-dessus deux fonds A4 rasterisés extraits du template Excel lui-même.
@@ -375,11 +396,13 @@ priorités du tableau de bord via `pointagesAClore`) et n'empêche plus une nouv
 de la veille ouverte depuis moins longtemps (travail de nuit) reste en cours et peut être terminée
 après minuit.
 
-**Contrôles de saisie :** début et fin obligatoires (seule une plage déjà en cours peut rester
-sans fin), plage non vide, pause entière positive ou nulle qui ne dépasse pas la durée, jour non
-futur, aucun chevauchement avec les autres plages de la personne la veille, le jour même et le
-lendemain (`pointageIntervalle`). L'arrivée en direct est refusée si des heures déjà saisies
-couvrent ce moment.
+**Contrôles de saisie.** Le début et la fin sont obligatoires, avec une exception pour une plage
+déjà en cours. La plage doit avoir une durée positive et dater d'aujourd'hui ou d'un jour passé.
+La pause est un nombre entier de minutes compris entre zéro et la durée de la plage. La saisie
+et l'import Excel utilisent `pointageJoursVoisins`, `pointageIntervalle` et
+`pointageIntervallesChevauchent` pour comparer les plages de la même personne la veille, le jour
+même et le lendemain. Deux plages qui se touchent sont autorisées. L'arrivée en direct est
+refusée si des heures déjà saisies couvrent ce moment.
 
 **Import Excel (v13.4) :** `lirePointagesExcel` → `analyserPointagesExcel` lit la première
 feuille dont une des 20 premières lignes est un en-tête avec une date (« Date »/« Jour »), un
@@ -623,6 +646,10 @@ Voir §3.5 (v13.2). Répartition d'un brassin en récipients (`getProductionReci
 - avertissement si le numéro est partagé par plusieurs arômes ou dates ;
 - **Exporter Excel** (`exportLotRappelExcel`) : classeur `rappel_lot_<n°>_<date>.xlsx` (feuilles Synthèse, Par format, Clients livrés, Sorties, Annulations).
 
+`readLotTraceTables()` charge une fois les tables `lots`, `history`, `commandes`, `clients` et
+`livraisons` lors du rappel. `getLotTraceData` réutilise ces données pour établir la trace de
+chaque lot.
+
 **Blocage d'un lot.** « Bloquer le stock restant » (motif obligatoire) pose `bloque`, `motifBlocage` et `dateBlocage` sur tous les enregistrements en stock du numéro. Un lot bloqué est exclu par `isLotSellable` (stock vendable, planificateur, modale de livraison, vente directe) et refusé par `deliverCommandeTransaction` (vérification sur la donnée distante). Seules les sorties hors vente (casse, destruction…) restent possibles. « Débloquer le stock » retire ces champs après confirmation.
 
 **Sortie de stock** (bouton « Sortie » sur une carte de lot, actions `sell-lot` / `vendre-lot`) : motif (vente directe, dégustation/échantillon, casse/perte, destruction/péremption), quantité, client facultatif, note. La vente n'est proposée que si le lot est vendable.
@@ -655,24 +682,28 @@ Voir §3.5 (v13.2). Répartition d'un brassin en récipients (`getProductionReci
 
 ## 6. Déploiement GitHub Pages
 
-1. Créer fichier `index.html`
-2. Créer fichier `styles.css`
-3. Créer fichier `app.js`
-4. Pousser vers repo GitHub
-5. Activer GitHub Pages dans settings
+La publication utilise directement les sources statiques du dépôt, sans étape de compilation.
+
+1. Utiliser la racine de la branche de publication comme source GitHub Pages.
+   Conserver les chemins relatifs de `index.html`, `styles.css`, `manifest.webmanifest`, des
+   scripts référencés par la page et des dossiers `templates/`, `icons/` et `vendor/`.
+2. Mettre à jour dans `index.html` le paramètre `rev` de chaque ressource JavaScript ou CSS
+   modifiée, puis pousser la révision vers la branche de publication.
+3. Vérifier le chargement de l'écran de connexion et des ressources depuis l'URL GitHub Pages
+   après la publication.
 
 ## 7. Contraintes techniques
 
 - HTML5, CSS3, Vanilla JavaScript (ES6+)
 - Pas de framework (simplicité)
 - localStorage pour persistance locale
-- Firebase Firestore v12.16.0 pour synchronisation cloud optionnelle
+- Firebase Firestore via le SDK 12.16.0 pour la synchronisation des données
 - Three.js 0.185.1 (licence MIT) embarqué dans `vendor/three/` pour le jumeau 3D — les modules complémentaires (`OrbitControls.js`, post-traitement `EffectComposer`/`RenderPass`/`GTAOPass`/`OutputPass` et leurs shaders) importent `./three.module.min.js` et leurs voisins en chemins relatifs (imports réécrits, arborescence aplatie, pas d'importmap)
 - **Firebase Auth — Authentification par mot de passe partagé (Email/Password) :**
   - L'application utilise un compte technique fixe `gestion@thecol.ch` (Email/Password).
-  - L'adresse email n'est jamais affichée dans l'interface utilisateur — elle est définie comme constante `FIREBASE_AUTH_EMAIL` dans le module Firebase d'`index.html`.
+  - La constante `FIREBASE_AUTH_EMAIL` est définie dans le script classique de configuration d'`index.html` et utilisée lors de l'appel d'authentification.
   - Le mot de passe est saisi par l'utilisateur via l'écran de verrouillage (connexion). **Il n'est jamais stocké dans le code ni dans le dépôt.**
-  - La session est persistée via `browserLocalPersistence` (IndexedDB) : l'utilisateur reste connecté entre les visites tant que le SDK Firebase est en cache.
+  - La session est conservée dans le navigateur via `browserLocalPersistence`.
   - **Limites :** mot de passe partagé, pas d'audit individuel (tous les utilisateurs partagent la même identité Firestore). L'email ne doit pas être changé sans mettre à jour la constante dans `index.html` et les règles Firestore.
   - Un bouton « Déconnexion » est accessible dans l'en-tête et dans la page Paramètres > Compte.
 

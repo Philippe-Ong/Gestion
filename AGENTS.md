@@ -10,7 +10,7 @@ ThéCol Gestion is a single-page business management app for a cold tea company.
 
 ## 1. Build, Lint, and Test Commands
 
-There is **no build, lint, typecheck, or test pipeline**. The project has zero dependencies to install.
+The web app has no build, lint, typecheck, or automated test pipeline. Serving the web source requires no npm install. The Capacitor wrapper has its own dependencies.
 
 **Local Development:**
 There is nothing to compile or bundle. To serve locally for manual testing:
@@ -56,8 +56,8 @@ No other files contain application logic. Do not create new JS or CSS files unle
 ## 3. Architecture
 
 ### Routing
-Hash-based SPA routing. Pages: `#jumeau` (default), `#dashboard`, `#stock`, `#pointage`, `#commandes`, `#livraisons`, `#production`, `#inventaire`, `#parametres`, `#archives`.
-The `router()` function in `app-ui.js` looks up the page name in a views map and calls the matching `render<Page>()` function.
+The SPA uses hash-based routing for `#jumeau` (default), `#dashboard`, `#stock`, `#historique`, `#pointage`, `#commandes`, `#livraisons`, `#production`, `#inventaire`, `#parametres` and `#archives`.
+After startup and authentication, `router()` reads the hash and calls `navigateTo(page)` in `app-ui.js`. `navigateTo(page)` updates navigation and invokes the matching `render<Page>()` function.
 
 **Page Descriptions:**
 - `jumeau` - Jumeau numérique 3D de l'atelier (accueil depuis v12.0), rendu « maquette » des vraies pièces depuis v12.3 : labo (cuves, plaques), stock, expédition, réserve et chambre froide (consommables), vestiaire (équipe) ; inspecteur avec actions directes, menu de qualité du rendu
@@ -95,11 +95,11 @@ Tous les gestionnaires d'événements dans le HTML rendu utilisent un système d
 ## 4. Code Style & Guidelines
 
 ### JavaScript Formatting and Types
-- **Classic scripts:** Load the application files in the order specified in `index.html`, with `app.js` last. They share the same global lexical scope. Firebase imports use dynamic `import()` or the inline `<script type="module">` in `index.html`.
+- **Classic scripts.** Keep the plain `<script src>` tags in the order specified in `index.html`, with `app.js` last. They share the same global lexical scope and finish executing before the inline Firebase module calls `configureFirebase()`. Keep the list in `scripts/copy-web.js` in sync with those tags for Capacitor.
 - **Functions**: Use arrow functions for all declarations (`const fn = () => { }`).
 - **Strings**: Use template literals (backticks) for all multi-line HTML strings. Maintain proper indentation.
 - **Dates**: Format with Swiss French locale: `fr-CH` via `toLocaleDateString('fr-CH')`.
-- **IDs**: Use `generateId()` — returns `'_' + Math.random().toString(36).substr(2, 9)`.
+- **IDs.** Use `generateId()` from `app-core.js`.
 - **Comments**: Keep code clean. No comments unless the user asks for them.
 
 ### Error Handling
@@ -125,7 +125,7 @@ The `DB` object wraps `localStorage`. All keys are prefixed `thecol_` (e.g., `th
 
 ### Firebase (Optional Cloud Sync) — v11.0 (Auth v11.2)
 
-Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync is manual.
+The inline script in `index.html` holds the Firebase configuration. In V11, the app starts Firestore listeners and flushes queued writes after authentication. The Sync button triggers a manual refresh.
 **Depuis v11.2, l'accès à Firebase exige une authentification Email/Password.** Voir `SPEC.md` §7 pour les détails.
 
 #### Legacy path (pre-migration)
@@ -149,7 +149,7 @@ Optional cloud sync via Firestore. Config is in `index.html` inline script. Sync
 L'application utilise Firebase Auth avec la méthode **Email/Password** et un compte technique fixe `gestion@thecol.ch` :
 - L'email est défini comme constante dans `index.html` (`FIREBASE_AUTH_EMAIL`), jamais affiché dans l'UI.
 - Le mot de passe est saisi par l'utilisateur via l'écran de verrouillage — **jamais stocké dans le dépôt**.
-- La session est persistée via `browserLocalPersistence` (IndexedDB).
+- La session est conservée dans le navigateur via `browserLocalPersistence`.
 - `window.firebaseReady` ne devient `true` qu'après une session active.
 - Le shell est verrouillé par la classe CSS `body--locked` tant que l'utilisateur n'est pas connecté.
 - Fonctions exposées : `window.firebaseAuth.signIn(password)`, `window.firebaseAuth.signOut()`.
