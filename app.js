@@ -1176,9 +1176,11 @@ CLICK_HANDLERS['sortir-lots-perimes'] = (el) => sortirLotsPerimes((el.getAttribu
 // Pointage
 // ---------------------------------------------------------------------------
 CLICK_HANDLERS['pointage-vue'] = (el) => {
-    DB.setFilter('pointage_vue', el.getAttribute('data-value') === 'mois' ? 'mois' : 'semaine');
+    const vue = el.getAttribute('data-value');
+    DB.setFilter('pointage_vue', vue === 'mois' || vue === 'annee' ? vue : 'semaine');
     renderPointage();
 };
+CLICK_HANDLERS['pointage-voir-mois'] = (el) => pointageVoirMois(el.getAttribute('data-mois') || '');
 CLICK_HANDLERS['pointage-nav'] = (el) => pointageNaviguer(Number(el.getAttribute('data-dir')) || 0);
 CLICK_HANDLERS['pointage-saisir'] = () => showPointageJourModal();
 CLICK_HANDLERS['pointage-jour'] = (el) => showPointageJourModal({
@@ -1197,10 +1199,14 @@ CLICK_HANDLERS['pointage-maintenant'] = (el) => {
     modal.hide();
     renderCurrentView();
 };
-CLICK_HANDLERS['pointage-export'] = () => exportPointagesMois();
+CLICK_HANDLERS['pointage-export'] = () => (DB.getFilter('pointage_vue') === 'annee' ? exportPointagesAnnee() : exportPointagesMois());
 CLICK_HANDLERS['delete-pointage'] = (el) => deletePointage(el.getAttribute('data-id'));
 CLICK_HANDLERS['cloturer-pointage'] = (el) => cloturerPointage(el.getAttribute('data-id'));
 CHANGE_HANDLERS['pointage-jour-cible'] = () => chargerPlagesJour();
+CLICK_HANDLERS['pointage-import'] = () => ouvrirImportPointages();
+CHANGE_HANDLERS['pointage-import-fichier'] = (el) => lirePointagesExcel(el);
+CHANGE_HANDLERS['pointage-import-personne'] = () => majPointageImport();
+CLICK_HANDLERS['pointage-import-confirmer'] = () => importerPointagesExcel();
 
 // ---------------------------------------------------------------------------
 // Commandes
@@ -3644,6 +3650,7 @@ document.addEventListener('keydown', (e) => {
 // State variables for pointage and weekly calendar
 let pointageLundiAffiche = null; // lundi (AAAA-MM-JJ) de la semaine affichée, null = semaine en cours
 let pointageMoisAffiche = null;  // mois (AAAA-MM) affiché, null = mois en cours
+let pointageAnneeAffiche = null; // année (nombre) affichée, null = année en cours
 let pointageTicker = null;
 let weekCalendarSelectedDate = '';
 let _commandeModalClientOptions = [];
@@ -4456,16 +4463,25 @@ const dashTendancesHtml = (t) => {
         </section>`;
 };
 
-// Infobulle du graphique (survol, focus clavier, toucher) et mémoire des <details>
-const dashBindInteractions = () => {
+// Mémoire des <details data-dash-key> ouverts, le temps de la session (tableau de bord, pointage)
+const bindDetailsMemoire = () => {
     document.querySelectorAll('#content details[data-dash-key]').forEach(d => {
         d.addEventListener('toggle', () => {
             if (d.open) _dashOpen.add(d.dataset.dashKey);
             else _dashOpen.delete(d.dataset.dashKey);
         });
     });
-    const chart = document.getElementById('dashChart');
-    const tip = document.getElementById('dashChartTip');
+};
+
+// Infobulle du graphique (survol, focus clavier, toucher) et mémoire des <details>
+const dashBindInteractions = () => {
+    bindDetailsMemoire();
+    bindBarChart(document.getElementById('dashChart'));
+};
+
+// Infobulle d'un histogramme .dash-chart (tableau de bord, année du pointage)
+const bindBarChart = (chart) => {
+    const tip = chart?.querySelector('.dash-tip');
     if (!chart || !tip) return;
     const plot = chart.querySelector('.dash-chart-plot');
     let current = null;
@@ -8591,6 +8607,7 @@ const getPaletteEntries = (query) => {
         { label: 'Nouveau client', run: () => showClientModal() },
         { label: 'Ajouter une tâche au tableau de bord', run: () => { gotoPage('dashboard'); setTimeout(() => document.getElementById('todoInput')?.focus(), 80); } },
         { label: 'Saisir des heures de travail', run: () => showPointageJourModal() },
+        { label: 'Importer des heures depuis Excel', run: () => ouvrirImportPointages() },
         { label: 'Synchroniser avec le cloud', run: () => window.forceFirebaseSync?.(), hidden: !window.firebaseReady },
         { label: 'Afficher les raccourcis clavier', keys: '?', run: () => showShortcutsHelp() }
     ].filter(a => !a.hidden).forEach(a => entries.push({ group: 'Actions', ...a }));
@@ -11587,34 +11604,379 @@ const pointageMoisHtml = (now) => {
         </section>`;
 };
 
+// --- Année (v13.4) : statistiques de l'année choisie ---
+const POINTAGE_JOURS_SEMAINE = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
+const pointageMoisNom = (annee, i, month = 'long') => new Date(annee, i, 1, 12).toLocaleDateString('fr-CH', { month });
+const pointageHeuresDecimal = (minutes) => Math.round(minutes / 60 * 100) / 100;
+
+// Activités citées dans les notes (« prod, livraison + compta/facturation ») :
+// nombre de plages qui citent chacune ; les pluriels sont regroupés
+const pointageActivites = (mesurees) => {
+    const parCle = new Map();
+    mesurees.forEach(({ p }) => {
+        const vues = new Set();
+        String(p.notes || '').split(/[,;+/&\n]|\s+et\s+/i).forEach(brut => {
+            const libelle = brut.trim().replace(/\s+/g, ' ').toLowerCase();
+            const cle = ptgImportNorm(libelle).split(' ').map(w => (w.length > 3 ? w.replace(/s$/, '') : w)).join(' ');
+            if (!cle || vues.has(cle)) return;
+            vues.add(cle);
+            const a = parCle.get(cle) || { plages: 0, libelles: new Map() };
+            a.plages++;
+            a.libelles.set(libelle, (a.libelles.get(libelle) || 0) + 1);
+            parCle.set(cle, a);
+        });
+    });
+    return [...parCle.values()]
+        .map(a => ({ libelle: dashCapitalize([...a.libelles].sort((x, y) => y[1] - x[1])[0][0]), plages: a.plages }))
+        .sort((a, b) => b.plages - a.plages || a.libelle.localeCompare(b.libelle, 'fr'));
+};
+
+// Année `annee` : totaux, personnes, mois, jours de la semaine, heures de la
+// journée, activités et repères. Une plage compte pour son jour d'arrivée ;
+// une plage de nuit se répartit sur les heures après minuit.
+const buildPointageAnnee = (annee, now = new Date()) => {
+    const today = toLocalDayKey(now.getTime());
+    const anneeCourante = Number(today.slice(0, 4));
+    const debut = `${annee}-01-01`;
+    const fin = `${annee}-12-31`;
+    const toutes = DB.get('pointages') || [];
+    const plages = toutes.filter(p => p.date >= debut && p.date <= fin);
+    const mesurees = plages.map(p => ({ p, minutes: pointageDuree(p, now) })).filter(x => x.minutes > 0);
+    const somme = (liste) => liste.reduce((s, x) => s + x.minutes, 0);
+    const moisCles = Array.from({ length: 12 }, (_, i) => `${annee}-${String(i + 1).padStart(2, '0')}`);
+
+    const membres = pointageEquipe(plages).map(membre => {
+        const siennes = mesurees.filter(x => x.p.employeId === membre.id);
+        const parJour = new Map();
+        siennes.forEach(x => parJour.set(x.p.date, (parJour.get(x.p.date) || 0) + x.minutes));
+        let record = null;
+        parJour.forEach((minutes, date) => {
+            if (!record || minutes > record.minutes) record = { date, minutes };
+        });
+        return {
+            membre, record,
+            minutes: somme(siennes),
+            journees: parJour.size,
+            plages: siennes.length,
+            parMois: moisCles.map(m => somme(siennes.filter(x => x.p.date.startsWith(m))))
+        };
+    });
+
+    const parJourSemaine = POINTAGE_JOURS_SEMAINE.map(() => ({ minutes: 0, journees: new Set() }));
+    const parHeure = Array(24).fill(0);
+    const parSemaine = new Map();
+    mesurees.forEach(({ p, minutes }) => {
+        const j = parJourSemaine[(new Date(`${p.date}T12:00:00`).getDay() + 6) % 7];
+        j.minutes += minutes;
+        j.journees.add(`${p.employeId}|${p.date}`);
+        const lundi = pointageLundi(p.date);
+        parSemaine.set(lundi, (parSemaine.get(lundi) || 0) + minutes);
+        // Heures de la journée : la plage est parcourue heure par heure, pause répartie
+        const debutMin = parseHHMM(p.heureDebut);
+        const finMin = p.heureFin ? parseHHMM(p.heureFin) : null;
+        const ecoule = p.heureFin ? (finMin === null ? 0 : (finMin - debutMin + 1440) % 1440) : minutes + (Number(p.pause) || 0);
+        if (debutMin === null || !(ecoule > 0)) return;
+        for (let t = debutMin, reste = ecoule; reste > 0;) {
+            const part = Math.min(reste, 60 - (t % 60));
+            parHeure[Math.floor(t / 60) % 24] += part * minutes / ecoule;
+            t += part;
+            reste -= part;
+        }
+    });
+
+    const parMois = moisCles.map(m => somme(mesurees.filter(x => x.p.date.startsWith(m))));
+    const iMois = parMois.indexOf(Math.max(...parMois));
+    const semaineMax = [...parSemaine].sort((a, b) => b[1] - a[1])[0] || null;
+    const journeeMax = membres.filter(x => x.record).sort((a, b) => b.record.minutes - a.record.minutes)[0] || null;
+    // Semaines écoulées : jusqu'à aujourd'hui pour l'année en cours
+    const jours = Math.round((dateOnly(annee === anneeCourante ? today : fin) - dateOnly(debut)) / 86400000) + 1;
+    // Année précédente, à la même date pour l'année en cours
+    const precFin = annee === anneeCourante ? `${annee - 1}${today.slice(4)}` : `${annee - 1}-12-31`;
+    const precedente = toutes.filter(p => p.date >= `${annee - 1}-01-01` && p.date <= precFin)
+        .reduce((s, p) => s + pointageDuree(p, now), 0);
+
+    return {
+        annee, moisCles, membres, parMois, parHeure, precedente,
+        enCours: annee === anneeCourante,
+        moisCourant: annee === anneeCourante ? Number(today.slice(5, 7)) - 1 : -1,
+        minutes: somme(mesurees),
+        plages: mesurees.length,
+        journees: membres.reduce((s, x) => s + x.journees, 0),
+        joursActivite: new Set(mesurees.map(x => x.p.date)).size,
+        semaines: Math.max(1, jours) / 7,
+        parJourSemaine: parJourSemaine.map(x => ({ minutes: x.minutes, journees: x.journees.size })),
+        activites: pointageActivites(mesurees),
+        moisMax: parMois[iMois] > 0 ? { i: iMois, minutes: parMois[iMois] } : null,
+        semaineMax: semaineMax ? { lundi: semaineMax[0], minutes: semaineMax[1] } : null,
+        journeeMax: journeeMax ? { membre: journeeMax.membre, ...journeeMax.record } : null
+    };
+};
+
+// Histogramme d'une série, même composant que le tableau de bord (infobulle :
+// bindBarChart). colonnes : { label, titre, minutes, sub, current, mineur }
+const pointageChartHtml = (id, titre, colonnes, classe = '') => {
+    const valeurs = colonnes.map(c => c.minutes / 60);
+    const max = Math.max(0, ...valeurs);
+    const axis = dashAxis(max);
+    const iMax = valeurs.indexOf(max);
+    const iCourant = colonnes.findIndex(c => c.current);
+    const arret = iCourant >= 0 ? iCourant : iMax;
+    const pct = (v) => (axis.top > 0 ? (v / axis.top * 100).toFixed(2) : '0');
+    const col = (c, i) => {
+        const valeur = twinFmtDuration(c.minutes);
+        return `
+            <div class="dash-col${c.current ? ' is-current' : ''}" tabindex="${i === arret ? '0' : '-1'}" data-title="${escapeHtml(c.titre)}" data-value="${escapeHtml(valeur)}" data-sub="${escapeHtml(c.sub || '')}" aria-label="${escapeHtml([`${c.titre} : ${valeur}`, c.sub].filter(Boolean).join(', '))}">
+                <span class="dash-bar" style="height:${pct(valeurs[i])}%">${i === iMax && max > 0 ? `<span class="dash-bar-label">${escapeHtml(valeur)}</span>` : ''}</span>
+            </div>`;
+    };
+    return `
+        <div class="dash-chart ptg-chart${classe ? ` ${classe}` : ''}" id="${id}" role="group" aria-label="${escapeHtml(titre)}" style="--cols:${colonnes.length}">
+            <div class="dash-chart-plot">
+                <div class="dash-chart-area">
+                    ${axis.ticks.map(v => `<div class="dash-chart-line${v === 0 ? ' is-base' : ''}" style="bottom:${pct(v)}%" aria-hidden="true"><span>${escapeHtml(`${twinFmtInt(v)} h`)}</span></div>`).join('')}
+                    <div class="dash-chart-cols">${colonnes.map(col).join('')}</div>
+                </div>
+                <div class="dash-tip" aria-hidden="true" hidden>
+                    <span class="dash-tip-value"></span><span class="dash-tip-label"></span><span class="dash-tip-sub"></span>
+                </div>
+            </div>
+            <div class="dash-chart-x" aria-hidden="true">${colonnes.map(c => `<span${c.current ? ' class="is-current"' : ''}${c.mineur ? ' data-mineur' : ''}>${escapeHtml(c.label)}</span>`).join('')}</div>
+        </div>`;
+};
+
+// Tableau « Voir les données » d'un histogramme : heures et part de l'année
+const pointageTableAnneeHtml = (cle, entete, colonnes) => `
+    <details class="dash-table" data-dash-key="${cle}"${dashOpenAttr(cle)}>
+        <summary>Voir les données</summary>
+        <div class="dash-table-wrap">
+            <table>
+                <thead><tr><th scope="col">${escapeHtml(entete)}</th><th scope="col">Heures</th><th scope="col">Part</th></tr></thead>
+                <tbody>${colonnes.map(c => `<tr><th scope="row">${escapeHtml(c.titre)}</th><td>${c.minutes > 0 ? escapeHtml(twinFmtDuration(c.minutes)) : '—'}</td><td>${c.minutes > 0 ? escapeHtml(c.part) : '—'}</td></tr>`).join('')}</tbody>
+            </table>
+        </div>
+    </details>`;
+
+// Vue Année : chiffres clés, personnes, mois, jours de la semaine, heures de la journée, activités, repères
+const pointageAnneeHtml = (now) => {
+    const today = toLocalDayKey(now.getTime());
+    const anneeCourante = Number(today.slice(0, 4));
+    const annee = pointageAnneeAffiche || anneeCourante;
+    const a = buildPointageAnnee(annee, now);
+    const avecHeures = a.membres.filter(x => x.minutes > 0);
+    const nav = pointageNavHtml(String(annee), a.minutes > 0 ? `${twinFmtDuration(a.minutes)} · ${dashPlural(avecHeures.length, 'personne')}` : 'aucune heure saisie',
+        annee === anneeCourante, { prec: 'Année précédente', suiv: 'Année suivante', retour: 'Cette année' });
+    if (a.minutes === 0) {
+        return `
+            <section class="stock-section" aria-labelledby="ptgPeriodeTitle">
+                ${nav}
+                <div class="commande-empty">Aucune heure saisie en ${annee}.</div>
+            </section>`;
+    }
+    const part = (minutes, sur = a.minutes) => {
+        const pct = Math.round(minutes / sur * 100);
+        return pct === 0 && minutes > 0 ? '< 1 %' : `${pct} %`;
+    };
+    const titreSection =(id, titre) => `<div class="stock-section-head"><h2 class="stock-section-title" id="${id}">${escapeHtml(titre)}</h2></div>`;
+
+    // Chiffres clés
+    const stat = (label, value, sub = '') => `
+        <div class="dash-stat">
+            <span class="dash-stat-label">${escapeHtml(label)}</span>
+            <span class="dash-stat-value">${escapeHtml(value)}</span>
+            ${sub ? `<span class="dash-stat-sub">${escapeHtml(sub)}</span>` : ''}
+        </div>`;
+    const ecart = a.precedente > 0 ? Math.round((a.minutes - a.precedente) / a.precedente * 100) : null;
+    const ecartTexte = ecart === null ? ''
+        : `${ecart > 0 ? '+' : ecart < 0 ? '−' : '±'}${Math.abs(ecart)} % vs ${annee - 1}${a.enCours ? ' à la même date' : ''}`;
+    const stats = [
+        stat('Heures', twinFmtDuration(a.minutes), ecartTexte),
+        stat('Journées travaillées', twinFmtInt(a.journees), dashPlural(a.joursActivite, "jour d'activité", "jours d'activité")),
+        stat('Moyenne par journée', twinFmtDuration(a.minutes / a.journees)),
+        stat('Moyenne par semaine', twinFmtDuration(a.minutes / a.semaines), dashPlural(Math.round(a.semaines), 'semaine')),
+        stat('Plages', twinFmtInt(a.plages), `moyenne ${twinFmtDuration(a.minutes / a.plages)}`)
+    ].join('');
+
+    // Par personne : total, journées, moyenne, part, bande des douze mois
+    const maxMois = Math.max(1, ...a.membres.flatMap(x => x.parMois));
+    const personne = (x) => {
+        const sub = x.minutes > 0
+            ? [dashPlural(x.journees, 'journée'), `moyenne ${twinFmtDuration(x.minutes / x.journees)}`, part(x.minutes)].join(' · ')
+            : 'Aucune heure cette année';
+        const barre = (v, i) => `<span class="ptg-strip-day${i === a.moisCourant ? ' is-today' : ''}" title="${escapeHtml(`${dashCapitalize(pointageMoisNom(annee, i))} : ${v > 0 ? twinFmtDuration(v) : '—'}`)}"><span class="ptg-strip-bar" style="--h:${v > 0 ? Math.max(0.06, v / maxMois).toFixed(3) : 0}"></span></span>`;
+        return `
+            <li class="ptg-month-row">
+                <div class="ptg-row">
+                    ${pointageAvatarHtml(x.membre)}
+                    <span class="ptg-row-main">
+                        <span class="ptg-row-name">${escapeHtml(x.membre.nom)}${x.membre.actif ? '' : '<span class="stock-tag">inactif</span>'}</span>
+                        <span class="ptg-row-sub">${escapeHtml(sub)}</span>
+                    </span>
+                    <strong class="ptg-month-total">${x.minutes > 0 ? escapeHtml(twinFmtDuration(x.minutes)) : '—'}</strong>
+                </div>
+                ${x.minutes > 0 ? `
+                    <div class="ptg-strip" style="--ptg-jours:12" aria-hidden="true">${x.parMois.map(barre).join('')}</div>
+                    <div class="ptg-year-strip-x" aria-hidden="true">${a.moisCles.map((_, i) => `<span>${escapeHtml(pointageMoisNom(annee, i, 'narrow'))}</span>`).join('')}</div>` : ''}
+            </li>`;
+    };
+
+    // Par mois : histogramme de l'équipe, détail par personne dans l'infobulle et le tableau
+    const qui = (i) => avecHeures.filter(x => x.parMois[i] > 0).sort((p, q) => q.parMois[i] - p.parMois[i])
+        .map(x => `${x.membre.nom.split(' ')[0]} ${twinFmtDuration(x.parMois[i])}`).join(' · ');
+    const colonnesMois = a.moisCles.map((m, i) => ({
+        label: pointageMoisNom(annee, i, 'short').replace('.', ''),
+        titre: dashCapitalize(`${pointageMoisNom(annee, i)} ${annee}`),
+        minutes: a.parMois[i],
+        sub: [qui(i), i === a.moisCourant ? 'mois en cours' : ''].filter(Boolean).join(' · '),
+        current: i === a.moisCourant
+    }));
+    const moisLien = (m, i) => {
+        const nom = escapeHtml(dashCapitalize(pointageMoisNom(annee, i)));
+        return m <= today.slice(0, 7) ? `<button type="button" class="ptg-year-link" data-click="pointage-voir-mois" data-mois="${m}">${nom}</button>` : nom;
+    };
+    const duree = (minutes) => (minutes > 0 ? escapeHtml(twinFmtDuration(minutes)) : '—');
+    const tableMois = `
+        <details class="dash-table" data-dash-key="ptg-annee-mois"${dashOpenAttr('ptg-annee-mois')}>
+            <summary>Voir les données</summary>
+            <div class="dash-table-wrap">
+                <table>
+                    <thead><tr><th scope="col">Mois</th>${avecHeures.map(x => `<th scope="col">${escapeHtml(x.membre.nom)}</th>`).join('')}<th scope="col">Total</th></tr></thead>
+                    <tbody>${a.moisCles.map((m, i) => `<tr><th scope="row">${moisLien(m, i)}</th>${avecHeures.map(x => `<td>${duree(x.parMois[i])}</td>`).join('')}<td><strong>${duree(a.parMois[i])}</strong></td></tr>`).join('')}</tbody>
+                    <tfoot><tr><th scope="row">Total</th>${avecHeures.map(x => `<td>${duree(x.minutes)}</td>`).join('')}<td>${duree(a.minutes)}</td></tr></tfoot>
+                </table>
+            </div>
+        </details>`;
+
+    const colonnesJours = a.parJourSemaine.map((x, i) => ({
+        label: POINTAGE_JOURS_SEMAINE[i].slice(0, 3).toLowerCase(),
+        titre: POINTAGE_JOURS_SEMAINE[i],
+        minutes: x.minutes,
+        part: part(x.minutes),
+        sub: x.minutes > 0 ? `${dashPlural(x.journees, 'journée')} · ${part(x.minutes)}` : ''
+    }));
+    const colonnesHeures = a.parHeure.map((minutes, h) => ({
+        label: h % 3 === 0 ? `${h} h` : '',
+        mineur: h % 6 !== 0,
+        titre: `${h} h – ${h + 1} h`,
+        minutes,
+        part: part(minutes),
+        sub: minutes > 0 ? part(minutes) : ''
+    }));
+
+    // Activités citées dans les notes, puis repères de l'année
+    const top = a.activites.slice(0, 10);
+    const autres = a.activites.length - top.length;
+    const activitesHtml = top.length ? `
+        <section class="stock-section" aria-labelledby="ptgAnneeActTitle">
+            ${titreSection('ptgAnneeActTitle', 'Activités')}
+            <div class="stock-group ptg-year-card">
+                <ol class="dash-rank-list">${top.map(x => `
+                    <li class="dash-rank-row">
+                        <span class="dash-rank-label"><span class="dash-rank-name">${escapeHtml(x.libelle)}</span></span>
+                        <span class="dash-rank-value">${escapeHtml(dashPlural(x.plages, 'plage'))}<small> · ${escapeHtml(part(x.plages, a.plages))}</small></span>
+                        <span class="dash-rank-track" aria-hidden="true"><span class="dash-rank-bar" style="width:${(x.plages / top[0].plages * 100).toFixed(1)}%"></span></span>
+                    </li>`).join('')}
+                </ol>
+                ${autres > 0 ? `<p class="dash-muted dash-rank-more">${escapeHtml(`+ ${dashPlural(autres, 'autre activité', 'autres activités')}`)}</p>` : ''}
+            </div>
+        </section>` : '';
+    const jourCourt = (date) => dashDayShort(new Date(`${date}T12:00:00`));
+    const reperes = [
+        a.moisMax ? ['Mois le plus chargé', `${dashCapitalize(pointageMoisNom(annee, a.moisMax.i))} · ${twinFmtDuration(a.moisMax.minutes)}`] : null,
+        a.semaineMax ? ['Semaine la plus chargée', `${jourCourt(a.semaineMax.lundi)} – ${jourCourt(pointageJourDecale(a.semaineMax.lundi, 6))} · ${twinFmtDuration(a.semaineMax.minutes)}`] : null,
+        a.journeeMax ? ['Plus longue journée', `${a.journeeMax.membre.nom} · ${pointageJourCourt(a.journeeMax.date)} · ${twinFmtDuration(a.journeeMax.minutes)}`] : null
+    ].filter(Boolean);
+
+    return `
+        <section class="stock-section" aria-labelledby="ptgPeriodeTitle">
+            ${nav}
+            <div class="stock-group ptg-year-card"><div class="dash-stats ptg-year-stats">${stats}</div></div>
+        </section>
+        <section class="stock-section" aria-labelledby="ptgAnneePersTitle">
+            ${titreSection('ptgAnneePersTitle', 'Par personne')}
+            <div class="stock-group"><ul class="ptg-month-list">${a.membres.map(personne).join('')}</ul></div>
+        </section>
+        <section class="stock-section" aria-labelledby="ptgAnneeMoisTitle">
+            ${titreSection('ptgAnneeMoisTitle', 'Par mois')}
+            <div class="stock-group ptg-year-card">
+                ${pointageChartHtml('ptgChartMois', `Heures par mois en ${annee}`, colonnesMois, 'ptg-chart--mois')}
+                ${tableMois}
+            </div>
+        </section>
+        <div class="ptg-year-grid">
+            <section class="stock-section" aria-labelledby="ptgAnneeJoursTitle">
+                ${titreSection('ptgAnneeJoursTitle', 'Jours de la semaine')}
+                <div class="stock-group ptg-year-card">
+                    ${pointageChartHtml('ptgChartJours', `Heures par jour de la semaine en ${annee}`, colonnesJours)}
+                    ${pointageTableAnneeHtml('ptg-annee-jours', 'Jour', colonnesJours)}
+                </div>
+            </section>
+            <section class="stock-section" aria-labelledby="ptgAnneeHeuresTitle">
+                ${titreSection('ptgAnneeHeuresTitle', 'Heures de la journée')}
+                <div class="stock-group ptg-year-card">
+                    ${pointageChartHtml('ptgChartHeures', `Heures travaillées selon l'heure de la journée en ${annee}`, colonnesHeures)}
+                    ${pointageTableAnneeHtml('ptg-annee-heures', 'Heure', colonnesHeures)}
+                </div>
+            </section>
+        </div>
+        <div class="ptg-year-grid">
+            ${activitesHtml}
+            <section class="stock-section" aria-labelledby="ptgAnneeRepTitle">
+                ${titreSection('ptgAnneeRepTitle', 'Repères')}
+                <div class="stock-group ptg-year-card">
+                    <dl class="ptg-year-records">${reperes.map(([dt, dd]) => `<div><dt>${escapeHtml(dt)}</dt><dd>${escapeHtml(dd)}</dd></div>`).join('')}</dl>
+                </div>
+            </section>
+        </div>`;
+};
+
+// Mois choisi depuis la vue Année : il s'ouvre dans la vue Mois
+const pointageVoirMois = (mois) => {
+    if (!/^\d{4}-\d{2}$/.test(mois)) return;
+    const courant = getLocalDateISOString().slice(0, 7);
+    DB.setFilter('pointage_vue', 'mois');
+    pointageMoisAffiche = mois >= courant ? null : mois;
+    renderPointage();
+    document.getElementById('ptgPeriodeTitle')?.scrollIntoView({ block: 'center' });
+};
+
 // Pointage view
 const renderPointage = () => {
     const now = new Date();
     const today = toLocalDayKey(now.getTime());
-    const vue = DB.getFilter('pointage_vue') === 'mois' ? 'mois' : 'semaine';
+    const filtre = DB.getFilter('pointage_vue');
+    const vue = filtre === 'mois' || filtre === 'annee' ? filtre : 'semaine';
     const pointages = DB.get('pointages') || [];
     const actifs = (DB.get('employees') || []).filter(e => e.actif);
     const vide = actifs.length === 0 && pointages.length === 0;
 
     const segment = (value, label) => `<button type="button" class="segment${vue === value ? ' active' : ''}" data-click="pointage-vue" data-value="${value}" aria-pressed="${vue === value}">${label}</button>`;
     const saisir = actifs.length ? '<button type="button" class="btn btn-primary" data-click="pointage-saisir">+ Saisir des heures</button>' : '';
-    const actions = vue === 'mois'
-        ? `<button type="button" class="btn btn-secondary" data-click="pointage-export">Exporter Excel</button>${saisir}`
-        : `${actifs.length ? '<button type="button" class="btn btn-secondary" data-click="pointage-maintenant-modal">Pointer maintenant</button>' : ''}${saisir}`;
+    const actions = vue === 'semaine'
+        ? `${actifs.length ? '<button type="button" class="btn btn-secondary" data-click="pointage-maintenant-modal">Pointer maintenant</button>' : ''}${saisir}`
+        : `<button type="button" class="btn btn-secondary" data-click="pointage-import">Importer Excel</button><button type="button" class="btn btn-secondary" data-click="pointage-export">Exporter Excel</button>${saisir}`;
+    const contenu = {
+        semaine: () => `${pointageEnCoursHtml(pointages, now)}${pointageSemaineHtml(now)}`,
+        mois: () => pointageMoisHtml(now),
+        annee: () => pointageAnneeHtml(now)
+    }[vue];
 
     safeRender(`
         <div class="ptg">
-            ${vide ? '' : pageToolbar(actions, `<div class="segmented-filter" role="group" aria-label="Période affichée">${segment('semaine', 'Semaine')}${segment('mois', 'Mois')}</div>`)}
+            ${vide ? '' : pageToolbar(actions, `<div class="segmented-filter" role="group" aria-label="Période affichée">${segment('semaine', 'Semaine')}${segment('mois', 'Mois')}${segment('annee', 'Année')}</div>`)}
             ${vide ? `
                 <div class="empty-state">
                     <p>Aucun employé pour l'instant. Ajoutez l'équipe dans Paramètres › Employés pour saisir des heures.</p>
                     <a href="#parametres" class="btn btn-primary">Paramètres</a>
-                </div>` : (vue === 'mois' ? pointageMoisHtml(now) : `${pointageEnCoursHtml(pointages, now)}${pointageSemaineHtml(now)}`)}
+                </div>` : contenu()}
         </div>
     `);
     document.querySelector('#content .ptg-plages')?.addEventListener('toggle', (e) => {
         DB.setFilter('pointage_plages', e.target.open ? 'open' : '');
     });
+    if (vue === 'annee') {
+        document.querySelectorAll('#content .ptg-chart').forEach(bindBarChart);
+        bindDetailsMemoire();
+    }
     startPointageTicker(today);
 };
 
@@ -11641,7 +12003,12 @@ const startPointageTicker = (jour) => {
 
 const pointageNaviguer = (dir) => {
     const today = getLocalDateISOString();
-    if (DB.getFilter('pointage_vue') === 'mois') {
+    const vue = DB.getFilter('pointage_vue');
+    if (vue === 'annee') {
+        const courant = Number(today.slice(0, 4));
+        const cible = dir ? (pointageAnneeAffiche || courant) + dir : courant;
+        pointageAnneeAffiche = cible >= courant ? null : cible;
+    } else if (vue === 'mois') {
         const courant = today.slice(0, 7);
         const cible = dir ? pointageMoisDecale(pointageMoisAffiche || courant, dir) : courant;
         pointageMoisAffiche = cible >= courant ? null : cible;
@@ -11661,6 +12028,8 @@ const pointageAfficherJour = (date) => {
     pointageLundiAffiche = lundi >= pointageLundi(today) ? null : lundi;
     const mois = date.slice(0, 7);
     pointageMoisAffiche = mois >= today.slice(0, 7) ? null : mois;
+    const annee = Number(date.slice(0, 4));
+    pointageAnneeAffiche = annee >= Number(today.slice(0, 4)) ? null : annee;
 };
 
 // --- Fenêtre « Heures de travail » : les plages d'une personne pour un jour ---
@@ -11925,6 +12294,65 @@ const showPointerMaintenantModal = () => {
         '<button type="button" class="btn btn-secondary" data-click="close-modal">Fermer</button>');
 };
 
+// Feuille « Détail » d'un relevé : une ligne par plage, par date, employé et début
+const pointageDetailRows = (plages, nom, now) => [...plages]
+    .sort((a, b) => a.date.localeCompare(b.date) || nom(a).localeCompare(nom(b), 'fr') || pointageParDebut(a, b))
+    .map(p => {
+        const minutes = pointageDuree(p, now);
+        return {
+            'Date': formatDate(p.date),
+            'Jour': pointageJourLabel(p.date, { weekday: 'long' }),
+            'Employé': nom(p),
+            'Début': p.heureDebut || '',
+            'Fin': p.heureFin || (pointageOubli(p, now) ? 'non saisie' : 'en cours'),
+            'Pause (min)': Number(p.pause) || 0,
+            'Durée': twinFmtDuration(minutes),
+            'Durée (h)': pointageHeuresDecimal(minutes),
+            'Note': p.notes || ''
+        };
+    });
+
+// Relevé de l'année affichée : synthèse, mois par personne, activités et détail des plages
+const exportPointagesAnnee = () => {
+    if (typeof XLSX === 'undefined') {
+        showToast('Erreur: Bibliothèque Excel non chargée', 'error');
+        return;
+    }
+    const now = new Date();
+    const annee = pointageAnneeAffiche || Number(getLocalDateISOString().slice(0, 4));
+    const a = buildPointageAnnee(annee, now);
+    const heures = pointageHeuresDecimal;
+    const feuille = (rows) => XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ Information: 'Aucune heure saisie' }]);
+    const avecHeures = a.membres.filter(x => x.minutes > 0);
+    const ligne = (nom, x) => ({
+        'Employé': nom,
+        'Heures': twinFmtDuration(x.minutes),
+        'Heures (décimal)': heures(x.minutes),
+        'Journées': x.journees,
+        'Moyenne par journée': x.journees ? twinFmtDuration(x.minutes / x.journees) : '',
+        'Plages': x.plages,
+        'Part (%)': a.minutes ? Math.round(x.minutes / a.minutes * 1000) / 10 : 0
+    });
+    const synthese = avecHeures.map(x => ligne(x.membre.nom, x));
+    if (avecHeures.length > 1) synthese.push(ligne('Total', a));
+    const parMois = a.moisCles.map((_, i) => {
+        const row = { 'Mois': dashCapitalize(pointageMoisNom(annee, i)) };
+        avecHeures.forEach(x => { row[`${x.membre.nom} (h)`] = heures(x.parMois[i]); });
+        row['Total (h)'] = heures(a.parMois[i]);
+        return row;
+    });
+    const noms = new Map(a.membres.map(x => [x.membre.id, x.membre.nom]));
+    const nom = (p) => noms.get(p.employeId) || POINTAGE_MEMBRE_INCONNU.nom;
+    const plages = (DB.get('pointages') || []).filter(p => p.date >= `${annee}-01-01` && p.date <= `${annee}-12-31`);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, feuille(synthese), 'Synthèse');
+    XLSX.utils.book_append_sheet(wb, feuille(parMois), 'Par mois');
+    if (a.activites.length) XLSX.utils.book_append_sheet(wb, feuille(a.activites.map(x => ({ 'Activité': x.libelle, 'Plages': x.plages }))), 'Activités');
+    XLSX.utils.book_append_sheet(wb, feuille(pointageDetailRows(plages, nom, now)), 'Détail');
+    XLSX.writeFile(wb, `pointages_${annee}.xlsx`);
+    showToast('Export Excel des heures réussi');
+};
+
 // Relevé du mois affiché : synthèse par personne et détail des plages
 const exportPointagesMois = () => {
     if (typeof XLSX === 'undefined') {
@@ -11934,7 +12362,7 @@ const exportPointagesMois = () => {
     const now = new Date();
     const mois = pointageMoisAffiche || getLocalDateISOString().slice(0, 7);
     const m = buildPointageMois(mois, now);
-    const heures = (minutes) => Math.round(minutes / 60 * 100) / 100;
+    const heures = pointageHeuresDecimal;
     const feuille = (rows) => XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ Information: 'Aucune heure saisie' }]);
     const avecHeures = m.membres.filter(x => x.minutes > 0);
     const synthese = avecHeures.map(x => ({
@@ -11955,27 +12383,429 @@ const exportPointagesMois = () => {
     }
     const noms = new Map(m.membres.map(x => [x.membre.id, x.membre.nom]));
     const nom = (p) => noms.get(p.employeId) || POINTAGE_MEMBRE_INCONNU.nom;
-    const detail = [...m.plages]
-        .sort((a, b) => a.date.localeCompare(b.date) || nom(a).localeCompare(nom(b), 'fr') || pointageParDebut(a, b))
-        .map(p => {
-            const minutes = pointageDuree(p, now);
-            return {
-                'Date': formatDate(p.date),
-                'Jour': pointageJourLabel(p.date, { weekday: 'long' }),
-                'Employé': nom(p),
-                'Début': p.heureDebut || '',
-                'Fin': p.heureFin || (pointageOubli(p, now) ? 'non saisie' : 'en cours'),
-                'Pause (min)': Number(p.pause) || 0,
-                'Durée': twinFmtDuration(minutes),
-                'Durée (h)': heures(minutes),
-                'Note': p.notes || ''
-            };
-        });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, feuille(synthese), 'Synthèse');
-    XLSX.utils.book_append_sheet(wb, feuille(detail), 'Détail');
+    XLSX.utils.book_append_sheet(wb, feuille(pointageDetailRows(m.plages, nom, now)), 'Détail');
     XLSX.writeFile(wb, `pointages_${mois}.xlsx`);
     showToast('Export Excel des heures réussi');
+};
+
+// --- Import Excel des heures (v13.4) ---
+// Classeur tenu à la main : une ligne par plage avec la date, la personne,
+// l'heure de début et l'heure de fin, plus au besoin une pause et une
+// description (reprise en note). Les colonnes sont reconnues par leur en-tête,
+// sur la première feuille qui a une date, un début et une fin ; le relevé
+// exporté par l'application se relit de la même façon. Chaque personne du
+// fichier est rattachée à un employé (par défaut celui qui porte ce nom).
+// L'import ne fait qu'ajouter des plages : une plage déjà enregistrée (même
+// employé, jour, début et fin) est sautée, une plage qui en chevauche une
+// autre (enregistrée, ou plus haut dans le fichier) aussi ; rien n'est modifié
+// ni supprimé. Un fichier complété depuis peut donc être réimporté.
+
+const POINTAGE_IMPORT_NOUVEAU = '__nouveau__';
+let pointageImport = null; // fichier analysé : { fichier, feuille, lignes, selection }
+
+// Texte comparable : minuscules, sans accents ni ponctuation
+const ptgImportNorm = (v) => String(v ?? '').toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const ptgImportVide = (cell) => !cell || cell.t === 'e' || cell.v === null || cell.v === undefined || String(cell.v).trim() === '';
+const ptgImportTexte = (cell) => (ptgImportVide(cell) ? '' : String(typeof cell.v === 'string' ? cell.v : (cell.w ?? cell.v)).trim());
+
+// Jour AAAA-MM-JJ : date Excel (numéro de série) ou texte « 18.05.2026 »,
+// « 18/05/26 », « 2026-05-18 ». '' si la cellule est vide, null si illisible.
+const ptgImportJour = (cell, date1904 = false) => {
+    if (ptgImportVide(cell)) return '';
+    let y; let m; let d;
+    if (typeof cell.v === 'number') {
+        const jour = new Date((date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30)) + Math.floor(cell.v) * 86400000);
+        [y, m, d] = [jour.getUTCFullYear(), jour.getUTCMonth() + 1, jour.getUTCDate()];
+    } else if (cell.v instanceof Date) {
+        [y, m, d] = [cell.v.getFullYear(), cell.v.getMonth() + 1, cell.v.getDate()];
+    } else {
+        const s = String(cell.v).trim();
+        const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/.exec(s);
+        const ch = /^(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})$/.exec(s);
+        if (iso) [y, m, d] = [Number(iso[1]), Number(iso[2]), Number(iso[3])];
+        else if (ch) [y, m, d] = [Number(ch[3]) + (ch[3].length === 2 ? 2000 : 0), Number(ch[2]), Number(ch[1])];
+        else return null;
+    }
+    const jour = new Date(y, m - 1, d, 12);
+    return y >= 2000 && y <= 2100 && jour.getMonth() === m - 1 && jour.getDate() === d ? toLocalDayKey(jour.getTime()) : null;
+};
+
+// Heure HH:MM : fraction de jour Excel (1 = 24:00, gardé comme une fin à minuit,
+// 00:00) ou texte « 9:10 », « 09.10 h », « 9h10 », « 9h ». '' si vide, null si illisible.
+const ptgImportHeure = (cell) => {
+    if (ptgImportVide(cell)) return '';
+    let minutes;
+    if (typeof cell.v === 'number') {
+        // Au-delà d'un jour, seule une date avec heure (numéro de série) porte une heure
+        if (!(cell.v >= 0) || (cell.v > 1 && cell.v < 1000)) return null;
+        minutes = Math.round((cell.v - Math.floor(cell.v)) * 1440) % 1440;
+    } else if (cell.v instanceof Date) {
+        minutes = cell.v.getHours() * 60 + cell.v.getMinutes();
+    } else {
+        const m = /^(\d{1,2})\s*(?:[:.h]\s*(\d{2}))?(?:[:.]\d{2})?\s*h?$/i.exec(String(cell.v).trim());
+        const total = m ? Number(m[1]) * 60 + Number(m[2] || 0) : NaN;
+        if (!m || Number(m[2] || 0) > 59 || !(total <= 1440)) return null;
+        minutes = total % 1440;
+    }
+    return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+};
+
+// Pause en minutes : nombre de minutes, fraction de jour (< 1) ou texte
+// « 30 », « 30 min », « 0:30 ». 0 si vide, null si illisible.
+const ptgImportPause = (cell) => {
+    if (ptgImportVide(cell)) return 0;
+    if (typeof cell.v === 'number') return cell.v >= 0 ? Math.round(cell.v < 1 ? cell.v * 1440 : cell.v) : null;
+    const min = /^(\d+)\s*(?:min|mn|m)?$/i.exec(String(cell.v).trim());
+    if (min) return Number(min[1]);
+    const h = ptgImportHeure(cell);
+    return h ? parseHHMM(h) : null;
+};
+
+// Colonnes d'une ligne d'en-tête ; null s'il y manque la date, le début ou la fin
+const ptgImportColonnes = (ws, r, range) => {
+    const entetes = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+        entetes.push({ c, h: ptgImportNorm(ptgImportTexte(ws[XLSX.utils.encode_cell({ r, c })])) });
+    }
+    const col = (re) => entetes.find(x => x.h && re.test(x.h))?.c ?? -1;
+    const cols = {
+        date: col(/^(date|jour)\b/),
+        debut: col(/\b(debut|arrivee|entree)\b/),
+        fin: col(/\b(fin|depart|sortie)\b/),
+        employe: col(/\b(employe|employee|personne|collaborat\w*)\b/),
+        prenom: col(/\bprenom\b/),
+        nom: col(/^nom\b/),
+        id: col(/^id$/),
+        pause: col(/\bpause\b/),
+        note: col(/\b(description|notes?|remarques?|commentaires?|taches?|activites?)\b/)
+    };
+    return cols.date >= 0 && cols.debut >= 0 && cols.fin >= 0 ? cols : null;
+};
+
+// Lignes sous l'en-tête ; celles sans date ni heures (vides, formules sans
+// valeur, totaux) sont ignorées, les autres gardent leur numéro de ligne Excel
+const ptgImportLignes = (ws, r0, range, cols, date1904) => {
+    const lignes = [];
+    for (let r = r0 + 1; r <= range.e.r; r++) {
+        const cell = (c) => (c >= 0 ? ws[XLSX.utils.encode_cell({ r, c })] : undefined);
+        const texte = (c) => ptgImportTexte(cell(c));
+        if ([cols.date, cols.debut, cols.fin].every(c => ptgImportVide(cell(c)))) continue;
+        const personne = texte(cols.employe) || [texte(cols.prenom), texte(cols.nom)].filter(Boolean).join(' ')
+            || (texte(cols.id) ? `ID ${texte(cols.id)}` : '');
+        const date = ptgImportJour(cell(cols.date), date1904);
+        const heureDebut = ptgImportHeure(cell(cols.debut));
+        const heureFin = ptgImportHeure(cell(cols.fin));
+        const pause = ptgImportPause(cell(cols.pause));
+        let erreur = '';
+        if (date === '') erreur = 'date manquante';
+        else if (date === null) erreur = 'date illisible';
+        else if (!personne) erreur = 'personne manquante';
+        else if (heureDebut === '') erreur = 'heure de début manquante';
+        else if (heureDebut === null) erreur = 'heure de début illisible';
+        else if (heureFin === '') erreur = 'heure de fin manquante';
+        else if (heureFin === null) erreur = 'heure de fin illisible';
+        else if (heureDebut === heureFin) erreur = 'plage vide';
+        else if (pause === null) erreur = 'pause illisible';
+        else if (computePointageMinutes(parseHHMM(heureDebut), parseHHMM(heureFin), pause) === null) erreur = 'pause plus longue que la plage';
+        lignes.push({
+            ligne: r + 1, personne, cle: ptgImportNorm(personne),
+            date: date || '', heureDebut: heureDebut || '', heureFin: heureFin || '', pause: pause || 0,
+            notes: texte(cols.note), erreur
+        });
+    }
+    return lignes;
+};
+
+// Feuille d'heures d'un classeur : la première dont une des 20 premières lignes
+// est un en-tête reconnu ; null si aucune
+const analyserPointagesExcel = (wb) => {
+    const date1904 = !!wb.Workbook?.WBProps?.date1904;
+    for (const feuille of wb.SheetNames) {
+        const ws = wb.Sheets[feuille];
+        if (!ws?.['!ref']) continue;
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        for (let r = range.s.r; r <= Math.min(range.e.r, range.s.r + 19); r++) {
+            const cols = ptgImportColonnes(ws, r, range);
+            if (cols) return { feuille, lignes: ptgImportLignes(ws, r, range, cols, date1904) };
+        }
+    }
+    return null;
+};
+
+// Employé d'une personne du fichier : même nom complet, sinon même prénom,
+// sinon même nom de famille (actifs d'abord) ; '' si aucun
+const ptgImportCorrespondance = (personne, employees) => {
+    const cle = ptgImportNorm(personne);
+    if (!cle) return '';
+    const n = ptgImportNorm;
+    const tries = [...employees.filter(e => e.actif), ...employees.filter(e => !e.actif)];
+    return (tries.find(e => n(`${e.prenom || ''} ${e.nom || ''}`) === cle || n(`${e.nom || ''} ${e.prenom || ''}`) === cle)
+        || tries.find(e => n(e.prenom) === cle)
+        || tries.find(e => n(e.nom) === cle))?.id || '';
+};
+
+// Sort de chaque ligne, pour un choix d'employés (clé de la personne → id, ''
+// pour ne pas importer) et les plages enregistrées `toutes` : nouvelles,
+// déjà enregistrées, chevauchements, à corriger, ignorées
+const planPointageImport = (lignes, choix, toutes, now = new Date()) => {
+    const today = toLocalDayKey(now.getTime());
+    const parJour = new Map();
+    const ranger = (p) => {
+        const k = `${p.employeId}|${p.date}`;
+        if (!parJour.has(k)) parJour.set(k, []);
+        parJour.get(k).push(p);
+    };
+    toutes.forEach(ranger);
+    const plan = { nouvelles: [], presentes: [], conflits: [], incompletes: [], ecartees: [] };
+    lignes.forEach(l => {
+        // Personne non importée : ses lignes sont ignorées, même incomplètes
+        const employeId = choix.get(l.cle) || '';
+        if (l.cle && !employeId) {
+            plan.ecartees.push(l);
+            return;
+        }
+        if (l.erreur || l.date > today) {
+            plan.incompletes.push({ ...l, motif: l.erreur || 'jour à venir' });
+            return;
+        }
+        const plage = { employeId, date: l.date, heureDebut: l.heureDebut, heureFin: l.heureFin, pause: l.pause };
+        if (l.notes) plage.notes = l.notes;
+        const voisines = [pointageJourDecale(l.date, -1), l.date, pointageJourDecale(l.date, 1)]
+            .flatMap(d => parJour.get(`${employeId}|${d}`) || []);
+        if (voisines.some(p => p.date === l.date && p.heureDebut === l.heureDebut && p.heureFin === l.heureFin)) {
+            plan.presentes.push(l);
+            return;
+        }
+        const iv = pointageIntervalle(plage, l.date, now);
+        const autre = voisines.find(p => {
+            const j = pointageIntervalle(p, l.date, now);
+            return j && j[0] < iv[1] && iv[0] < j[1];
+        });
+        if (autre) {
+            plan.conflits.push({ ...l, avec: autre });
+            return;
+        }
+        plan.nouvelles.push({ ligne: l, plage });
+        ranger({ ...plage, ligneFichier: l.ligne });
+    });
+    return plan;
+};
+
+// Menu de chaque personne : clé → valeur choisie ; puis employé visé (un
+// nouvel employé est propre à chaque personne)
+const lireSelectionImport = (form) => new Map([...form.querySelectorAll('select[data-cle]')]
+    .map(s => [s.getAttribute('data-cle'), s.value]));
+const choixImport = (selection) => new Map([...selection]
+    .map(([cle, v]) => [cle, v === POINTAGE_IMPORT_NOUVEAU ? `${POINTAGE_IMPORT_NOUVEAU}${cle}` : v]));
+
+// Champ de fichier commun au bouton de la page et à la palette
+const ouvrirImportPointages = () => {
+    let input = document.getElementById('pointageImportFile');
+    if (!input) {
+        input = document.createElement('input');
+        input.type = 'file';
+        input.id = 'pointageImportFile';
+        input.accept = '.xlsx,.xlsm,.xls,.ods,.csv';
+        input.hidden = true;
+        input.setAttribute('data-change', 'pointage-import-fichier');
+        document.body.appendChild(input);
+    }
+    input.click();
+};
+
+const lirePointagesExcel = async (input) => {
+    const fichier = input.files?.[0];
+    input.value = ''; // le même fichier, complété, pourra être choisi à nouveau
+    if (!fichier) return;
+    if (typeof XLSX === 'undefined') {
+        showToast('Erreur: Bibliothèque Excel non chargée', 'error');
+        return;
+    }
+    let analyse;
+    try {
+        analyse = analyserPointagesExcel(XLSX.read(await fichier.arrayBuffer(), { type: 'array' }));
+    } catch (e) {
+        console.error('Import des heures :', e);
+        showToast('Fichier illisible', 'error');
+        return;
+    }
+    if (!analyse) {
+        showToast('Aucune feuille avec les colonnes Date, Heure début et Heure fin', 'error');
+        return;
+    }
+    if (analyse.lignes.length === 0) {
+        showToast('Aucune heure dans ce fichier', 'warning');
+        return;
+    }
+    pointageImport = { fichier: fichier.name, ...analyse, selection: null };
+    showPointageImportModal();
+};
+
+// Fenêtre « Importer des heures » : personnes du fichier et employé de chacune,
+// puis le bilan de l'import
+const showPointageImportModal = () => {
+    const imp = pointageImport;
+    if (!imp) return;
+    const employees = DB.get('employees') || [];
+    const tries = [...employees.filter(e => e.actif), ...employees.filter(e => !e.actif)];
+    const nomDe = (e) => `${e.prenom || ''} ${e.nom || ''}`.trim() || 'Employé';
+    const personnes = [];
+    imp.lignes.forEach(l => {
+        if (!l.cle) return;
+        const p = personnes.find(x => x.cle === l.cle);
+        if (p) p.lignes++;
+        else personnes.push({ cle: l.cle, nom: l.personne, lignes: 1 });
+    });
+    personnes.sort((a, b) => b.lignes - a.lignes);
+    const dates = imp.lignes.map(l => l.date).filter(Boolean).sort();
+    const periode = dates.length ? `${formatDate(dates[0])} – ${formatDate(dates[dates.length - 1])}` : '';
+    const personneHtml = (p) => {
+        const defaut = ptgImportCorrespondance(p.nom, employees);
+        const valeurs = new Set(['', ...employees.map(e => e.id), ...(defaut ? [] : [POINTAGE_IMPORT_NOUVEAU])]);
+        const memo = imp.selection?.get(p.cle);
+        const choisi = memo !== undefined && valeurs.has(memo) ? memo : defaut;
+        const option = (value, label) => `<option value="${escapeHtml(value)}"${value === choisi ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+        return `
+            <li class="ptg-row ptg-import-person">
+                <span class="ptg-row-main">
+                    <span class="ptg-row-name">${escapeHtml(p.nom)}</span>
+                    <span class="ptg-row-sub" data-role="sub"></span>
+                </span>
+                <select data-cle="${escapeHtml(p.cle)}" data-change="pointage-import-personne" aria-label="${escapeHtml(`Employé pour ${p.nom}`)}">
+                    ${option('', 'Ne pas importer')}
+                    ${tries.map(e => option(e.id, `${nomDe(e)}${e.actif ? '' : ' (inactif)'}`)).join('')}
+                    ${defaut ? '' : option(POINTAGE_IMPORT_NOUVEAU, `Nouvel employé « ${p.nom} »`)}
+                </select>
+            </li>`;
+    };
+    modal.show('Importer des heures', `
+        <form id="pointageImportForm" class="ptg-import" novalidate>
+            <p class="ptg-import-file">
+                <strong>${escapeHtml(imp.fichier)}</strong>
+                <span>${escapeHtml([imp.feuille, dashPlural(imp.lignes.length, 'ligne'), periode].filter(Boolean).join(' · '))}</span>
+            </p>
+            ${personnes.length ? `<ul class="ptg-list ptg-import-people">${personnes.map(personneHtml).join('')}</ul>` : ''}
+            <dl class="ptg-import-bilan" id="ptgImpBilan"></dl>
+            <div id="ptgImpVerifier"></div>
+        </form>
+    `, `
+        <button type="button" class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button type="button" class="btn btn-primary ptg-import-ok" id="ptgImpOk" data-click="pointage-import-confirmer">Importer</button>
+    `);
+    majPointageImport();
+};
+
+// Bilan recalculé à chaque choix, sur les plages enregistrées à cet instant
+const majPointageImport = () => {
+    const imp = pointageImport;
+    const form = document.getElementById('pointageImportForm');
+    if (!imp || !form) return;
+    const now = new Date();
+    imp.selection = lireSelectionImport(form);
+    const plan = planPointageImport(imp.lignes, choixImport(imp.selection), DB.get('pointages') || [], now);
+    const duree = (liste) => twinFmtDuration(liste.reduce((s, x) => s + pointageDuree(x.plage, now), 0));
+    form.querySelectorAll('select[data-cle]').forEach(sel => {
+        const cle = sel.getAttribute('data-cle');
+        const sub = sel.closest('.ptg-import-person')?.querySelector('[data-role="sub"]');
+        if (!sub) return;
+        const siennes = plan.nouvelles.filter(x => x.ligne.cle === cle);
+        sub.textContent = !sel.value
+            ? dashPlural(imp.lignes.filter(l => l.cle === cle).length, 'ligne')
+            : siennes.length ? `${dashPlural(siennes.length, 'plage')} · ${duree(siennes)}` : 'Rien de nouveau';
+    });
+
+    const rang = (label, valeur) => `<div class="ptg-import-bilan-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(valeur)}</dd></div>`;
+    const bilan = document.getElementById('ptgImpBilan');
+    if (bilan) {
+        bilan.innerHTML = [
+            rang('À importer', plan.nouvelles.length ? `${dashPlural(plan.nouvelles.length, 'plage')} · ${duree(plan.nouvelles)}` : 'aucune plage'),
+            plan.presentes.length ? rang('Déjà enregistrées', twinFmtInt(plan.presentes.length)) : '',
+            plan.conflits.length ? rang('Chevauchements', twinFmtInt(plan.conflits.length)) : '',
+            plan.incompletes.length ? rang('À corriger', twinFmtInt(plan.incompletes.length)) : '',
+            plan.ecartees.length ? rang('Ignorées', dashPlural(plan.ecartees.length, 'ligne')) : ''
+        ].join('');
+    }
+
+    // Chevauchements et lignes à corriger, dans l'ordre du fichier
+    const chevauche = (l) => {
+        const p = l.avec;
+        const quand = p.date !== l.date ? ` du ${formatDate(p.date)}` : '';
+        return p.ligneFichier
+            ? `chevauche la ligne ${p.ligneFichier} (${pointagePlageLabel(p)}${quand})`
+            : `chevauche la plage ${pointagePlageLabel(p)}${quand} déjà enregistrée`;
+    };
+    const items = [
+        ...plan.conflits.map(l => ({ l, motif: chevauche(l) })),
+        ...plan.incompletes.map(l => ({ l, motif: l.motif }))
+    ].sort((a, b) => a.l.ligne - b.l.ligne);
+    const zone = document.getElementById('ptgImpVerifier');
+    if (zone) {
+        const ouvert = !!zone.querySelector('details')?.open;
+        zone.innerHTML = items.length ? `
+            <details class="ptg-import-details"${ouvert ? ' open' : ''}>
+                <summary>Lignes à vérifier <span class="stock-section-meta">${twinFmtInt(items.length)}</span></summary>
+                <ul class="ptg-import-issues">${items.map(({ l, motif }) => `
+                    <li>
+                        <span>${escapeHtml([`Ligne ${l.ligne}`, l.personne, l.date ? formatDate(l.date) : '', l.heureDebut && l.heureFin ? `${l.heureDebut} – ${l.heureFin}` : ''].filter(Boolean).join(' · '))}</span>
+                        <span class="ptg-import-issue-why">${escapeHtml(motif)}</span>
+                    </li>`).join('')}
+                </ul>
+            </details>` : '';
+    }
+
+    const ok = document.getElementById('ptgImpOk');
+    if (ok) {
+        ok.disabled = plan.nouvelles.length === 0;
+        ok.textContent = plan.nouvelles.length ? `Importer ${dashPlural(plan.nouvelles.length, 'plage')}` : 'Importer';
+    }
+};
+
+const importerPointagesExcel = () => {
+    const imp = pointageImport;
+    const form = document.getElementById('pointageImportForm');
+    if (!imp || !form) return;
+    const now = new Date();
+    const selection = lireSelectionImport(form);
+    // Relecture au moment d'importer : les employés et les plages ajoutés ou
+    // retirés entre-temps (ici ou sur un autre appareil) sont pris en compte
+    const employees = DB.get('employees') || [];
+    if ([...selection.values()].some(v => v && v !== POINTAGE_IMPORT_NOUVEAU && !employees.some(e => e.id === v))) {
+        showToast('Un employé choisi a été supprimé sur un autre appareil : vérifiez les correspondances', 'error');
+        imp.selection = selection;
+        showPointageImportModal();
+        return;
+    }
+    const toutes = DB.get('pointages') || [];
+    const plan = planPointageImport(imp.lignes, choixImport(selection), toutes, now);
+    if (plan.nouvelles.length === 0) {
+        showToast('Aucune nouvelle plage à importer', 'warning');
+        majPointageImport();
+        return;
+    }
+    // Nouveaux employés : seulement ceux qui ont des plages à importer
+    const crees = new Map();
+    plan.nouvelles.forEach(({ ligne, plage }) => {
+        if (!plage.employeId.startsWith(POINTAGE_IMPORT_NOUVEAU) || crees.has(plage.employeId)) return;
+        const [prenom, ...nom] = ligne.personne.split(/\s+/);
+        crees.set(plage.employeId, { id: generateId(), nom: nom.join(' '), prenom, actif: true });
+    });
+    if (crees.size > 0 && !DB.set('employees', [...employees, ...crees.values()])) return;
+    const nouvelles = plan.nouvelles.map(({ plage }) => ({
+        id: generateId(), ...plage, employeId: crees.get(plage.employeId)?.id || plage.employeId
+    }));
+    if (!DB.set('pointages', [...toutes, ...nouvelles])) return;
+
+    pointageImport = null;
+    modal.hide();
+    showToast([
+        dashPlural(nouvelles.length, 'plage importée', 'plages importées'),
+        crees.size ? dashPlural(crees.size, 'employé créé', 'employés créés') : ''
+    ].filter(Boolean).join(' · '));
+    pointageAfficherJour(nouvelles.reduce((max, p) => (p.date > max ? p.date : max), ''));
+    renderCurrentView();
 };
 
 const deletePointage = (id) => {

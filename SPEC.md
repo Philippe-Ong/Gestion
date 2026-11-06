@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v13.2
+**Version:** v13.4
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -381,6 +381,23 @@ futur, aucun chevauchement avec les autres plages de la personne la veille, le j
 lendemain (`pointageIntervalle`). L'arrivée en direct est refusée si des heures déjà saisies
 couvrent ce moment.
 
+**Import Excel (v13.4) :** `lirePointagesExcel` → `analyserPointagesExcel` lit la première
+feuille dont une des 20 premières lignes est un en-tête avec une date (« Date »/« Jour »), un
+début (« début », « arrivée ») et une fin (« fin », « départ ») ; la personne vient de
+« Employé », sinon « Prénom » (+ « Nom »), sinon « ID », la note de « Description »/« Note »,
+la pause (minutes, facultative) de « Pause ». Dates Excel ou texte `j.m.aaaa` / `aaaa-mm-jj` ;
+heures Excel ou texte `9:10`, `09.10 h`, `9h10` ; une fin à 24:00 devient `00:00` (fin à
+minuit, durée correcte). Chaque personne du fichier est rattachée à un employé
+(`ptgImportCorrespondance` : nom complet, prénom puis nom, actifs d'abord), à « Ne pas
+importer » ou à un nouvel employé créé à l'import. `planPointageImport` classe chaque ligne :
+nouvelle, déjà enregistrée (même employé, jour, début et fin), chevauchement (avec une plage
+enregistrée ou une ligne précédente du fichier, mêmes règles que la saisie), à corriger (date,
+personne ou heure manquante ou illisible, plage vide, pause trop longue, jour à venir) ou
+ignorée. Seules les nouvelles plages sont ajoutées (`pause` 0 par défaut, `notes` si la
+description existe) : aucun enregistrement existant n'est modifié ni supprimé, et le même
+fichier, complété, peut être réimporté. Le classement est refait sur les tables relues au
+moment de confirmer.
+
 Les exports d'archives reprennent les filtres année, client et statut de la vue Archives ;
 l'export depuis Commandes conserve toutes ses archives.
 
@@ -491,12 +508,14 @@ Cockpit du jour puis « Chiffres & tendances ». Rendu en lecture seule par `ren
 
 ### 3.3 Pointage (Heures) — v13.3
 Les heures se saisissent surtout après le travail ; pointer en direct reste possible.
-- **Barre d'outils** : « Semaine » / « Mois » (`thecol_filter_pointage_vue`, préférence locale) ; « Pointer maintenant » (vue Semaine) ou « Exporter Excel » (vue Mois) ; « + Saisir des heures ».
+- **Barre d'outils** : « Semaine » / « Mois » / « Année » (`thecol_filter_pointage_vue` : `semaine`, `mois`, `annee` ; préférence locale) ; « Pointer maintenant » (vue Semaine) ou « Importer Excel » et « Exporter Excel » (vues Mois et Année) ; « + Saisir des heures ».
 - **En cours** (vue Semaine) : arrivées pointées en direct, durée mise à jour toutes les 30 s ; « Départ » et ⋯ « Corriger les heures ».
 - **Semaine** (`buildPointageSemaine`) : navigation semaine par semaine (pas au-delà de la semaine en cours). Tableau personnes × jours (employés actifs dans l'ordre et les couleurs du jumeau, puis inactifs ou supprimés qui ont des heures), total par personne et par jour ; une case ouvre la journée ; jours à venir non saisissables ; repères « en cours » et « départ non saisi ». Sur téléphone (requête de conteneur `ptg`), nom et total passent au-dessus des 7 jours. Puis « Plages de la semaine », bloc repliable (fermé par défaut, état mémorisé sur l'appareil : `thecol_filter_pointage_plages`), jour par jour, ⋯ Modifier / Supprimer (confirmation, relecture après l'attente). Un départ oublié s'y corrige en ouvrant sa journée (case « ! » ou ⋯ Modifier) ; la priorité du tableau de bord ouvre la même fenêtre (`cloturer-pointage`).
 - **Mois** (`buildPointageMois`) : par personne, heures du mois, journées travaillées, moyenne par journée, cumul depuis janvier, bande des jours et « Détail des journées » (une journée ouvre la saisie).
+- **Année** (v13.4, `buildPointageAnnee`) : navigation année par année (pas au-delà de l'année en cours, « Cette année » pour revenir). Chiffres clés : heures (écart avec l'année précédente, à la même date pour l'année en cours, si elle a des heures), journées travaillées (personne × jour) et jours d'activité, moyenne par journée, moyenne par semaine (semaines écoulées), plages et durée moyenne. Par personne : heures, journées, moyenne, part de l'équipe et bande des douze mois. Histogrammes du tableau de bord (`pointageChartHtml`, infobulle `bindBarChart`, « Voir les données ») : heures par mois (détail par personne dans l'infobulle et le tableau ; un mois du tableau s'ouvre dans la vue Mois), par jour de la semaine et par heure de la journée (chaque plage répartie heure par heure, pause au prorata, plage de nuit après minuit). Activités : les dix plus citées dans les notes (`pointageActivites` : notes découpées sur `,` `;` `+` `/` `&` « et », pluriels regroupés), en nombre de plages. Repères : mois et semaine les plus chargés, plus longue journée. Une plage compte pour son jour d'arrivée ; un départ oublié ne compte pas. Deux colonnes quand le conteneur `ptg` dépasse 820 px. Année sans heure : « Aucune heure saisie en AAAA. »
 - **Fenêtre « Heures de travail »** (`showPointageJourModal`) : employé (mémorisé localement, `thecol_filter_pointage_employe`) et jour ; toutes les plages de ce jour (début, fin, pause, note), « + Ajouter une plage », ✕ pour retirer, durée de chaque plage et total en direct ; Entrée enregistre. Changer d'employé ou de jour recharge ses plages et garde celles ajoutées. L'enregistrement relit la table, ne supprime que les plages chargées dans la fenêtre et refuse une journée modifiée entre-temps sur un autre appareil.
-- **Export Excel** (`exportPointagesMois`) : `pointages_AAAA-MM.xlsx`, feuilles « Synthèse » (journées, heures en h:mm et en décimal, depuis janvier, total) et « Détail » (date, jour, employé, début, fin, pause, durée, note).
+- **Export Excel** (`exportPointagesMois`) : `pointages_AAAA-MM.xlsx`, feuilles « Synthèse » (journées, heures en h:mm et en décimal, depuis janvier, total) et « Détail » (date, jour, employé, début, fin, pause, durée, note ; `pointageDetailRows`). Vue Année (`exportPointagesAnnee`) : `pointages_AAAA.xlsx`, feuilles « Synthèse » (heures en h:mm et en décimal, journées, moyenne par journée, plages, part en %, total), « Par mois » (heures décimales par personne et total), « Activités » et « Détail ».
+- **Import Excel** (v13.4, aussi depuis la palette « Importer des heures depuis Excel ») : fenêtre « Importer des heures » avec le fichier (feuille, lignes, période), chaque personne du fichier et l'employé choisi (« Ne pas importer », un employé, ou « Nouvel employé » si aucun ne correspond), son nombre de plages et ses heures à importer ; bilan (à importer, déjà enregistrées, chevauchements, à corriger, ignorées) et « Lignes à vérifier » (numéro de ligne Excel et motif) ; « Importer N plages ». Règles : voir § Pointages, Import Excel.
 
 ### 3.4 Commandes
 - Liste des commandes avec filtres
