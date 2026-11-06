@@ -4303,39 +4303,53 @@ const dashTodosHtml = (m) => {
         </section>`;
 };
 
-const dashChartHtml = (t, titre) => {
-    const key = t.metric;
-    const fmt = key === 'ca' ? formatChf : (n) => `${twinFmtInt(n)} bt`;
-    const values = t.buckets.map(b => b[key]);
-    const max = Math.max(0, ...values);
+const barChartContentHtml = (colonnes, max, formatAxe, tipId = '') => {
     const axis = dashAxis(max);
-    const iMax = values.indexOf(max);
     const pct = (v) => (axis.top > 0 ? (v / axis.top * 100).toFixed(2) : '0');
-    const col = (b, i) => {
-        const v = b[key];
-        const sub = [
-            dashPlural(b.livraisons, 'livraison'),
-            key === 'ca' && b.sansTarif ? `${twinFmtInt(b.sansTarif)} sans tarif` : '',
-            b.current ? 'période en cours' : ''
-        ].filter(Boolean).join(' · ');
-        const label = v > 0 && (i === iMax || b.current) ? `<span class="dash-bar-label">${escapeHtml(dashCompact(v))}</span>` : '';
+    const col = (c) => {
+        const sub = c.sub || '';
+        const ariaLabel = [`${c.titre} : ${c.valeur}`, sub].filter(Boolean).join(', ');
+        const etiquette = c.etiquette ? `<span class="dash-bar-label">${escapeHtml(c.etiquette)}</span>` : '';
         return `
-            <div class="dash-col${b.current ? ' is-current' : ''}" tabindex="${b.current ? '0' : '-1'}" data-title="${escapeHtml(b.title)}" data-value="${escapeHtml(fmt(v))}" data-sub="${escapeHtml(sub)}" aria-label="${escapeHtml(`${b.title} : ${fmt(v)}, ${sub}`)}">
-                <span class="dash-bar" style="height:${pct(v)}%">${label}</span>
+            <div class="dash-col${c.current ? ' is-current' : ''}" tabindex="${c.focus ? '0' : '-1'}" data-title="${escapeHtml(c.titre)}" data-value="${escapeHtml(c.valeur)}" data-sub="${escapeHtml(sub)}" aria-label="${escapeHtml(ariaLabel)}">
+                <span class="dash-bar" style="height:${pct(c.mesure)}%">${etiquette}</span>
             </div>`;
     };
     return `
-        <div class="dash-chart" id="dashChart" role="group" aria-label="${escapeHtml(titre)}">
             <div class="dash-chart-plot">
                 <div class="dash-chart-area">
-                    ${axis.ticks.map(v => `<div class="dash-chart-line${v === 0 ? ' is-base' : ''}" style="bottom:${pct(v)}%" aria-hidden="true"><span>${escapeHtml(dashCompact(v))}</span></div>`).join('')}
-                    <div class="dash-chart-cols">${t.buckets.map(col).join('')}</div>
+                    ${axis.ticks.map(v => `<div class="dash-chart-line${v === 0 ? ' is-base' : ''}" style="bottom:${pct(v)}%" aria-hidden="true"><span>${escapeHtml(formatAxe(v))}</span></div>`).join('')}
+                    <div class="dash-chart-cols">${colonnes.map(col).join('')}</div>
                 </div>
-                <div class="dash-tip" id="dashChartTip" aria-hidden="true" hidden>
+                <div class="dash-tip"${tipId ? ` id="${tipId}"` : ''} aria-hidden="true" hidden>
                     <span class="dash-tip-value"></span><span class="dash-tip-label"></span><span class="dash-tip-sub"></span>
                 </div>
             </div>
-            <div class="dash-chart-x" aria-hidden="true">${t.buckets.map(b => `<span${b.current ? ' class="is-current"' : ''}>${escapeHtml(b.label)}</span>`).join('')}</div>
+            <div class="dash-chart-x" aria-hidden="true">${colonnes.map(c => `<span${c.current ? ' class="is-current"' : ''}${c.mineur ? ' data-mineur' : ''}>${escapeHtml(c.label)}</span>`).join('')}</div>`;
+};
+
+const dashChartHtml = (t, titre) => {
+    const key = t.metric;
+    const fmt = key === 'ca' ? formatChf : (n) => `${twinFmtInt(n)} bt`;
+    const valeurs = t.buckets.map(b => b[key]);
+    const max = Math.max(0, ...valeurs);
+    const iMax = valeurs.indexOf(max);
+    const colonnes = t.buckets.map((b, i) => ({
+        label: b.label,
+        titre: b.title,
+        mesure: valeurs[i],
+        valeur: fmt(valeurs[i]),
+        sub: [
+            dashPlural(b.livraisons, 'livraison'),
+            key === 'ca' && b.sansTarif ? `${twinFmtInt(b.sansTarif)} sans tarif` : '',
+            b.current ? 'période en cours' : ''
+        ].filter(Boolean).join(' · '),
+        current: b.current,
+        focus: b.current,
+        etiquette: valeurs[i] > 0 && (i === iMax || b.current) ? dashCompact(valeurs[i]) : ''
+    }));
+    return `
+        <div class="dash-chart" id="dashChart" role="group" aria-label="${escapeHtml(titre)}">${barChartContentHtml(colonnes, max, dashCompact, 'dashChartTip')}
             <details class="dash-table" data-dash-key="table"${dashOpenAttr('table')}>
                 <summary>Voir les données</summary>
                 <div class="dash-table-wrap">
@@ -4368,16 +4382,17 @@ const dashRankHtml = (titre, rank, metric, fmt, aromes = false) => {
         </div>`;
 };
 
-const dashTendancesHtml = (t) => {
-    const fmt = t.metric === 'ca' ? formatChf : (n) => `${twinFmtInt(n)} bt`;
-    const seg = (name, value, label, active, disabled = false, title = '') => `
-        <button type="button" class="segment${active ? ' active' : ''}" data-click="set-filter" data-name="${name}" data-value="${value}" data-render="renderDashboard" aria-pressed="${active ? 'true' : 'false'}"${disabled ? ' disabled' : ''}${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}</button>`;
-    const stat = (label, value, sub = '') => `
+const dashStatHtml = (label, value, sub = '') => `
         <div class="dash-stat">
             <span class="dash-stat-label">${escapeHtml(label)}</span>
             <span class="dash-stat-value">${escapeHtml(value)}</span>
             ${sub ? `<span class="dash-stat-sub">${escapeHtml(sub)}</span>` : ''}
         </div>`;
+
+const dashTendancesHtml = (t) => {
+    const fmt = t.metric === 'ca' ? formatChf : (n) => `${twinFmtInt(n)} bt`;
+    const seg = (name, value, label, active, disabled = false, title = '') => `
+        <button type="button" class="segment${active ? ' active' : ''}" data-click="set-filter" data-name="${name}" data-value="${value}" data-render="renderDashboard" aria-pressed="${active ? 'true' : 'false'}"${disabled ? ' disabled' : ''}${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}</button>`;
     const titre = `${t.metric === 'ca' ? 'CA livré (CHF)' : 'Bouteilles livrées'} par ${t.periode === 'mois' ? 'mois' : 'semaine'}`;
     const panier = t.totals.avecTarif ? t.totals.ca / t.totals.avecTarif : null;
     return `
@@ -4393,11 +4408,11 @@ const dashTendancesHtml = (t) => {
                 </div>
             </div>
             <div class="dash-stats">
-                ${stat('CA livré', t.hasCa ? formatChf(t.totals.ca) : '—', t.totals.sansTarif ? `${dashPlural(t.totals.sansTarif, 'livraison')} sans tarif` : '')}
-                ${stat('Bouteilles livrées', twinFmtInt(t.totals.bt), t.ventesDirectes ? `+ ${twinFmtInt(t.ventesDirectes)} en vente directe` : '')}
-                ${stat('Livraisons', twinFmtInt(t.totals.livraisons))}
-                ${stat('Panier moyen', panier === null ? '—' : formatChf(panier))}
-                ${stat('Bouteilles produites', twinFmtInt(t.produites))}
+                ${dashStatHtml('CA livré', t.hasCa ? formatChf(t.totals.ca) : '—', t.totals.sansTarif ? `${dashPlural(t.totals.sansTarif, 'livraison')} sans tarif` : '')}
+                ${dashStatHtml('Bouteilles livrées', twinFmtInt(t.totals.bt), t.ventesDirectes ? `+ ${twinFmtInt(t.ventesDirectes)} en vente directe` : '')}
+                ${dashStatHtml('Livraisons', twinFmtInt(t.totals.livraisons))}
+                ${dashStatHtml('Panier moyen', panier === null ? '—' : formatChf(panier))}
+                ${dashStatHtml('Bouteilles produites', twinFmtInt(t.produites))}
             </div>
             ${t.totals.livraisons === 0
                 ? dashEmptyHtml('ventes', 'Aucune livraison sur la période', 'Les commandes livrées apparaîtront ici, avec le CA calculé depuis les tarifs clients.', 'neutral')
@@ -11637,30 +11652,21 @@ const buildPointageAnnee = (annee, now = new Date()) => {
 const pointageChartHtml = (id, titre, colonnes, classe = '') => {
     const valeurs = colonnes.map(c => c.minutes / 60);
     const max = Math.max(0, ...valeurs);
-    const axis = dashAxis(max);
     const iMax = valeurs.indexOf(max);
     const iCourant = colonnes.findIndex(c => c.current);
     const arret = iCourant >= 0 ? iCourant : iMax;
-    const pct = (v) => (axis.top > 0 ? (v / axis.top * 100).toFixed(2) : '0');
-    const col = (c, i) => {
+    const barres = colonnes.map((c, i) => {
         const valeur = twinFmtDuration(c.minutes);
-        return `
-            <div class="dash-col${c.current ? ' is-current' : ''}" tabindex="${i === arret ? '0' : '-1'}" data-title="${escapeHtml(c.titre)}" data-value="${escapeHtml(valeur)}" data-sub="${escapeHtml(c.sub || '')}" aria-label="${escapeHtml([`${c.titre} : ${valeur}`, c.sub].filter(Boolean).join(', '))}">
-                <span class="dash-bar" style="height:${pct(valeurs[i])}%">${i === iMax && max > 0 ? `<span class="dash-bar-label">${escapeHtml(valeur)}</span>` : ''}</span>
-            </div>`;
-    };
+        return {
+            ...c,
+            mesure: valeurs[i],
+            valeur,
+            focus: i === arret,
+            etiquette: i === iMax && max > 0 ? valeur : ''
+        };
+    });
     return `
-        <div class="dash-chart ptg-chart${classe ? ` ${classe}` : ''}" id="${id}" role="group" aria-label="${escapeHtml(titre)}" style="--cols:${colonnes.length}">
-            <div class="dash-chart-plot">
-                <div class="dash-chart-area">
-                    ${axis.ticks.map(v => `<div class="dash-chart-line${v === 0 ? ' is-base' : ''}" style="bottom:${pct(v)}%" aria-hidden="true"><span>${escapeHtml(`${twinFmtInt(v)} h`)}</span></div>`).join('')}
-                    <div class="dash-chart-cols">${colonnes.map(col).join('')}</div>
-                </div>
-                <div class="dash-tip" aria-hidden="true" hidden>
-                    <span class="dash-tip-value"></span><span class="dash-tip-label"></span><span class="dash-tip-sub"></span>
-                </div>
-            </div>
-            <div class="dash-chart-x" aria-hidden="true">${colonnes.map(c => `<span${c.current ? ' class="is-current"' : ''}${c.mineur ? ' data-mineur' : ''}>${escapeHtml(c.label)}</span>`).join('')}</div>
+        <div class="dash-chart ptg-chart${classe ? ` ${classe}` : ''}" id="${id}" role="group" aria-label="${escapeHtml(titre)}" style="--cols:${colonnes.length}">${barChartContentHtml(barres, max, (v) => `${twinFmtInt(v)} h`)}
         </div>`;
 };
 
@@ -11699,21 +11705,15 @@ const pointageAnneeHtml = (now) => {
     const titreSection =(id, titre) => `<div class="stock-section-head"><h2 class="stock-section-title" id="${id}">${escapeHtml(titre)}</h2></div>`;
 
     // Chiffres clés
-    const stat = (label, value, sub = '') => `
-        <div class="dash-stat">
-            <span class="dash-stat-label">${escapeHtml(label)}</span>
-            <span class="dash-stat-value">${escapeHtml(value)}</span>
-            ${sub ? `<span class="dash-stat-sub">${escapeHtml(sub)}</span>` : ''}
-        </div>`;
     const ecart = a.precedente > 0 ? Math.round((a.minutes - a.precedente) / a.precedente * 100) : null;
     const ecartTexte = ecart === null ? ''
         : `${ecart > 0 ? '+' : ecart < 0 ? '−' : '±'}${Math.abs(ecart)} % vs ${annee - 1}${a.enCours ? ' à la même date' : ''}`;
     const stats = [
-        stat('Heures', twinFmtDuration(a.minutes), ecartTexte),
-        stat('Journées travaillées', twinFmtInt(a.journees), dashPlural(a.joursActivite, "jour d'activité", "jours d'activité")),
-        stat('Moyenne par journée', twinFmtDuration(a.minutes / a.journees)),
-        stat('Moyenne par semaine', twinFmtDuration(a.minutes / a.semaines), dashPlural(Math.round(a.semaines), 'semaine')),
-        stat('Plages', twinFmtInt(a.plages), `moyenne ${twinFmtDuration(a.minutes / a.plages)}`)
+        dashStatHtml('Heures', twinFmtDuration(a.minutes), ecartTexte),
+        dashStatHtml('Journées travaillées', twinFmtInt(a.journees), dashPlural(a.joursActivite, "jour d'activité", "jours d'activité")),
+        dashStatHtml('Moyenne par journée', twinFmtDuration(a.minutes / a.journees)),
+        dashStatHtml('Moyenne par semaine', twinFmtDuration(a.minutes / a.semaines), dashPlural(Math.round(a.semaines), 'semaine')),
+        dashStatHtml('Plages', twinFmtInt(a.plages), `moyenne ${twinFmtDuration(a.minutes / a.plages)}`)
     ].join('');
 
     // Par personne : total, journées, moyenne, part, bande des douze mois
