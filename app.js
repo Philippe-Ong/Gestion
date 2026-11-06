@@ -10250,13 +10250,17 @@ const sortirLotsPerimes = async (ids) => {
 };
 
 // --- Traçabilité des bouteilles : parcours complet d'un lot ---
-const getLotTraceData = (lotId) => {
+const readLotTraceTables = () => ({
+    lots: DB.get('lots') || [],
+    history: DB.get('history') || [],
+    commandes: DB.get('commandes') || [],
+    clients: DB.get('clients') || [],
+    livraisons: DB.get('livraisons') || []
+});
+
+const getLotTraceData = (lotId, tables = readLotTraceTables()) => {
     const idStr = String(lotId);
-    const lots = DB.get('lots') || [];
-    const history = DB.get('history') || [];
-    const commandes = DB.get('commandes') || [];
-    const clients = DB.get('clients') || [];
-    const livraisons = DB.get('livraisons') || [];
+    const { lots, history, commandes, clients, livraisons } = tables;
 
     const lot = lots.find(l => String(l.id) === idStr) || null;
 
@@ -10561,11 +10565,8 @@ const showLotTraceModal = (lotId) => {
 // --- Rappel de lot : vue consolidée d'un numéro de lot (tous formats) ---
 const getLotRappelData = (numLot) => {
     const key = normLotNumero(numLot);
-    const lots = DB.get('lots') || [];
-    const history = DB.get('history') || [];
-    const commandes = DB.get('commandes') || [];
-    const livraisons = DB.get('livraisons') || [];
-    const clients = DB.get('clients') || [];
+    const tables = readLotTraceTables();
+    const { lots, history, commandes, clients, livraisons } = tables;
 
     const correspond = (num, id) => !!key && normLotNumero(num || id) === key;
     const ids = new Set();
@@ -10574,7 +10575,7 @@ const getLotRappelData = (numLot) => {
     commandes.forEach(c => (c.lotsUtilises || []).forEach(lu => { if (lu.lotId && correspond(lu.numLot, lu.lotId)) ids.add(String(lu.lotId)); }));
     livraisons.forEach(l => (l.lotsTraces || []).forEach(t => { if (t.lotId && correspond(t.numLot, t.lotId)) ids.add(String(t.lotId)); }));
 
-    const traces = [...ids].map(id => getLotTraceData(id))
+    const traces = [...ids].map(id => getLotTraceData(id, tables))
         .sort((a, b) => `${a.arome} ${a.format}`.localeCompare(`${b.arome} ${b.format}`, 'fr'));
 
     const uniq = (list) => [...new Set(list.filter(Boolean))];
