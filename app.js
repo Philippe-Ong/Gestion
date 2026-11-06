@@ -11208,6 +11208,7 @@ const POINTAGE_MEMBRE_INCONNU = { id: '', nom: 'Employé', actif: false, couleur
 
 // Jour (AAAA-MM-JJ) décalé de n jours ; partir de midi évite les changements d'heure
 const pointageJourDecale = (dayKey, n) => toLocalDayKey(new Date(`${dayKey}T12:00:00`).getTime() + n * 86400000);
+const pointageJoursVoisins = (date) => [pointageJourDecale(date, -1), date, pointageJourDecale(date, 1)];
 const pointageLundi = (dayKey) => pointageJourDecale(dayKey, -((new Date(`${dayKey}T12:00:00`).getDay() + 6) % 7));
 const pointageMoisDecale = (mois, n) => {
     const [y, m] = mois.split('-').map(Number);
@@ -11271,6 +11272,8 @@ const pointageIntervalle = (p, ref, now = new Date()) => {
     }
     return [decalage + debut, decalage + debut + Math.max(1, duree)];
 };
+
+const pointageIntervallesChevauchent = (a, b) => a[0] < b[1] && b[0] < a[1];
 
 // Plage en cours d'un employé (arrivée aujourd'hui, ou hier pour le travail de
 // nuit). Un départ oublié n'en est plus une : il est signalé « à clôturer ».
@@ -12162,13 +12165,13 @@ const savePointageJour = () => {
     if (plages.length === 0 && charges.size === 0) return erreur('Saisissez au moins une plage (début et fin)', form.querySelector('.ptg-plage'), 'debut');
 
     // Chevauchements avec les autres plages de la personne (veille, jour et lendemain)
-    const voisins = [pointageJourDecale(date, -1), date, pointageJourDecale(date, 1)];
+    const voisins = pointageJoursVoisins(date);
     const elements = [
         ...plages.map(pl => ({ p: { ...pl, date }, saisie: true, row: pl.row })),
         ...toutes.filter(p => p.employeId === employeId && voisins.includes(p.date) && !charges.has(p.id)).map(p => ({ p, saisie: false }))
     ].map(x => ({ ...x, iv: pointageIntervalle(x.p, date, now) })).filter(x => x.iv);
     for (const a of elements.filter(x => x.saisie)) {
-        const b = elements.find(x => x !== a && x.iv[0] < a.iv[1] && a.iv[0] < x.iv[1]);
+        const b = elements.find(x => x !== a && pointageIntervallesChevauchent(x.iv, a.iv));
         if (b) {
             const jour = b.p.date !== date ? ` du ${formatDate(b.p.date)}` : '';
             return erreur(`La plage ${pointagePlageLabel(a.p)} chevauche la plage ${pointagePlageLabel(b.p)}${jour}`, a.row, 'debut');
@@ -12506,7 +12509,7 @@ const planPointageImport = (lignes, choix, toutes, now = new Date()) => {
         }
         const plage = { employeId, date: l.date, heureDebut: l.heureDebut, heureFin: l.heureFin, pause: l.pause };
         if (l.notes) plage.notes = l.notes;
-        const voisines = [pointageJourDecale(l.date, -1), l.date, pointageJourDecale(l.date, 1)]
+        const voisines = pointageJoursVoisins(l.date)
             .flatMap(d => parJour.get(`${employeId}|${d}`) || []);
         if (voisines.some(p => p.date === l.date && p.heureDebut === l.heureDebut && p.heureFin === l.heureFin)) {
             plan.presentes.push(l);
@@ -12515,7 +12518,7 @@ const planPointageImport = (lignes, choix, toutes, now = new Date()) => {
         const iv = pointageIntervalle(plage, l.date, now);
         const autre = voisines.find(p => {
             const j = pointageIntervalle(p, l.date, now);
-            return j && j[0] < iv[1] && iv[0] < j[1];
+            return j && pointageIntervallesChevauchent(j, iv);
         });
         if (autre) {
             plan.conflits.push({ ...l, avec: autre });
