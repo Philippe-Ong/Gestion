@@ -4,7 +4,7 @@
     <!-- Content Security Policy — défense en profondeur.
          'unsafe-inline' sur script/style est conservé à titre transitoire tant
          que les gestionnaires inline (onclick, onchange, blocs <script>) ne sont
-         pas tous migrés vers la délégation d'événements centralisée (app.js).
+         pas tous migrés vers la délégation d'événements centralisée (app-ui.js).
          'unsafe-eval' est volontairement INTERDIT pour bloquer eval/Function. -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'self' blob:">
     <meta charset="UTF-8">
@@ -276,6 +276,19 @@
             if (err) { err.textContent = 'Erreur de connexion au service. Vérifiez votre réseau.'; err.style.display = 'block'; }
         }
     </script>
-    <script src="app.js?v=13.4&amp;rev=b0416dca"></script>
+    <script src="app-core.js?v=13.4&amp;rev=01e52cf0"></script>
+    <script src="app-sync.js?v=13.4&amp;rev=f99cee9f"></script>
+    <script src="app-ui.js?v=13.4&amp;rev=a1497bf0"></script>
+    <script src="app-dashboard.js?v=13.4&amp;rev=580a8f38"></script>
+    <script src="app-jumeau.js?v=13.4&amp;rev=bfadf68c"></script>
+    <script src="app-stock.js?v=13.4&amp;rev=23dd0417"></script>
+    <script src="app-pointage.js?v=13.4&amp;rev=6c0966ee"></script>
+    <script src="app-commandes.js?v=13.4&amp;rev=1d17c72a"></script>
+    <script src="app-livraisons.js?v=13.4&amp;rev=4f16c552"></script>
+    <script src="app-production.js?v=13.4&amp;rev=664b5f1f"></script>
+    <script src="app-inventaire.js?v=13.4&amp;rev=68b1c48c"></script>
+    <script src="app-parametres.js?v=13.4&amp;rev=b1ec16a3"></script>
+    <script src="app-sauvegardes.js?v=13.4&amp;rev=abb53ac3"></script>
+    <script src="app.js?v=13.4&amp;rev=a876230f"></script>
 </body>
 </html>

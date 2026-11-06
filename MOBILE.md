@@ -1,6 +1,6 @@
 # Build mobile (Android / iOS)
 
-L'appli web est emballée via **Capacitor**. Le code source reste à la racine (`index.html`, `app.js`, `styles.css`, `templates/`) — un script copie ces fichiers dans `www/`, qui est ensuite synchronisé vers les projets natifs `android/` et `ios/`. **`stress-test.js` a été retiré** de la liste des fichiers copiés (v11.2).
+L'appli web est emballée via **Capacitor**. `scripts/copy-web.js` copie les fichiers source de la racine, dont `app.js` et les scripts `app-*.js`, dans `www/`. Capacitor synchronise ensuite ce dossier vers les projets natifs `android/` et `ios/`.
 
 ## Workflow de dev
 

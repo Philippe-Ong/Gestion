@@ -405,7 +405,9 @@ L'appli web est emballée via **Capacitor 8**. Le code source reste à la racine
 | Fichier | Rôle |
 |---------|------|
 | `index.html` | Structure HTML, conteneurs modals/toasts, écran de connexion, init Firebase SDK (App + Auth + Firestore) |
-| `app.js` | Toute la logique applicative: routing, vues, data layer, CRUD, auth, V11 sync, event delegation |
+| `app.js` | Démarrage et cycle de vie de la session |
+| `app-core.js`, `app-sync.js`, `app-ui.js` | Utilitaires et règles communes, données et synchronisation, navigation et composants partagés |
+| `app-*.js` | Vues et logique métier par domaine, chargées dans l’ordre indiqué dans `index.html` |
 | `styles.css` | Styles CSS, variables de thème, responsive, écran de connexion |
 | `SPEC.md` | Schémas de données et spécifications |
 | `templates/bl_template.xlsx` | Template Excel pour export Bulletin de Livraison (BL) |
