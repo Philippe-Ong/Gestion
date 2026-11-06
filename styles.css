@@ -3702,6 +3702,154 @@ input[type="checkbox"] {
     .ptg-field--pause { grid-column: 1 / 3; }
 }
 
+/* Fenêtre « Importer des heures » (v13.4) : personnes du fichier, bilan, lignes à vérifier */
+.ptg-import-file {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 14px;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+.ptg-import-file span {
+    font-size: 12.5px;
+    color: var(--text-light);
+    font-variant-numeric: tabular-nums;
+}
+.ptg-import-people {
+    margin-bottom: 14px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+}
+.ptg-import-people > .ptg-row:first-child { border-top: none; }
+.ptg-import-person select {
+    flex: 0 0 210px;
+    width: 210px;
+}
+.ptg-import-bilan {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    font-size: 13.5px;
+}
+.ptg-import-bilan-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+.ptg-import-bilan dt { color: var(--text-light); }
+.ptg-import-bilan dd {
+    margin: 0;
+    font-weight: 600;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.ptg-import-bilan-row:first-child dd { font-weight: 700; color: var(--primary-darker); }
+.ptg-import-details { margin-top: 12px; }
+.ptg-import-details > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--primary-dark);
+    cursor: pointer;
+}
+.ptg-import-issues {
+    list-style: none;
+    max-height: 240px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-light);
+}
+.ptg-import-issues li {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 7px 2px;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+.ptg-import-issue-why { color: var(--warning-dark); }
+.ptg-import-ok:disabled { opacity: 0.45; cursor: default; }
+@media (max-width: 480px) {
+    .ptg-import-person { flex-wrap: wrap; }
+    .ptg-import-person select { flex-basis: 100%; width: 100%; }
+}
+
+/* Année (v13.4) : chiffres clés, personnes × mois, histogrammes du tableau de bord,
+   activités et repères ; deux colonnes quand la page est large */
+.ptg-year-card { padding: 16px; }
+.ptg-year-stats { margin-bottom: 0; }
+.ptg-year-strip-x {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 2px;
+    margin: 3px 0 0 44px;
+    font-size: 11px;
+    text-align: center;
+    color: var(--text-lighter);
+}
+.ptg-chart .dash-chart-cols,
+.ptg-chart .dash-chart-x { grid-template-columns: repeat(var(--cols, 12), minmax(0, 1fr)); }
+.ptg-chart .dash-chart-x { overflow: visible; }
+.ptg-chart .dash-tip { max-width: 240px; white-space: normal; }
+.ptg-chart .dash-tip-value,
+.ptg-chart .dash-tip-label { white-space: nowrap; }
+.ptg-year-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    column-gap: 18px;
+}
+.ptg-year-grid > .stock-section { min-width: 0; }
+.ptg-year-records {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+    font-size: 13.5px;
+}
+.ptg-year-records > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 2px 12px;
+}
+.ptg-year-records dt { color: var(--text-light); }
+.ptg-year-records dd {
+    margin: 0;
+    font-weight: 600;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.ptg-year-link {
+    padding: 0;
+    background: none;
+    border: 0;
+    font: inherit;
+    color: var(--primary-dark);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+.ptg-year-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 2px; }
+.dash-table tfoot th,
+.dash-table tfoot td { border-top: 1px solid var(--border); font-weight: 700; }
+@container ptg (min-width: 640px) {
+    .ptg-year-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .ptg-year-stats > .dash-stat:last-child:nth-child(odd) { grid-column: auto; }
+}
+@container ptg (min-width: 820px) {
+    .ptg-year-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container ptg (max-width: 520px) {
+    .ptg-chart--mois .dash-chart-x span:nth-child(even),
+    .ptg-chart .dash-chart-x span[data-mineur] { visibility: hidden; }
+}
+
 /* ── Sous-onglets (section Stock / Historique) ─────────────── */
 .sub-tabs {
     display: flex;

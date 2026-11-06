@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v13.3**
+**v13.4**
 
 ## Adresse
 
@@ -30,7 +30,9 @@ Application de gestion pour votre entreprise de thé froid.
 - Saisie des heures après le travail : une ou plusieurs plages par jour (début, fin, pause, note)
 - Semaine : tableau personnes × jours, une case ouvre la journée ; détail des plages
 - Mois : heures, journées, moyenne et cumul depuis janvier par personne
-- Export Excel du mois (synthèse et détail)
+- Année : chiffres clés, heures par personne et par mois, jours de la semaine, heures de la journée, activités citées dans les notes, repères
+- Export Excel du mois ou de l'année (synthèse, mois, activités et détail)
+- Import Excel des heures (classeur tenu à la main) : aperçu, employé choisi pour chaque personne, doublons et chevauchements sautés
 - Arrivée / départ en direct, départs oubliés signalés
 
 ### Commandes
