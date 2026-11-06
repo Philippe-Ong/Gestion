@@ -22,6 +22,18 @@ const generateId = () => {
 const formatDate = (date) => new Date(date).toLocaleDateString('fr-CH');
 const formatDateTime = (date) => new Date(date).toLocaleString('fr-CH');
 
+const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+    } finally {
+        URL.revokeObjectURL(url);
+    }
+};
+
 // Parse "HH:MM" → total minutes since midnight, or null if invalid.
 const parseHHMM = (str) => {
     if (typeof str !== 'string') return null;
@@ -14807,6 +14819,18 @@ const blTraceAlertHtml = (totalItems, totalTrace, forcedCount) => [
     totalTrace !== totalItems ? `<p class="trace-alert">${escapeHtml(`${twinFmtInt(totalTrace)} bt tracées pour ${twinFmtInt(totalItems)} bt sur le BL : vérifiez les lots de la livraison.`)}</p>` : ''
 ].join('');
 
+const buildBLTraceSummary = (livraison, commande) => {
+    const lotsTraces = livraison.lotsTraces?.length > 0
+        ? livraison.lotsTraces
+        : buildLotsTracesForCommande(commande);
+    return {
+        lotsTraces,
+        totalItems: (livraison.lignes || []).reduce((sum, l) => sum + (Number(l.quantite) || 0), 0),
+        totalTrace: lotsTraces.reduce((sum, lot) => sum + (Number(lot.quantite) || 0), 0),
+        forcedCount: lotsTraces.filter(lot => lot.forceStockInsuffisant).length
+    };
+};
+
 const showLivraisonDetails = (id) => {
     const livraisons = DB.get('livraisons') || [];
     const clients = DB.get('clients') || [];
@@ -14832,12 +14856,7 @@ const showLivraisonDetails = (id) => {
             </li>`;
     }).join('');
 
-    const lotsTraces = (livraison.lotsTraces && livraison.lotsTraces.length > 0)
-        ? livraison.lotsTraces
-        : buildLotsTracesForCommande(commande);
-    const forcedTraceCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
-    const totalItems = lignes.reduce((sum, l) => sum + (Number(l.quantite) || 0), 0);
-    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (Number(lot.quantite) || 0), 0);
+    const { lotsTraces, totalItems, totalTrace, forcedCount } = buildBLTraceSummary(livraison, commande);
     const caissesVertes = parseInt(livraison.caissesVertesLivrees, 10) || 0;
     const caissesNoires = parseInt(livraison.caissesNoiresLivrees, 10) || 0;
     const dernierExport = getBLLastExportDate(livraison);
@@ -14890,7 +14909,7 @@ const showLivraisonDetails = (id) => {
 
             <section class="trace-section">
                 <h4 class="trace-section-title">Traçabilité interne</h4>
-                ${blTraceAlertHtml(totalItems, totalTrace, forcedTraceCount)}
+                ${blTraceAlertHtml(totalItems, totalTrace, forcedCount)}
                 ${lotsTraces.length ? blLotsHtml(lotsTraces, aromes) : '<p class="text-muted">Aucune trace de lot enregistrée pour ce BL.</p>'}
             </section>
         </div>
@@ -15035,12 +15054,7 @@ const showPrepareBLExportModal = (livraisonId) => {
 
     const commande = commandes.find(c => c.id === livraison.commandeId);
     const client = clients.find(c => c.id === livraison.clientId);
-    const totalItems = (livraison.lignes || []).reduce((sum, l) => sum + (Number(l.quantite) || 0), 0);
-    const lotsTraces = (livraison.lotsTraces && livraison.lotsTraces.length > 0)
-        ? livraison.lotsTraces
-        : buildLotsTracesForCommande(commande);
-    const totalTrace = lotsTraces.reduce((sum, lot) => sum + (Number(lot.quantite) || 0), 0);
-    const forcedCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
+    const { lotsTraces, totalItems, totalTrace, forcedCount } = buildBLTraceSummary(livraison, commande);
 
     // Compteur de caisses IFCO avec boutons − / + (saisie directe toujours possible)
     const compteur = (id, label, valeur, couleur) => `
@@ -15225,6 +15239,13 @@ const prepareBLExport = (livraisonId) => {
     };
 };
 
+const downloadBLExport = (blob, filename, livraisonId, message) => {
+    downloadBlob(blob, filename);
+    recordBLExportDate(livraisonId);
+    showToast(message);
+    if (window.location.hash === '#livraisons') renderLivraisons();
+};
+
 const exportBLPDF = (livraisonId) => {
     try {
         const data = prepareBLExport(livraisonId);
@@ -15344,15 +15365,7 @@ const exportBLPDF = (livraisonId) => {
             }
 
             const blob = doc.output('blob');
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `BL-${blNum}_${blDate}.pdf`;
-            a.click();
-            URL.revokeObjectURL(url);
-            recordBLExportDate(livraisonId);
-            showToast('Bulletin de livraison exporté en PDF');
-            if (window.location.hash === '#livraisons') renderLivraisons();
+            downloadBLExport(blob, `BL-${blNum}_${blDate}.pdf`, livraisonId, 'Bulletin de livraison exporté en PDF');
         }).catch(e => {
             console.error('exportBLPDF: échec de génération', e);
             showToast('Erreur lors de la génération du PDF', 'error');
@@ -15693,15 +15706,7 @@ const exportBLExcel = (livraisonId) => {
                 zip.file('xl/worksheets/sheet1.xml', newSheetXml);
 
                 zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }).then(blob => {
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `BL-${blNum}_${blDate}.xlsx`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    recordBLExportDate(livraison.id);
-                    showToast('Bulletin de livraison exporté');
-                    if (window.location.hash === '#livraisons') renderLivraisons();
+                    downloadBLExport(blob, `BL-${blNum}_${blDate}.xlsx`, livraison.id, 'Bulletin de livraison exporté');
                 }).catch(err => {
                     console.error('ZIP gen error:', err);
                     showToast('Erreur génération fichier', 'error');
@@ -19173,13 +19178,8 @@ const exportAllData = () => {
     data.syncConflicts = v11GetQueue().filter(op => op.blockedReason);
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
     const date = new Date().toISOString().split('T')[0];
-    a.href = url;
-    a.download = `sauvegarde_${date}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `sauvegarde_${date}.json`);
     showToast('Sauvegarde créée');
 };
 
