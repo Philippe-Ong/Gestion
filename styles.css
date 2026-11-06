@@ -514,86 +514,6 @@ textarea:focus-visible {
     letter-spacing: -0.2px;
 }
 
-/* ── Stats Grid ──────────────────────────────────────────── */
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 14px;
-    margin-bottom: 18px;
-}
-
-.stat-card {
-    background: var(--white);
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border-light);
-    padding: 16px 18px;
-    box-shadow: var(--shadow-xs);
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    transition: var(--transition);
-}
-
-.stat-card:hover {
-    border-color: var(--border);
-    box-shadow: var(--shadow-sm);
-    transform: translateY(-1px);
-}
-
-.stat-link {
-    text-decoration: none;
-    color: inherit;
-}
-
-.stat-icon {
-    width: 42px;
-    height: 42px;
-    border-radius: var(--radius);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-}
-
-.stat-icon.green { background: var(--bg-success); color: var(--success-dark); }
-.stat-icon.orange { background: var(--bg-warning); color: var(--warning-dark); }
-.stat-icon.red { background: var(--bg-danger); color: var(--danger-dark); }
-.stat-icon.blue { background: var(--bg-info); color: var(--info-dark); }
-
-.stat-icon svg {
-    width: 20px;
-    height: 20px;
-}
-
-.stat-content h3 {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text);
-    line-height: 1;
-    letter-spacing: -0.5px;
-}
-
-.stat-content p {
-    font-size: 12px;
-    color: var(--text-light);
-    margin-top: 4px;
-    line-height: 1.3;
-}
-
-/* Dashboard 2-col layout helper */
-.dashboard-grid {
-    display: grid;
-    grid-template-columns: 1.5fr 1fr;
-    gap: 16px;
-    margin-bottom: 18px;
-}
-
-@media (max-width: 1024px) {
-    .dashboard-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
 /* ── Tables ──────────────────────────────────────────────── */
 .table-container {
     overflow-x: auto;
@@ -1714,23 +1634,6 @@ input[type="checkbox"] {
         margin: 0;
     }
 
-    .dashboard-hero {
-        padding: 20px 18px;
-        border-radius: var(--radius-lg);
-    }
-
-    .dashboard-hero-time {
-        font-size: 36px;
-    }
-
-    .dashboard-hero-title {
-        font-size: 22px;
-    }
-
-    .dashboard-grid {
-        grid-template-columns: 1fr;
-    }
-
     .card {
         padding: 14px;
         margin-bottom: 12px;
@@ -1752,11 +1655,6 @@ input[type="checkbox"] {
         width: calc(100% + 28px);
     }
 
-    .stats-grid {
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-    }
-
     .segmented-filter {
         width: 100%;
     }
@@ -1767,24 +1665,6 @@ input[type="checkbox"] {
 
     .workflow-summary {
         grid-template-columns: 1fr 1fr;
-    }
-
-    .stat-card {
-        padding: 12px;
-        gap: 10px;
-    }
-
-    .stat-icon {
-        width: 36px;
-        height: 36px;
-    }
-
-    .stat-content h3 {
-        font-size: 20px;
-    }
-
-    .stat-content p {
-        font-size: 11px;
     }
 
     .table-container {
@@ -2308,98 +2188,6 @@ input[type="checkbox"] {
 .step-connector.done { background: var(--success-light); }
 
 /* --- Matrice arôme × format --- */
-.matrix-wrap {
-    overflow-x: auto;
-    margin: 12px -4px;
-    padding: 0 4px;
-}
-.matrix {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 6px;
-}
-.matrix th {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-light);
-    text-align: center;
-    padding: 4px 8px;
-}
-.matrix th:first-child { text-align: left; }
-.matrix .matrix-arome {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    padding: 6px 4px;
-    white-space: nowrap;
-}
-.matrix .matrix-dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    background: var(--text-lighter);
-}
-.matrix-cell {
-    position: relative;
-    width: 56px;
-    height: 48px;
-    background: var(--bg-secondary);
-    border: 1.5px dashed var(--border);
-    border-radius: var(--radius-md);
-    padding: 0;
-    overflow: hidden;
-    transition: var(--transition);
-}
-.matrix-cell::before {
-    content: "+";
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-lighter);
-    font-size: 18px;
-    font-weight: 700;
-    pointer-events: none;
-    transition: var(--transition);
-}
-.matrix-cell.filled {
-    background: var(--bg-success);
-    border-color: var(--success-light);
-    border-style: solid;
-}
-.matrix-cell.filled::before { opacity: 0; }
-.matrix-cell input.item-qty-input {
-    width: 100%;
-    height: 100%;
-    min-height: 100%;
-    background: transparent;
-    border: none;
-    text-align: center;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--text);
-    padding: 0;
-    border-radius: 0;
-}
-.matrix-cell input.item-qty-input:focus {
-    outline: none;
-    box-shadow: none;
-    border: none;
-}
-.matrix-cell.filled input.item-qty-input { color: var(--primary); }
-.matrix-cell input::-webkit-outer-spin-button,
-.matrix-cell input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-.matrix-cell input[type=number] { -moz-appearance: textfield; }
 
 .items-matrix-container {
     overflow-x: auto;
@@ -2509,110 +2297,6 @@ input[type="checkbox"] {
     font-size: 12px;
     color: var(--text-light);
     margin-top: 2px;
-}
-
-/* --- Détail commande (modal) --- */
-.commande-detail-banner-cancel {
-    background: var(--bg-danger);
-    color: var(--danger);
-    padding: 10px 14px;
-    border-radius: var(--radius-lg);
-    margin-bottom: 14px;
-    font-weight: 700;
-    font-size: 13px;
-}
-.commande-detail-hero {
-    background: var(--white);
-    border-radius: var(--radius-xl);
-    padding: 20px;
-    margin-bottom: 14px;
-    border: 1px solid var(--border-light);
-}
-.commande-detail-hero-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 12px;
-}
-.commande-detail-amount {
-    font-size: 28px;
-    font-weight: 700;
-    color: var(--primary);
-    line-height: 1;
-    margin-top: 8px;
-    letter-spacing: -0.5px;
-}
-.commande-detail-delivery {
-    font-size: 13px;
-    color: var(--text-light);
-    margin-top: 8px;
-}
-.commande-next-action {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    background: var(--bg-warning);
-    color: var(--text);
-    padding: 14px;
-    border-radius: var(--radius-lg);
-    margin-bottom: 14px;
-}
-.commande-next-action-text { flex: 1; }
-.commande-next-action-label {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--warning);
-}
-.commande-next-action-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    margin-top: 2px;
-}
-
-.commande-section {
-    background: var(--white);
-    border-radius: var(--radius-lg);
-    padding: 14px;
-    margin-bottom: 14px;
-    border: 1px solid var(--border-light);
-}
-.commande-section-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-light);
-    margin-bottom: 10px;
-}
-.commande-article-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border-light);
-}
-.commande-article-row:last-child { border-bottom: none; }
-.commande-article-name {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text);
-}
-.commande-article-qty {
-    font-weight: 700;
-    color: var(--primary);
-}
-.commande-client-actions {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 12px;
-}
-.commande-actions-bottom {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-top: 6px;
 }
 
 /* --- Cards hero (mobile) --- */
@@ -4208,36 +3892,6 @@ input[type="checkbox"] {
     margin-right: 4px;
 }
 
-/* --- Stock : card lot (mobile) --- */
-.lot-card {
-    position: relative;
-    background: var(--white);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
-    padding: 12px 14px 12px 18px;
-    margin-bottom: 10px;
-    overflow: hidden;
-}
-.lot-card::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 4px;
-    background: var(--text-lighter);
-}
-.lot-card.lot-status-ok::before      { background: var(--success-light); }
-.lot-card.lot-status-warning::before { background: var(--warning); }
-.lot-card.lot-status-expired::before { background: var(--danger); }
-.lot-card.lot-status-invendable::before { background: var(--danger); }
-.lot-card.lot-bloque::before          { background: var(--danger-dark); }
-.lot-card-badges {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-
 /* Traçabilité / rappel de lot */
 .trace-alert {
     margin: 0 0 12px;
@@ -4794,50 +4448,6 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 .trace-scroll {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-}
-
-.lot-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-}
-.lot-card-numero {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-light);
-}
-.lot-card-aroma {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-}
-.lot-card-aroma-name {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-}
-.lot-card-aroma-format {
-    font-size: 12px;
-    color: var(--text-light);
-}
-.lot-card-meta {
-    display: flex;
-    gap: 14px;
-    flex-wrap: wrap;
-    font-size: 12px;
-    color: var(--text-light);
-    margin-bottom: 10px;
-}
-.lot-card-meta strong {
-    color: var(--text);
-    font-weight: 600;
-}
-.lot-card-qty {
-    font-size: 13px;
-    color: var(--text);
-    font-weight: 700;
 }
 
 /* Durée de vie d'un lot : phrase + frise Prod. → DLV → DLC */

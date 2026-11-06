@@ -21,7 +21,6 @@ const generateId = () => {
 };
 const formatDate = (date) => new Date(date).toLocaleDateString('fr-CH');
 const formatDateTime = (date) => new Date(date).toLocaleString('fr-CH');
-const formatTime = (time) => time.substring(0, 5);
 
 // Parse "HH:MM" → total minutes since midnight, or null if invalid.
 const parseHHMM = (str) => {
@@ -407,18 +406,6 @@ const migrateClientTarifs = () => {
     } catch (e) {
         console.warn('[migration] migrateClientTarifs failed:', e);
     }
-};
-
-const applyTarifPresetIfEmpty = () => {
-    const form = document.getElementById('clientForm');
-    if (!form) return;
-    const cat = form.tarifs?.value;
-    const preset = TARIF_PRESETS[cat];
-    if (!preset) return;
-    const isEmpty = (v) => v === undefined || v === null || String(v).trim() === '';
-    if (isEmpty(form.prix25cl.value))  form.prix25cl.value  = preset.prix25cl;
-    if (isEmpty(form.prix50cl.value))  form.prix50cl.value  = preset.prix50cl;
-    if (isEmpty(form.prix100cl.value)) form.prix100cl.value = preset.prix100cl;
 };
 
 const getFormatPriceKey = (format) => {
@@ -825,7 +812,6 @@ const v11ClearTableInvalid = (table) => {
 
 // Data Storage with Firebase sync
 const DB = {
-    firebaseSynced: false,
     // Prevents re-entrant sync when a snapshot writes to localStorage
     _skipSync: false,
 
@@ -1021,7 +1007,6 @@ const DB = {
                 }
             });
             if (hasData) {
-                DB.firebaseSynced = true;
                 if (showNotification) showToast('Données synchronisées depuis le cloud');
             } else if (showNotification) {
                 showToast('Aucune donnée dans le cloud');
@@ -1041,13 +1026,7 @@ const DB = {
 
     // UI filter persistence — keeps storage keys uniform under "thecol_filter_<name>".
     getFilter: (name) => localStorage.getItem('thecol_filter_' + name) || '',
-    setFilter: (name, value) => localStorage.setItem('thecol_filter_' + name, value || ''),
-
-    // Sync from Firebase on page load
-    initFromFirebase: async () => {
-        if (!window.firebaseReady || !window.firebaseDb) return;
-        await DB.loadFromFirebase();
-    }
+    setFilter: (name, value) => localStorage.setItem('thecol_filter_' + name, value || '')
 };
 
 // =============================================================================
@@ -2946,8 +2925,6 @@ window.v11Debug = {
 };
 
 // Default values from Stock project
-const DEFAULT_AROMES = ['hibiscus', 'mure sauvage', 'poire à botzi', 'sureau', 'herbes des alpes'];
-const DEFAULT_FORMATS = ['0.25l', '0.5l', '1l'];
 const DEFAULT_COULEURS = {
     'hibiscus': '#E74C3C',
     'mure sauvage': '#8E44AD',
@@ -3156,13 +3133,6 @@ const safeRender = (html) => {
     const el = document.getElementById('content');
     if (el) el.innerHTML = html;
 };
-
-const renderEmptyState = (message, actionHtml = '') => `
-    <div class="empty-state">
-        <p>${escapeHtml(message)}</p>
-        ${actionHtml}
-    </div>
-`;
 
 // En-tête de page (v12.8) : le titre est celui de la barre du haut (#pageTitle) ;
 // la page n'affiche qu'une barre d'outils — à gauche des onglets ou un sélecteur
@@ -3405,16 +3375,6 @@ const showCommandeMontantDiagModal = (commandeId) => {
         `<button class="btn btn-secondary" onclick="modal.hide()">Fermer</button>`
     );
 };
-
-const renderSegmentedFilter = (name, currentValue, options, renderFnName) => `
-    <div class="segmented-filter" role="group" aria-label="${escapeHtml(name)}">
-        ${options.map(opt => `
-            <button type="button" class="segment ${currentValue === opt.value ? 'active' : ''}" data-click="set-filter" data-name="${escapeHtml(name)}" data-value="${escapeHtml(opt.value)}" data-render="${escapeHtml(renderFnName)}">
-                ${escapeHtml(opt.label)}
-            </button>
-        `).join('')}
-    </div>
-`;
 
 const getClientLabel = (client) => client ? (client.societe || client.nom || 'Client sans nom') : 'N/A';
 
@@ -14530,16 +14490,6 @@ const showCommandeDetails = (id) => {
         actionsHtml = fermer + btn('btn-primary', 'restaurer-commande', 'Restaurer');
     }
     modal.show(`Commande #${getCommandeNumero(commande)}`, modalBody, actionsHtml);
-};
-
-const deleteCommande = (id) => {
-    confirmDialog('Êtes-vous sûr de vouloir supprimer cette commande ?', { danger: true }).then(ok => {
-        if (!ok) return;
-        const commandes = DB.get('commandes').filter(c => c.id !== id);
-        DB.set('commandes', commandes);
-        showToast('Commande supprimée');
-        renderCommandes();
-    });
 };
 
 const togglePillStatut = (statut) => {
