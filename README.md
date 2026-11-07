@@ -4,7 +4,20 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v13.6**
+**v13.7**
+
+### Prix d’achat et marge
+
+L’inventaire enregistre les prix d’achat des consommables, avec un prix facultatif par lot fournisseur. Production affiche le coût matières par bouteille et les détails d’une commande affichent la marge sur matières. Dans le formulaire de commande, les formats sont triés par contenance croissante.
+
+### Refactorisation interne
+
+Le JavaScript est réparti en 14 scripts. `app.js` contient la comptabilité et gère le démarrage et la session. Le pointage, le stock et le jumeau 3D ont chacun leur fichier.
+
+- Le tableau de bord et le pointage annuel partagent le rendu des histogrammes et des indicateurs.
+- La saisie manuelle et l’import Excel partagent le contrôle des chevauchements, y compris pour les plages de nuit. L’import continue de sauter les doublons et les plages en conflit.
+- Le rappel de lot réutilise les tables déjà lues pour les différents formats. Dans le scénario testé avec deux formats, il passe de 15 à 5 lectures locales.
+- Les deux modales BL partagent le calcul de traçabilité. Le PDF, l’Excel du BL et la sauvegarde JSON partagent la fonction de téléchargement.
 
 ## Adresse
 
@@ -94,7 +107,6 @@ Application de gestion pour votre entreprise de thé froid.
   - Société, Prénom & Nom, Adresse, NPA & Localité
   - Tarifs (25cl/50cl/100cl), Mode facturation, Coordonnées
   - Import/Export Excel
-  - Import/Export CSV
 - **Sauvegarde & Restauration**:
   - Export JSON complet de toutes les données
   - Import depuis un fichier JSON
@@ -102,7 +114,7 @@ Application de gestion pour votre entreprise de thé froid.
 ### Nouveautés v11.5
 
 - **🔒 Démarrage sécurisé** — `startApp()` refuse de démarrer si `window.firebaseReady !== true`. Toute tentative d'accès aux données locales sans session Firebase active est bloquée (appel console, script tiers, boot précoce).
-- **⬆️ Firebase SDK 12.16.0** — Mise à jour du SDK Firebase de la version 10.8.0 vers 12.16.0, appliquée dans le module inline principal ainsi que dans le fallback dynamique (`app.js`).
+- **⬆️ Firebase SDK 12.16.0** — Mise à jour du SDK Firebase de la version 10.8.0 vers 12.16.0, appliquée dans le module inline principal ainsi que dans le chargement dynamique de secours (`app-sync.js`).
 - **🔐 Intégrité des dépendances** — Les scripts JSZip et XLSX sont chargés depuis cdnjs avec attributs `integrity` (SRI) et `crossorigin=anonymous` pour prévenir les altérations.
 - **🛡️ Content Security Policy** — CSP appliquée via une balise `<meta http-equiv="Content-Security-Policy">` dans `index.html`, avec `unsafe-inline` conservé à titre transitoire pour les gestionnaires inline non encore migrés vers la délégation centralisée. `unsafe-eval` est explicitement interdit.
 
@@ -370,7 +382,7 @@ La migration est automatique au démarrage, mais **ne doit être exécutée que 
 
 ### ⚠️ Authentification et règles Firestore (v11.2)
 
-Depuis v11.2, l'application utilise **Firebase Auth Email/Password** avec un compte technique fixe `gestion@thecol.ch`. Le mot de passe est saisi par l'utilisateur (écran de verrouillage) et **n'est jamais stocké dans le dépôt**. La session est persistée via `browserLocalPersistence` (IndexedDB).
+Depuis v11.2, l’application utilise **Firebase Auth Email/Password** avec un compte technique fixe `gestion@thecol.ch`. L’utilisateur saisit le mot de passe sur l’écran de verrouillage. Ce mot de passe doit rester hors du dépôt. La session est conservée dans le navigateur via `browserLocalPersistence`.
 
 **Configuration manuelle obligatoire** dans la console Firebase (avant tout déploiement) — voir la procédure complète dans `SPEC.md` §7 :
 
@@ -418,7 +430,9 @@ L'appli web est emballée via **Capacitor 8**. Le code source reste à la racine
 | Fichier | Rôle |
 |---------|------|
 | `index.html` | Structure HTML, conteneurs modals/toasts, écran de connexion, init Firebase SDK (App + Auth + Firestore) |
-| `app.js` | Toute la logique applicative: routing, vues, data layer, CRUD, auth, V11 sync, event delegation |
+| `app.js` | Démarrage et cycle de vie de la session |
+| `app-core.js`, `app-sync.js`, `app-ui.js` | Utilitaires et règles communes, données et synchronisation, navigation et composants partagés |
+| Autres `app-*.js` | Vues et logique métier par domaine, chargées dans l’ordre indiqué dans `index.html` |
 | `styles.css` | Styles CSS, variables de thème, responsive, écran de connexion |
 | `SPEC.md` | Schémas de données et spécifications |
 | `templates/bl_template.xlsx` | Template Excel pour export Bulletin de Livraison (BL) |
@@ -427,6 +441,18 @@ L'appli web est emballée via **Capacitor 8**. Le code source reste à la racine
 | `android/` `ios/` | Scaffolds natifs Capacitor 8 |
 | `www/` | Généré par `npm run sync` (gitignoré) |
 | `MOBILE.md` | Instructions de build mobile |
+
+## Lancer en local
+
+Depuis la racine du dépôt, démarrez un serveur HTTP local.
+
+```sh
+python -m http.server 8000 --bind 127.0.0.1
+```
+
+Ouvrez l’application dans le navigateur et connectez-vous avec le mot de passe habituel de ThéCol Gestion. [Application locale](http://127.0.0.1:8000/)
+
+L’aperçu temporaire préparé dans Codex utilise des données fictives. Il sert à tester la navigation et les fonctions locales. Les opérations Firebase et les exports Excel/PDF sont indisponibles dans cet aperçu.
 
 ## Technologies
 
@@ -446,6 +472,6 @@ Pour restaurer:
 2. Sélectionnez votre fichier de sauvegarde
 3. Vérifiez le bilan affiché (ajouts, modifications, suppressions par table) puis confirmez. La restauration remplace les données sur **tous les appareils** ; une sauvegarde de l'état actuel est téléchargée juste avant.
 
-## Tests
+## Validation
 
-Aucune CI. Le stress test (`stress-test.js`) a été retiré en **v11.2** — il n'est plus copié vers `www/` ni chargé en localhost. La validation se fait manuellement en vérifiant les données dans `localStorage` et la console.
+Le dépôt dispose d’un workflow GitHub Actions pour les versions Android et la validation Web se fait manuellement. Après une modification du chargement des scripts, vérifiez dans le navigateur la connexion, la navigation, l’ouverture des modales et le retour au jumeau 3D. Pour contrôler les fichiers destinés à Capacitor, exécutez `npm run copy:web` et vérifiez la présence dans `www/` des scripts listés dans `index.html`.

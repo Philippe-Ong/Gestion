@@ -4,7 +4,12 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const www = path.join(root, 'www');
 
-const FILES = ['index.html', 'app.js', 'styles.css', 'manifest.webmanifest'];
+const FILES = [
+  'index.html', 'styles.css', 'manifest.webmanifest',
+  'app-core.js', 'app-sync.js', 'app-ui.js', 'app-dashboard.js', 'app-jumeau.js',
+  'app-stock.js', 'app-pointage.js', 'app-commandes.js', 'app-livraisons.js',
+  'app-production.js', 'app-inventaire.js', 'app-parametres.js', 'app-sauvegardes.js', 'app.js'
+];
 const DIRS = ['templates', 'icons', 'vendor'];
 
 fs.mkdirSync(www, { recursive: true });
