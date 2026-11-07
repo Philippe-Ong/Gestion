@@ -15364,6 +15364,40 @@ const exportBLPDF = (livraisonId) => {
 
 const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
+// --- Export Excel du BL : outils XML ---
+// Excel refuse tout le classeur (« Nous avons trouvé un problème dans le
+// contenu ») pour une seule entorse au format : cellules d'une ligne hors de
+// l'ordre des colonnes, caractère interdit en XML, image dans la cellule
+// privée de sa valeur, etc.
+
+// Retire les caractères interdits en XML 1.0 (ex. tabulation verticale collée depuis Word).
+const xmlSafeText = (value) => Array.from(String(value ?? ''), (ch) => {
+    const c = ch.codePointAt(0);
+    return c === 0x9 || c === 0xA || c === 0xD || (c >= 0x20 && c <= 0xD7FF)
+        || (c >= 0xE000 && c <= 0xFFFD) || c >= 0x10000 ? ch : '';
+}).join('');
+
+// Numéro de série Excel (système 1900) d'une date AAAA-MM-JJ, null si invalide.
+const excelDateSerial = (iso) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+    if (!m) return null;
+    return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.UTC(1899, 11, 30)) / 86400000);
+};
+
+// Rang de colonne d'une référence (« C2 » → 3, « AA10 » → 27).
+const xlsxColIndex = (ref) => [...String(ref).replace(/[^A-Z]/g, '')]
+    .reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+
+const serializeXlsxXml = (doc) => {
+    const cleaned = new XMLSerializer().serializeToString(doc)
+        .replace(/<ns\d+:/g, '<')
+        .replace(/<\/ns\d+:/g, '</')
+        .replace(/ xmlns:ns\d+="[^"]*"/g, '');
+    return cleaned.startsWith('<?xml')
+        ? cleaned
+        : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + cleaned;
+};
+
 const exportBLExcel = (livraisonId) => {
     const data = prepareBLExport(livraisonId);
     if (!data) return;
@@ -15386,82 +15420,77 @@ const exportBLExcel = (livraisonId) => {
         JSZip.loadAsync(xhr.response).then(zip => {
             const sheetFile = zip.file('xl/worksheets/sheet1.xml');
             const ssFile = zip.file('xl/sharedStrings.xml');
+            const tableFile = zip.file('xl/tables/table1.xml');
+            const drawingFile = zip.file('xl/drawings/drawing1.xml');
 
-            if (!sheetFile) {
+            if (!sheetFile || !ssFile) {
                 showToast('Feuille non trouvée dans le template', 'error');
                 return;
             }
 
             Promise.all([
                 sheetFile.async('string'),
-                ssFile ? ssFile.async('string') : Promise.resolve(null)
-            ]).then(([sheetXml, ssXml]) => {
-                let ssStrings = [];
-                let ssModified = false;
-
-                if (ssXml) {
-                    const ssParser = new DOMParser();
-                    const ssDoc = ssParser.parseFromString(ssXml, 'text/xml');
-                    if (ssDoc.getElementsByTagName('parsererror').length > 0) {
-                        showToast('Erreur lecture des chaînes partagées', 'error');
-                        return;
-                    }
-                    const siEls = ssDoc.getElementsByTagName('si');
-                    for (let i = 0; i < siEls.length; i++) {
-                        const t = siEls[i].getElementsByTagName('t')[0];
-                        ssStrings.push(t ? t.textContent : '');
-                    }
-                }
-
+                ssFile.async('string'),
+                tableFile ? tableFile.async('string') : Promise.resolve(null),
+                drawingFile ? drawingFile.async('string') : Promise.resolve(null)
+            ]).then(([sheetXml, ssXml, tableXml, drawingXml]) => {
                 const parser = new DOMParser();
+                const ssDoc = parser.parseFromString(ssXml, 'text/xml');
+                if (ssDoc.getElementsByTagName('parsererror').length > 0) {
+                    showToast('Erreur lecture des chaînes partagées', 'error');
+                    return;
+                }
                 const sheetDoc = parser.parseFromString(sheetXml, 'text/xml');
-
                 if (sheetDoc.getElementsByTagName('parsererror').length > 0) {
                     showToast('Erreur parsing du template XML', 'error');
                     return;
                 }
 
-                const getOrAddSS = (text) => {
-                    let idx = ssStrings.indexOf(text);
-                    if (idx === -1) {
-                        idx = ssStrings.length;
-                        ssStrings.push(text);
-                        ssModified = true;
+                // Chaînes partagées : celles du modèle restent telles quelles
+                // (mise en forme comprise), les nouvelles s'ajoutent à la suite.
+                const sstEl = ssDoc.documentElement;
+                const ssIndex = new Map();
+                const siEls = sstEl.getElementsByTagName('si');
+                for (let i = 0; i < siEls.length; i++) {
+                    let text = '';
+                    const tEls = siEls[i].getElementsByTagName('t');
+                    for (let k = 0; k < tEls.length; k++) {
+                        if (tEls[k].parentNode.localName !== 'rPh') text += tEls[k].textContent;
                     }
-                    return idx;
+                    if (!ssIndex.has(text)) ssIndex.set(text, i);
+                }
+                let ssTotal = siEls.length;
+
+                const sharedStringIndex = (value) => {
+                    const text = xmlSafeText(value);
+                    if (ssIndex.has(text)) return ssIndex.get(text);
+                    const si = ssDoc.createElementNS(NS, 'si');
+                    const t = ssDoc.createElementNS(NS, 't');
+                    t.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
+                    t.textContent = text;
+                    si.appendChild(t);
+                    sstEl.appendChild(si);
+                    ssIndex.set(text, ssTotal);
+                    return ssTotal++;
                 };
 
-                const setCellTextDom = (cell, text) => {
-                    cell.setAttribute('t', 's');
-                    const fEls = cell.getElementsByTagName('f');
-                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
-                    const idx = getOrAddSS(text);
-                    let vEl = cell.getElementsByTagName('v')[0];
-                    if (!vEl) {
-                        vEl = sheetDoc.createElementNS(NS, 'v');
-                        cell.appendChild(vEl);
-                    }
-                    vEl.textContent = idx;
+                // Une cellule réécrite perd formule, valeur et métadonnées
+                // (vm : image dans la cellule) mais garde son style.
+                const clearCellDom = (cell) => {
+                    ['t', 'vm', 'cm'].forEach(attr => cell.removeAttribute(attr));
+                    while (cell.firstChild) cell.removeChild(cell.firstChild);
                 };
 
                 const setCellValueDom = (cell, value) => {
-                    cell.removeAttribute('t');
-                    const fEls = cell.getElementsByTagName('f');
-                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
-                    let vEl = cell.getElementsByTagName('v')[0];
-                    if (!vEl) {
-                        vEl = sheetDoc.createElementNS(NS, 'v');
-                        cell.appendChild(vEl);
-                    }
-                    vEl.textContent = value;
+                    clearCellDom(cell);
+                    const vEl = sheetDoc.createElementNS(NS, 'v');
+                    vEl.textContent = String(value);
+                    cell.appendChild(vEl);
                 };
 
-                const clearCellDom = (cell) => {
-                    cell.removeAttribute('t');
-                    const fEls = cell.getElementsByTagName('f');
-                    for (let fi = fEls.length - 1; fi >= 0; fi--) fEls[fi].parentNode.removeChild(fEls[fi]);
-                    let vEl = cell.getElementsByTagName('v')[0];
-                    if (vEl) vEl.textContent = '';
+                const setCellTextDom = (cell, text) => {
+                    setCellValueDom(cell, sharedStringIndex(text));
+                    cell.setAttribute('t', 's');
                 };
 
                 const findCellByRef = (row, ref) => {
@@ -15472,10 +15501,25 @@ const exportBLExcel = (livraisonId) => {
                     return null;
                 };
 
+                // Cellule créée au besoin à sa place dans la ligne : Excel exige
+                // les cellules dans l'ordre des colonnes.
+                const cellAt = (row, ref) => {
+                    const existing = findCellByRef(row, ref);
+                    if (existing) return existing;
+                    const cell = sheetDoc.createElementNS(NS, 'c');
+                    cell.setAttribute('r', ref);
+                    const col = xlsxColIndex(ref);
+                    const next = Array.from(row.getElementsByTagName('c'))
+                        .find(c => xlsxColIndex(c.getAttribute('r')) > col);
+                    row.insertBefore(cell, next || null);
+                    return cell;
+                };
+
                 const allRows = sheetDoc.getElementsByTagName('row');
 
                 const DATA_START = 15;
                 const DATA_END = 38;
+                const FOOTER_START = DATA_END + 1;
                 const dataRowEls = {};
 
                 for (let i = 0; i < allRows.length; i++) {
@@ -15489,12 +15533,15 @@ const exportBLExcel = (livraisonId) => {
 
                 const extraRows = Math.max(0, sortedItems.length - 24);
                 const FO = extraRows;
+                // Décale de FO les lignes du pied de page dans une plage (« D57:F59 »).
+                const shiftRef = (ref) => ref.replace(/([A-Z]+)(\d+)/g, (m, col, row) =>
+                    col + (Number(row) >= FOOTER_START ? Number(row) + FO : row));
 
                 if (FO > 0) {
                     const footerRows = [];
                     for (let i = 0; i < allRows.length; i++) {
                         const rn = parseInt(allRows[i].getAttribute('r'), 10);
-                        if (rn >= 39) footerRows.push(allRows[i]);
+                        if (rn >= FOOTER_START) footerRows.push(allRows[i]);
                     }
                     footerRows.sort((a, b) => parseInt(b.getAttribute('r'), 10) - parseInt(a.getAttribute('r'), 10));
                     footerRows.forEach(row => {
@@ -15509,17 +15556,15 @@ const exportBLExcel = (livraisonId) => {
                         }
                     });
                     const dimEl = sheetDoc.getElementsByTagName('dimension')[0];
-                    if (dimEl) {
-                        dimEl.setAttribute('ref', dimEl.getAttribute('ref').replace(/\d+$/, function(m) { return String(parseInt(m) + FO); }));
-                    }
+                    if (dimEl) dimEl.setAttribute('ref', shiftRef(dimEl.getAttribute('ref')));
                     const mergeCells = sheetDoc.getElementsByTagName('mergeCell');
                     for (let mi = 0; mi < mergeCells.length; mi++) {
-                        mergeCells[mi].setAttribute('ref', mergeCells[mi].getAttribute('ref').replace(/\d+/g, function(m) { return String(parseInt(m) + FO); }));
+                        mergeCells[mi].setAttribute('ref', shiftRef(mergeCells[mi].getAttribute('ref')));
                     }
                     const sheetDataEl = sheetDoc.getElementsByTagName('sheetData')[0];
-                    const newFooterStart = 39 + FO;
+                    const newFooterStart = FOOTER_START + FO;
                     for (let i = 0; i < FO; i++) {
-                        const newRowNum = 39 + i;
+                        const newRowNum = FOOTER_START + i;
                         let insertBefore = null;
                         for (let j = 0; j < allRows.length; j++) {
                             if (parseInt(allRows[j].getAttribute('r'), 10) === newFooterStart) {
@@ -15578,7 +15623,7 @@ const exportBLExcel = (livraisonId) => {
                     row.setAttribute('hidden', '1');
                     const rStr = row.getAttribute('r');
                     const cellA = findCellByRef(row, 'A' + rStr);
-                    if (cellA) { clearCellDom(cellA); setCellValueDom(cellA, 0); }
+                    if (cellA) setCellValueDom(cellA, 0);
                     const cellB = findCellByRef(row, 'B' + rStr);
                     if (cellB) setCellTextDom(cellB, ' ');
                     const cellC = findCellByRef(row, 'C' + rStr);
@@ -15587,25 +15632,25 @@ const exportBLExcel = (livraisonId) => {
                     if (cellD) setCellTextDom(cellD, ' ');
                 }
 
+                // D57:F59 (fusionnées) porte l'image de montagne placée dans la
+                // cellule : sa valeur #VALUE! est le repli de l'image, à garder.
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowNum = parseInt(row.getAttribute('r'));
 
-                    if (rowNum >= 15 && rowNum <= 38 + FO) continue;
+                    if (rowNum >= DATA_START && rowNum <= DATA_END + FO) continue;
 
                     if (rowNum === 2) {
-                        let cellC2 = findCellByRef(row, 'C2');
-                        if (!cellC2) {
-                            cellC2 = sheetDoc.createElementNS(NS, 'c');
-                            cellC2.setAttribute('r', 'C2');
-                            row.appendChild(cellC2);
-                        }
-                        setCellTextDom(cellC2, `BL-${blNum}`);
+                        setCellTextDom(cellAt(row, 'C2'), `BL-${blNum}`);
                     }
 
                     if (rowNum === 5) {
                         const cellF = findCellByRef(row, 'F5');
-                        if (cellF) setCellTextDom(cellF, blDate);
+                        if (cellF) {
+                            const serial = excelDateSerial(blDate);
+                            if (serial !== null) setCellValueDom(cellF, serial);
+                            else setCellTextDom(cellF, blDate || ' ');
+                        }
                     }
 
                     if (rowNum === 7) {
@@ -15657,41 +15702,54 @@ const exportBLExcel = (livraisonId) => {
                             }
                         }
                     }
+                }
 
-                    if (rowNum >= 57 + FO && rowNum <= 59 + FO) {
-                        const clearCols = ['D', 'E', 'F'];
-                        clearCols.forEach(col => {
-                            const cell = findCellByRef(row, col + rowNum);
-                            if (cell) {
-                                clearCellDom(cell);
-                            }
-                        });
+                // Ouvrir le BL en haut de page, pas sur la vue enregistrée dans le modèle.
+                const sheetView = sheetDoc.getElementsByTagName('sheetView')[0];
+                if (sheetView) {
+                    sheetView.removeAttribute('topLeftCell');
+                    const selections = sheetView.getElementsByTagName('selection');
+                    for (let si = 0; si < selections.length; si++) {
+                        selections[si].setAttribute('activeCell', 'A1');
+                        selections[si].setAttribute('sqref', 'A1');
                     }
                 }
 
-                const serialized = new XMLSerializer().serializeToString(sheetDoc);
-                const cleaned = serialized
-                    .replace(/<ns\d+:/g, '<')
-                    .replace(/<\/ns\d+:/g, '</')
-                    .replace(/ xmlns:ns\d+="[^"]*"/g, '');
-                const newSheetXml = cleaned.startsWith('<?xml')
-                    ? cleaned
-                    : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + cleaned;
+                const cellEls = sheetDoc.getElementsByTagName('c');
+                let stringRefs = 0;
+                for (let ci = 0; ci < cellEls.length; ci++) {
+                    if (cellEls[ci].getAttribute('t') === 's') stringRefs++;
+                }
+                sstEl.setAttribute('count', String(stringRefs));
+                sstEl.setAttribute('uniqueCount', String(ssTotal));
 
-                if (ssModified) {
-                    let ssContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
-                    ssContent += `<sst xmlns="${NS}" count="${ssStrings.length}" uniqueCount="${ssStrings.length}">`;
-                    ssStrings.forEach(s => {
-                        const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-                        ssContent += `<si><t xml:space="preserve">${esc}</t></si>`;
-                    });
-                    ssContent += '</sst>';
-                    zip.file('xl/sharedStrings.xml', ssContent);
+                const noFolders = { createFolders: false };
+                zip.file('xl/worksheets/sheet1.xml', serializeXlsxXml(sheetDoc), noFolders);
+                zip.file('xl/sharedStrings.xml', serializeXlsxXml(ssDoc), noFolders);
+
+                if (tableXml) {
+                    // Le tableau suit le pied de page ; son filtre QTT ne gardait que
+                    // 6, 12, 18 et 24 : il reprend la règle de l'export (QTT ≠ 0).
+                    const newTableXml = tableXml
+                        .replace(/(<(?:table|autoFilter)\b[^>]*?\sref=")([^"]+)"/g,
+                            (m, head, ref) => `${head}${shiftRef(ref)}"`)
+                        .replace(/<filterColumn colId="0">[\s\S]*?<\/filterColumn>/,
+                            '<filterColumn colId="0"><customFilters><customFilter operator="notEqual" val="0"/></customFilters></filterColumn>');
+                    zip.file('xl/tables/table1.xml', newTableXml, noFolders);
                 }
 
-                zip.file('xl/worksheets/sheet1.xml', newSheetXml);
+                if (drawingXml && FO > 0) {
+                    // Images ancrées dans le pied de page (lignes comptées depuis 0).
+                    const newDrawingXml = drawingXml.replace(/<xdr:row>(\d+)<\/xdr:row>/g, (m, r) =>
+                        `<xdr:row>${Number(r) >= FOOTER_START - 1 ? Number(r) + FO : r}</xdr:row>`);
+                    zip.file('xl/drawings/drawing1.xml', newDrawingXml, noFolders);
+                }
 
-                zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }).then(blob => {
+                zip.generateAsync({
+                    type: 'blob',
+                    compression: 'DEFLATE',
+                    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                }).then(blob => {
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
