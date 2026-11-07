@@ -468,7 +468,9 @@ const showCommandeModal = (id = null, prefill = null) => {
     const usedAromeIds = usedIds('aromeId');
     const usedFormatIds = usedIds('formatId');
     const matrixAromes = [...aromes, ...DB.get('aromes').filter(a => !a.actif && usedAromeIds.has(a.id))];
-    const matrixFormats = [...formats, ...DB.get('formats').filter(f => !f.actif && usedFormatIds.has(f.id))];
+    const contenance = (format) => resolveFormatContenance(format.nom, [format]) || Infinity;
+    const matrixFormats = [...formats, ...DB.get('formats').filter(f => f.actif === false && usedFormatIds.has(f.id))]
+        .sort((a, b) => contenance(a) - contenance(b) || a.nom.localeCompare(b.nom, 'fr-CH'));
     const inactifTag = (r) => (r.actif ? '' : ' <small>(inactif)</small>');
 
     // Inclure le client de la commande même s'il est inactif (ex: client ponctuel)
