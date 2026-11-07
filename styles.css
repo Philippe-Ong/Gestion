@@ -4944,7 +4944,16 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-md);
 }
-.row-menu.is-up .row-menu-list { top: auto; bottom: calc(100% + 4px); }
+/* Ouvert : liste sortie dans <body>, position calculée par placerRowMenuPortail */
+.row-menu-list.is-portal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: auto;
+    z-index: 1200;
+    overflow-y: auto;
+}
 .row-menu-list button {
     padding: 9px 12px;
     background: none;
@@ -6468,6 +6477,444 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 
     .twin-label--zone { padding: 3px 8px 4px; }
     .twin-label--zone span { display: none; }
+}
+
+/* === Comptabilité (v13.6) : journal, grand livre, bilan, résultat, créances,
+       dettes et plan comptable du classeur « Comptabilité SàRL » === */
+.cpt { container-type: inline-size; container-name: cpt; }
+.cpt .page-toolbar-lead { flex: 0 1 auto; }
+.cpt-vues {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+.cpt-vues::-webkit-scrollbar { display: none; }
+.cpt-vues .segmented-filter { flex-wrap: nowrap; white-space: nowrap; }
+.cpt-vues .segment { white-space: nowrap; font-size: 14px; padding: 7px 8px; }
+.cpt-exercice { width: auto; min-width: 84px; padding-right: 28px; }
+.cpt-exercice-seul {
+    padding: 0 6px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+.cpt-filtres {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.cpt-filtres input[type="search"] { flex: 1 1 240px; min-width: 0; background: var(--white); }
+.cpt-filtres select { flex: 0 1 240px; width: auto; min-width: 0; background: var(--white); }
+.cpt .stock-section-title { font-size: 18px; }
+.cpt .stock-section-meta { font-size: 13px; }
+
+/* --- Tableaux : journal, grand livre, créances, dettes --- */
+.cpt-table { font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
+.cpt-table th { font-size: 13px; color: var(--text-light); }
+.cpt-table th, .cpt-table td { padding: 11px 12px; vertical-align: top; }
+.cpt-table tbody tr:hover td { background: var(--bg-secondary); }
+.cpt-table .num { text-align: right; white-space: nowrap; }
+.cpt-table tfoot td { font-weight: 700; border-bottom: none; background: var(--bg-secondary); }
+.cpt-col-n { width: 1%; white-space: nowrap; color: var(--text-light); }
+.cpt-col-n .cpt-link { white-space: nowrap; overflow-wrap: normal; }
+.cpt-col-date { white-space: nowrap; width: 1%; }
+.cpt-col-montant { font-weight: 600; width: 1%; }
+.cpt-col-menu, .cpt-col-action { width: 1%; white-space: nowrap; }
+.cpt-col-lib { min-width: 220px; }
+.cpt-col-lib .badge { margin: 4px 4px 0 0; font-size: 12px; }
+.cpt-col-compte { max-width: 220px; }
+.cpt-compte {
+    display: block;
+    max-width: 220px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cpt-compte b { font-weight: 600; margin-right: 2px; }
+.cpt-link {
+    display: inline;
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: var(--text);
+    text-align: left;
+    white-space: normal;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+.cpt-link:hover { color: var(--primary-dark); text-decoration: underline; }
+.cpt-meta-mobile, .cpt-sub {
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--text-light);
+}
+.cpt-meta-mobile { display: none; }
+.cpt-eur { display: block; font-size: 13px; font-weight: 400; color: var(--text-light); }
+.cpt-solde { font-weight: 700; }
+.cpt-row-ouverture td { color: var(--text-light); font-style: italic; }
+.cpt-plus { margin-top: 12px; }
+.cpt-avert {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--bg-warning);
+    color: var(--warning-dark);
+    font-size: 14px;
+}
+.cpt-deux {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 16px;
+    align-items: start;
+}
+.cpt-carte { overflow: hidden; }
+.cpt-reglees > summary { cursor: pointer; list-style: none; }
+.cpt-reglees > summary::-webkit-details-marker { display: none; }
+.cpt-reglees > summary .stock-section-title::after { content: ' ▸'; color: var(--text-light); }
+.cpt-reglees[open] > summary .stock-section-title::after { content: ' ▾'; }
+
+/* --- Bilan et compte de résultat : présentation du classeur, en T --- */
+.cpt-t-head { align-items: center; gap: 10px 14px; }
+.cpt-t-head .segmented-filter { margin-left: auto; }
+.cpt-t-head .segment { font-size: 14px; }
+.cpt-t {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    background: var(--white);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+.cpt-t-cote { display: flex; flex-direction: column; min-width: 0; }
+.cpt-t-cote + .cpt-t-cote { border-left: 2px solid var(--border); }
+.cpt-t-titre {
+    margin: 0;
+    padding: 14px 18px 12px;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--primary-darker);
+    border-bottom: 2px solid var(--border);
+}
+.cpt-t-liste { list-style: none; margin: 0; padding: 0; flex: 1; }
+.cpt-t-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    width: 100%;
+    min-height: 44px;
+    padding: 11px 18px;
+    border: none;
+    border-bottom: 1px solid var(--border-light);
+    background: none;
+    font: inherit;
+    font-size: 15px;
+    color: var(--text);
+    text-align: left;
+}
+button.cpt-t-row { cursor: pointer; }
+button.cpt-t-row:hover { background: var(--bg-secondary); }
+.cpt-t-row.is-vide { border-bottom-color: transparent; }
+.cpt-t-num {
+    flex: none;
+    min-width: 42px;
+    color: var(--text-light);
+    font-variant-numeric: tabular-nums;
+}
+.cpt-t-nom { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.cpt-t-montant {
+    flex: none;
+    margin-left: auto;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.cpt-t-row.is-resultat { font-weight: 700; background: var(--bg-secondary); }
+.cpt-t-row.is-perte .cpt-t-montant { color: var(--danger); }
+.cpt-t-row.is-benefice .cpt-t-montant { color: var(--success-dark); }
+.cpt-t-total {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px;
+    border-top: 2px solid var(--text);
+    font-size: 16px;
+    font-weight: 700;
+    background: var(--bg-secondary);
+}
+
+/* Saisie du bilan d'ouverture dans le bilan */
+.cpt-t-row.is-saisie { align-items: center; padding-top: 6px; padding-bottom: 6px; }
+.cpt-t-saisie-label {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 400;
+    color: var(--text);
+    cursor: text;
+}
+.cpt-t-input {
+    flex: none;
+    width: 140px;
+    padding: 7px 10px;
+    text-align: right;
+    font-size: 15px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.cpt-t-input.is-invalid { border-color: var(--danger); background: var(--bg-danger); }
+.cpt-t-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 14px;
+}
+.cpt-t-actions .cpt-avert { margin: 0 auto 0 0; }
+
+/* --- Statistiques --- */
+.cpt-stats-cles { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 20px; margin-bottom: 18px; }
+.cpt-stats-cles > .dash-stat:last-child:nth-child(odd) { grid-column: auto; }
+.cpt-stats-cles .dash-stat {
+    padding: 14px 16px;
+    border-radius: var(--radius-lg);
+    background: var(--white);
+    box-shadow: var(--shadow-sm);
+}
+.cpt-stats-cles .dash-stat-label { font-size: 13px; }
+.cpt-stats-cles .dash-stat-value { font-size: 22px; }
+.cpt-stats-cles .dash-stat-value small { font-size: 14px; font-weight: 600; }
+.cpt-stats-cles .dash-stat-sub { font-size: 13px; }
+.cpt-stats-cles .is-perte .dash-stat-value { color: var(--danger); }
+.cpt-stats-cles .is-benefice .dash-stat-value { color: var(--success-dark); }
+.cpt-stats-carte { padding: 16px 18px 18px; margin-bottom: 16px; }
+.cpt-stats-entete {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px 14px;
+    margin-bottom: 14px;
+}
+.cpt-stats-sous-titre { margin: 0 0 12px; font-size: 16px; font-weight: 700; color: var(--text); }
+.cpt-stats-entete .cpt-stats-sous-titre { margin: 0; }
+.cpt-stats-entete .segment { font-size: 14px; }
+.cpt-chart .dash-chart-plot { height: 240px; margin-left: 52px; }
+.cpt-chart .dash-chart-cols,
+.cpt-chart .dash-chart-x { grid-template-columns: repeat(var(--cols, 12), minmax(0, 1fr)); }
+.cpt-chart .dash-chart-x { margin-left: 52px; font-size: 12px; overflow: visible; }
+.cpt-chart .dash-chart-line span { font-size: 12px; color: var(--text-light); }
+.cpt-chart .dash-col { display: block; }
+.cpt-chart .dash-bar {
+    position: absolute;
+    left: 50%;
+    bottom: var(--b);
+    height: var(--h);
+    width: min(28px, 64%);
+    transform: translateX(-50%);
+}
+.cpt-chart .dash-bar.is-negatif { background: var(--danger-light); border-radius: 0 0 4px 4px; }
+.cpt-chart .dash-bar-label { font-size: 12px; }
+.cpt-stats-table summary { font-size: 13px; }
+.cpt-stats-table table { font-size: 13px; }
+.cpt-stats-table th, .cpt-stats-table td { padding: 6px 10px; }
+.cpt-stats-grille {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+.cpt-stats-grille .cpt-stats-carte { margin-bottom: 0; }
+.cpt-rang .dash-rank-label { font-size: 14px; }
+.cpt-rang .dash-rank-value { font-size: 14px; }
+.cpt-rang .dash-rank-value small { font-size: 12.5px; }
+.cpt-rang-plus { margin-top: 10px; font-size: 13px; color: var(--text-light); }
+
+/* --- Plan comptable --- */
+.cpt-plan-row { padding: 0; }
+.cpt-plan-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 10px 14px;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.cpt-plan-btn:hover { background: var(--bg-secondary); }
+.cpt-plan-btn .ptg-row-name { font-size: 14px; }
+.cpt-plan-num { min-width: 44px; font-variant-numeric: tabular-nums; }
+.cpt-plan-solde { font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cpt-plan-row.is-vide .cpt-plan-btn { color: var(--text-lighter); }
+.cpt-plan-row.is-vide .ptg-row-name { font-weight: 400; }
+
+/* --- Fenêtres --- */
+/* Saisie d'une écriture : ordre du journal, débit → crédit, montant lisible */
+.cpt-ecr label { font-size: 13px; }
+.cpt-ecr input, .cpt-ecr select { font-size: 15px; min-height: 44px; }
+.cpt-ecr .form-group { margin-bottom: 16px; }
+.cpt-ecr-date input { max-width: 220px; }
+.cpt-ecr-paire {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: end;
+    gap: 0 10px;
+    margin-bottom: 16px;
+    padding: 14px 14px 0;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+.cpt-ecr-paire .form-group { margin-bottom: 14px; min-width: 0; }
+.cpt-ecr-paire select { background-color: var(--white); }
+.cpt-ecr-fleche {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 44px;
+    margin-bottom: 14px;
+    color: var(--primary);
+}
+.cpt-ecr-fleche svg { width: 22px; height: 22px; }
+.cpt-ecr-montants { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 14px; }
+.cpt-montant { position: relative; width: 210px; max-width: 100%; }
+.cpt-montant input {
+    padding-right: 54px;
+    text-align: right;
+    font-size: 18px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.cpt-montant-unite {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-light);
+    pointer-events: none;
+}
+.cpt-ecr-eur { margin-bottom: 16px; min-height: 44px; }
+.cpt-ecr-piece {
+    margin: 0 0 16px;
+    padding: 12px 14px 0;
+    border: none;
+    border-radius: var(--radius-md);
+    background: var(--primary-tint);
+    min-width: 0;
+}
+.cpt-ecr-piece legend {
+    float: left;
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--primary-darker);
+}
+.cpt-ecr-piece .form-row { clear: both; }
+.cpt-ecr-piece .form-group { margin-bottom: 12px; }
+@media (max-width: 560px) {
+    .cpt-ecr-paire { grid-template-columns: minmax(0, 1fr); }
+    .cpt-ecr-fleche { height: 18px; margin: -6px auto 8px; transform: rotate(90deg); }
+    .cpt-ecr-date input { max-width: none; }
+}
+.cpt-form-resume {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--bg-secondary);
+}
+.cpt-form-resume span { font-size: 13px; color: var(--text-light); }
+.cpt-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 0;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+}
+.cpt-check input { width: auto; }
+
+@container cpt (max-width: 1080px) {
+    .cpt-stats-grille { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container cpt (max-width: 760px) {
+    .cpt-deux { grid-template-columns: minmax(0, 1fr); }
+    .cpt-journal thead, .cpt-livre thead, .cpt-pieces thead { display: none; }
+    .cpt-journal .cpt-col-n, .cpt-journal .cpt-col-date, .cpt-journal .cpt-col-compte,
+    .cpt-livre .cpt-col-n, .cpt-livre .cpt-col-date, .cpt-livre .cpt-col-compte,
+    .cpt-pieces .cpt-col-n, .cpt-pieces .cpt-col-date { display: none; }
+    .cpt-meta-mobile { display: block; }
+    .cpt-table { min-width: 0; }
+    .cpt-table-wrap { margin-left: 0; margin-right: 0; padding-left: 0; padding-right: 0; max-width: 100%; border: 1px solid var(--border-light); }
+    .cpt-table th, .cpt-table td { padding: 11px 10px; }
+    .cpt-col-lib { min-width: 0; }
+    .cpt-filtres select { flex: 1 1 140px; }
+    .cpt-vues .segmented-filter { flex-wrap: wrap; white-space: normal; }
+    /* Créances et dettes en cartes : texte, puis montant et actions */
+    .cpt-pieces, .cpt-pieces tbody { display: block; }
+    .cpt-pieces tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        align-items: center;
+        gap: 6px 8px;
+        padding: 12px;
+        border-bottom: 1px solid var(--border-light);
+    }
+    .cpt-pieces td { padding: 0; border: none; width: auto; }
+    .cpt-pieces .cpt-col-lib { grid-column: 1 / -1; }
+    .cpt-pieces .cpt-col-montant { grid-column: 1; text-align: left; }
+    .cpt-t-row { gap: 8px; padding-left: 14px; padding-right: 14px; }
+    .cpt-t-titre, .cpt-t-total { padding-left: 14px; padding-right: 14px; }
+    .cpt-t-num { min-width: 38px; }
+    .cpt-t-saisie-label { gap: 8px; }
+    .cpt-t-input { width: 118px; }
+    .cpt-stats-cles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cpt-stats-grille { grid-template-columns: minmax(0, 1fr); }
+    .cpt-chart .dash-chart-plot { height: 200px; margin-left: 44px; }
+    .cpt-chart .dash-chart-x { margin-left: 44px; font-size: 11px; }
+}
+
+@container cpt (max-width: 600px) {
+    .cpt-t { grid-template-columns: minmax(0, 1fr); }
+    .cpt-t-cote + .cpt-t-cote { border-left: none; border-top: 8px solid var(--bg); }
+    .cpt-t-row.is-vide { display: none; }
+    .cpt-t-row { padding: 11px 14px; }
+    .cpt-t-titre, .cpt-t-total { padding-left: 14px; padding-right: 14px; }
+    .cpt-t-head .segmented-filter { margin-left: 0; }
+    .cpt-stats-cles { gap: 12px; }
+    .cpt-stats-cles .dash-stat { padding: 12px; }
+    .cpt-stats-cles .dash-stat-value { font-size: 19px; }
+    .cpt-stats-cles .dash-stat-value small { font-size: 12px; }
+    .cpt-chart .dash-chart-x span[data-mineur] { visibility: hidden; }
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+    .cpt-link { min-height: 32px; }
+    .cpt-plan-btn { min-height: 44px; }
+    .cpt-filtres input, .cpt-filtres select, .cpt-exercice { min-height: 40px; }
+    .cpt-check { min-height: 40px; }
 }
 
 /* === Écrans tactiles et téléphone : cibles d'au moins 40 px (v12.8) ===

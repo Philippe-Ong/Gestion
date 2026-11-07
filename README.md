@@ -4,7 +4,7 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v13.5**
+**v13.6**
 
 ## Adresse
 
@@ -119,6 +119,19 @@ Application de gestion pour votre entreprise de thé froid.
 - **🕐 Horodatage d'export BL local (navigateur)** — Les dates d'export d'un Bulletin de Livraison sont stockées dans `localStorage` sous la clé `thecol_bl_export_dates`, sans modifier le document Firestore `livraisons`. La lecture est locale d'abord, avec fallback sur l'ancien champ `dateDernierExport` pour rétrocompatibilité. L'horodatage est spécifique au navigateur et n'est pas partagé entre appareils.
 - **↩️ Export BL sans opération V11** — Un export BL ne crée plus d'opération dans la file d'attente V11 (`thecol_v11_queue`), évitant toute écriture Firestore superflue et tout conflit de synchronisation.
 - **🔇 Suppression de l'écho local dans le listener V11** — Le snapshot temps réel (`onSnapshot`) ne déclenche plus d'alerte de conflit si le document distant reçu est strictement identique au payload de l'opération locale en attente (self-echo). Les vrais conflits concurrents (divergence entre appareils) continuent d'être signalés normalement.
+
+### Nouveautés v13.6
+
+Comptabilité dans l'app, sur le modèle du classeur Excel « Comptabilité SàRL » : mêmes comptes, même journal, mêmes bilans.
+
+- **📒 Journal** — Les écritures en partie double (date, débit, crédit, libellé, montant CHF / EUR), numérotées comme les lignes du classeur : le n° d'écriture reste le n° de facture. Recherche par n°, montant, libellé ou compte, filtres par compte et par mois.
+- **📊 Grand livre, Bilan, Résultat** — Le détail de chaque compte avec son solde ; le bilan et le compte de résultat présentés comme dans le classeur (actifs à gauche, passifs à droite, perte ou bénéfice, totaux égaux), en ouverture ou en clôture.
+- **📈 Statistiques** — Ventes, charges, résultat, trésorerie, factures ouvertes et délai moyen de paiement des clients ; graphique mois par mois (ventes, charges, résultat, trésorerie) ; charges par compte, ventes par mode de paiement, factures par client.
+- **🧾 Créances et dettes** — Les factures clients et les dettes ouvertes, comme les feuilles Créance-client et Dette fournisseur. « Encaisser » ou « Payer » crée l'écriture « X paye la facture N du jj.mm » et ferme la pièce ; une facture en retard est signalée.
+- **📥 Import Excel** — Le classeur s'importe tel quel (plan comptable, bilan d'ouverture, journal, créances, dettes) ; un réimport n'ajoute que les nouvelles écritures.
+- **📤 Export Excel** — Le même classeur, avec ses formules et ses mises en forme, prêt à être complété dans Excel ou transmis à la fiduciaire.
+- **📋 Menus « ⋯ » toujours accessibles** — Partout dans l'application (tableaux courts, cartes, fenêtre de livraison), la liste d'actions s'affiche par-dessus la page, vers le haut ou le bas selon la place, sans jamais être coupée.
+- **🗂️ Plan comptable et exercices** — Les 68 emplacements du plan, le bilan d'ouverture, les données de base, et un nouvel exercice qui reprend le bilan final.
 
 ### Nouveautés v13.3
 
