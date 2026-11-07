@@ -1226,6 +1226,7 @@ CLICK_HANDLERS['bl-caisse-step'] = (el) => {
     if (!input) return;
     input.value = String(Math.max(0, (parseInt(input.value, 10) || 0) + (Number(el.getAttribute('data-delta')) || 0)));
 };
+CLICK_HANDLERS['bl-facturation-mode'] = (el) => setBLFacturationMode(el.getAttribute('data-mode'));
 CLICK_HANDLERS['export-bl-excel'] = (el) => exportPreparedBL(el.getAttribute('data-id'), 'excel');
 CLICK_HANDLERS['export-bl-pdf'] = (el) => exportPreparedBL(el.getAttribute('data-id'), 'pdf');
 
@@ -15010,15 +15011,81 @@ const saveBLPreparation = (livraisonId) => {
         return null;
     }
 
+    const modeEl = document.getElementById('blFactMode');
+    const facturation = modeEl ? {
+        facturationMode: BL_FACTURATION_MODES[modeEl.value] ? modeEl.value : '',
+        facturationDestinataire: document.getElementById('blFactDest')?.value.trim() || ''
+    } : {};
+    if (!facturation.facturationMode) facturation.facturationDestinataire = '';
+    if (facturation.facturationMode === 'email' && facturation.facturationDestinataire
+        && !EMAIL_RE.test(facturation.facturationDestinataire)) {
+        showToast('Adresse e-mail de facturation invalide', 'error');
+        document.getElementById('blFactDest')?.focus();
+        return null;
+    }
+
     const commande = commandes.find(c => c.id === livraisons[index].commandeId);
     livraisons[index] = syncBLTraceFromCommande({
         ...livraisons[index],
         caissesVertesLivrees: vertes,
         caissesNoiresLivrees: noires,
+        ...(modeEl ? facturation : {}),
         notes: document.getElementById('blNotesInternes')?.value.trim() || ''
     }, commande);
     DB.set('livraisons', livraisons);
     return livraisons[index];
+};
+
+// --- Facturation du BL : cases « par E-mail / par poste / Autre » et ligne « À » ---
+const BL_FACTURATION_MODES = { email: 'E-mail', poste: 'Poste (+ 1 CHF)', autre: 'Autre' };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const BL_FACTURATION_SUR_PLACE = 'sur place à la livraison';
+
+const premierEmail = (text) => (String(text || '').match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/) || [''])[0];
+
+const blDestinataireParDefaut = (mode, client) => {
+    if (mode === 'email') return premierEmail(client?.email) || premierEmail(client?.coord);
+    if (mode === 'autre') return BL_FACTURATION_SUR_PLACE;
+    return '';
+};
+
+// Facturation du BL, sinon celle du dernier BL du même client.
+const blFacturationInitiale = (livraison, livraisons) => {
+    if (BL_FACTURATION_MODES[livraison.facturationMode]) {
+        return { mode: livraison.facturationMode, destinataire: livraison.facturationDestinataire || '' };
+    }
+    const precedent = livraisons
+        .filter(l => l.id !== livraison.id && l.clientId && l.clientId === livraison.clientId
+            && BL_FACTURATION_MODES[l.facturationMode])
+        .sort((a, b) => String(b.dateBL || '').localeCompare(String(a.dateBL || ''))
+            || String(b.numeroBL || '').localeCompare(String(a.numeroBL || ''), undefined, { numeric: true }))[0];
+    return precedent
+        ? { mode: precedent.facturationMode, destinataire: precedent.facturationDestinataire || '' }
+        : { mode: '', destinataire: '' };
+};
+
+const setBLFacturationMode = (mode) => {
+    const modeEl = document.getElementById('blFactMode');
+    const group = document.getElementById('blFactDestGroup');
+    const input = document.getElementById('blFactDest');
+    if (!modeEl || !group || !input) return;
+    const next = modeEl.value === mode ? '' : mode;
+    modeEl.value = next;
+    document.querySelectorAll('[data-click="bl-facturation-mode"]').forEach(btn => {
+        const active = btn.getAttribute('data-mode') === next;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', String(active));
+    });
+    group.hidden = !next;
+    document.getElementById('blFactDestLabel').textContent = next === 'email' ? 'Adresse e-mail' : 'À';
+    input.type = next === 'email' ? 'email' : 'text';
+    // Remplacer la valeur seulement si elle vient d'un mode précédent, pas d'une saisie.
+    if (!input.value.trim() || input.value === input.dataset.defaut) {
+        const defaut = next === 'email' ? group.dataset.email || '' : next === 'autre' ? BL_FACTURATION_SUR_PLACE : '';
+        input.value = defaut;
+        input.dataset.defaut = defaut;
+    }
+    if (next) input.focus();
 };
 
 const showPrepareBLExportModal = (livraisonId) => {
@@ -15040,6 +15107,8 @@ const showPrepareBLExportModal = (livraisonId) => {
         : buildLotsTracesForCommande(commande);
     const totalTrace = lotsTraces.reduce((sum, lot) => sum + (Number(lot.quantite) || 0), 0);
     const forcedCount = lotsTraces.filter(lot => lot.forceStockInsuffisant).length;
+    const fact = blFacturationInitiale(livraison, livraisons);
+    if (fact.mode && !fact.destinataire) fact.destinataire = blDestinataireParDefaut(fact.mode, client);
 
     // Compteur de caisses IFCO avec boutons − / + (saisie directe toujours possible)
     const compteur = (id, label, valeur, couleur) => `
@@ -15061,6 +15130,18 @@ const showPrepareBLExportModal = (livraisonId) => {
                 <div class="bl-counters">
                     ${compteur('blCaissesVertes', 'Caisses vertes', parseInt(livraison.caissesVertesLivrees, 10) || 0, 'verte')}
                     ${compteur('blCaissesNoires', 'Caisses noires', parseInt(livraison.caissesNoiresLivrees, 10) || 0, 'noire')}
+                </div>
+            </section>
+
+            <section class="trace-section">
+                <h4 class="trace-section-title">Facturation</h4>
+                <input type="hidden" id="blFactMode" value="${escapeHtml(fact.mode)}">
+                <div class="segmented-filter" role="group" aria-label="Mode de facturation">
+                    ${Object.entries(BL_FACTURATION_MODES).map(([m, label]) => `<button type="button" class="segment${m === fact.mode ? ' active' : ''}" data-click="bl-facturation-mode" data-mode="${m}" aria-pressed="${m === fact.mode}">${escapeHtml(label)}</button>`).join('')}
+                </div>
+                <div class="form-group bl-fact-dest" id="blFactDestGroup" data-email="${escapeHtml(blDestinataireParDefaut('email', client))}"${fact.mode ? '' : ' hidden'}>
+                    <label for="blFactDest" id="blFactDestLabel">${fact.mode === 'email' ? 'Adresse e-mail' : 'À'}</label>
+                    <input type="${fact.mode === 'email' ? 'email' : 'text'}" id="blFactDest" value="${escapeHtml(fact.destinataire)}" data-defaut="${escapeHtml(fact.destinataire)}" autocomplete="off" spellcheck="false">
                 </div>
             </section>
 
@@ -15211,10 +15292,16 @@ const prepareBLExport = (livraisonId) => {
         return a.formatNom.localeCompare(b.formatNom);
     });
     const client = DB.get('clients').find(c => c.id === livraison.clientId);
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(livraison.dateBL || '');
+    const facturationMode = BL_FACTURATION_MODES[livraison.facturationMode] ? livraison.facturationMode : '';
     return {
         livraison, sortedItems,
         blNum: getBLNumero(livraison),
         blDate: livraison.dateBL || '',
+        // Date imprimée sur le BL, au format suisse (JJ.MM.AAAA).
+        blDateCH: iso ? `${iso[3]}.${iso[2]}.${iso[1]}` : (livraison.dateBL || ''),
+        facturationMode,
+        facturationDestinataire: facturationMode ? String(livraison.facturationDestinataire || '').trim() : '',
         cVerte: parseInt(livraison.caissesVertesLivrees, 10) || 0,
         cNoire: parseInt(livraison.caissesNoiresLivrees, 10) || 0,
         clientSociete: client?.societe || '',
@@ -15229,8 +15316,9 @@ const exportBLPDF = (livraisonId) => {
         const data = prepareBLExport(livraisonId);
         if (!data) return;
         const {
-            livraison, sortedItems, blNum, blDate, cVerte, cNoire,
-            clientSociete, clientContact, clientAdresse, clientLocalite
+            livraison, sortedItems, blNum, blDate, blDateCH, cVerte, cNoire,
+            clientSociete, clientContact, clientAdresse, clientLocalite,
+            facturationMode, facturationDestinataire
         } = data;
 
         const PER_PAGE = 18;
@@ -15261,7 +15349,7 @@ const exportBLPDF = (livraisonId) => {
 
         const recipientLines = [clientSociete, clientContact, clientAdresse, clientLocalite].filter(Boolean).slice(0, 4);
         const clientBottom = clientSociete || clientContact;
-        const factMark = (mode) => (livraison.facturationMode === mode ? 'x' : '');
+        const factMark = (mode) => (facturationMode === mode ? 'x' : '');
 
         // v11.12 : génération d'un vrai fichier .pdf via jsPDF. Fonds de page =
         // scans du template Excel ; données variables dessinées en vectoriel aux
@@ -15311,7 +15399,7 @@ const exportBLPDF = (livraisonId) => {
                 doc.addImage(isLastPage ? fullPageImg : continuationImg, 'PNG', 0, 0, 210, 297);
 
                 drawText(blNum, 106.3, baselineFromTop(16, 10.5), 10.5, { bold: true, align: 'center' });
-                drawText(blDate, 181.2, baselineFromTop(50.8, 11), 11, { align: 'right' });
+                drawText(blDateCH, 181.2, baselineFromTop(50.8, 11), 11, { align: 'right' });
                 recipientLines.forEach((line, i) => {
                     drawText(line, 181.3, baselineFromTop(61.7 + i * ROW_H, 11, ROW_H), 11, { align: 'right' });
                 });
@@ -15333,6 +15421,13 @@ const exportBLPDF = (livraisonId) => {
                     drawText(factMark('email'), 119.5, baselineFromTop(149, 7.875), 7.875, { bold: true, align: 'center' });
                     drawText(factMark('poste'), 119.5, baselineFromTop(154.35, 7.875), 7.875, { bold: true, align: 'center' });
                     drawText(factMark('autre'), 119.5, baselineFromTop(159.7, 7.875), 7.875, { bold: true, align: 'center' });
+                    if (facturationMode) {
+                        // Ligne « À » : le fond porte « sur place à la livraison », masqué
+                        // par un aplat blanc puis remplacé par l'adresse choisie.
+                        doc.setFillColor(255, 255, 255);
+                        doc.rect(126.2, 169.6, 56, 6.4, 'F');
+                        drawText(facturationDestinataire, 127, baselineFromTop(170.4, 9.5), 9.5, { maxWidth: 54 });
+                    }
                     drawText(clientBottom, 27, baselineFromTop(192.65, 16), 16);
                 }
                 if (pageCount > 1) {
@@ -15402,8 +15497,9 @@ const exportBLExcel = (livraisonId) => {
     const data = prepareBLExport(livraisonId);
     if (!data) return;
     const {
-        livraison, sortedItems, blNum, blDate, cVerte, cNoire,
-        clientSociete, clientContact, clientAdresse, clientLocalite
+        sortedItems, blNum, blDate, cVerte, cNoire, livraison,
+        clientSociete, clientContact, clientAdresse, clientLocalite,
+        facturationMode, facturationDestinataire
     } = data;
 
     const templatePath = 'templates/bl_template.xlsx';
@@ -15422,6 +15518,7 @@ const exportBLExcel = (livraisonId) => {
             const ssFile = zip.file('xl/sharedStrings.xml');
             const tableFile = zip.file('xl/tables/table1.xml');
             const drawingFile = zip.file('xl/drawings/drawing1.xml');
+            const stylesFile = zip.file('xl/styles.xml');
 
             if (!sheetFile || !ssFile) {
                 showToast('Feuille non trouvée dans le template', 'error');
@@ -15432,9 +15529,48 @@ const exportBLExcel = (livraisonId) => {
                 sheetFile.async('string'),
                 ssFile.async('string'),
                 tableFile ? tableFile.async('string') : Promise.resolve(null),
-                drawingFile ? drawingFile.async('string') : Promise.resolve(null)
-            ]).then(([sheetXml, ssXml, tableXml, drawingXml]) => {
+                drawingFile ? drawingFile.async('string') : Promise.resolve(null),
+                stylesFile ? stylesFile.async('string') : Promise.resolve(null)
+            ]).then(([sheetXml, ssXml, tableXml, drawingXml, stylesXml]) => {
                 const parser = new DOMParser();
+                const stylesDoc = stylesXml ? parser.parseFromString(stylesXml, 'text/xml') : null;
+                const stylesOk = stylesDoc && stylesDoc.getElementsByTagName('parsererror').length === 0;
+                let stylesModified = false;
+
+                // Copie d'un style de cellule au format JJ.MM.AAAA : le format « date
+                // courte » du modèle dépend des réglages régionaux de l'ordinateur.
+                const swissDateStyle = (baseStyle) => {
+                    if (!stylesOk) return null;
+                    const root = stylesDoc.documentElement;
+                    const cellXfs = root.getElementsByTagName('cellXfs')[0];
+                    if (!cellXfs) return null;
+                    const xfs = Array.from(cellXfs.childNodes).filter(n => n.nodeType === 1 && n.localName === 'xf');
+                    const base = xfs[Number(baseStyle) || 0];
+                    if (!base) return null;
+                    let numFmts = root.getElementsByTagName('numFmts')[0];
+                    if (!numFmts) {
+                        numFmts = stylesDoc.createElementNS(NS, 'numFmts');
+                        root.insertBefore(numFmts, root.firstElementChild);
+                    }
+                    const fmts = Array.from(numFmts.getElementsByTagName('numFmt'));
+                    const code = 'dd\\.mm\\.yyyy';
+                    let fmt = fmts.find(f => f.getAttribute('formatCode') === code);
+                    if (!fmt) {
+                        fmt = stylesDoc.createElementNS(NS, 'numFmt');
+                        fmt.setAttribute('numFmtId', String(Math.max(163, ...fmts.map(f => Number(f.getAttribute('numFmtId')) || 0)) + 1));
+                        fmt.setAttribute('formatCode', code);
+                        numFmts.appendChild(fmt);
+                        numFmts.setAttribute('count', String(fmts.length + 1));
+                    }
+                    const xf = base.cloneNode(true);
+                    xf.setAttribute('numFmtId', fmt.getAttribute('numFmtId'));
+                    xf.setAttribute('applyNumberFormat', '1');
+                    cellXfs.appendChild(xf);
+                    cellXfs.setAttribute('count', String(xfs.length + 1));
+                    stylesModified = true;
+                    return xfs.length;
+                };
+
                 const ssDoc = parser.parseFromString(ssXml, 'text/xml');
                 if (ssDoc.getElementsByTagName('parsererror').length > 0) {
                     showToast('Erreur lecture des chaînes partagées', 'error');
@@ -15648,8 +15784,13 @@ const exportBLExcel = (livraisonId) => {
                         const cellF = findCellByRef(row, 'F5');
                         if (cellF) {
                             const serial = excelDateSerial(blDate);
-                            if (serial !== null) setCellValueDom(cellF, serial);
-                            else setCellTextDom(cellF, blDate || ' ');
+                            if (serial !== null) {
+                                setCellValueDom(cellF, serial);
+                                const style = swissDateStyle(cellF.getAttribute('s'));
+                                if (style !== null) cellF.setAttribute('s', String(style));
+                            } else {
+                                setCellTextDom(cellF, blDate || ' ');
+                            }
                         }
                     }
 
@@ -15682,12 +15823,18 @@ const exportBLExcel = (livraisonId) => {
                         const expectedMode = rowNum === 47 + FO ? 'email' : rowNum === 48 + FO ? 'poste' : 'autre';
                         const cellD = findCellByRef(row, 'D' + rowNum);
                         if (cellD) {
-                            if (livraison.facturationMode === expectedMode) {
+                            if (facturationMode === expectedMode) {
                                 setCellTextDom(cellD, 'x');
                             } else {
                                 setCellTextDom(cellD, ' ');
                             }
                         }
+                    }
+
+                    // Ligne « À » : adresse e-mail ou autre destination de la facture
+                    // (sans mode choisi, le texte du modèle reste).
+                    if (rowNum === 51 + FO && facturationMode) {
+                        setCellTextDom(cellAt(row, 'E' + rowNum), facturationDestinataire || ' ');
                     }
 
                     if (rowNum >= 48 + FO && rowNum <= 51 + FO) {
@@ -15726,6 +15873,7 @@ const exportBLExcel = (livraisonId) => {
                 const noFolders = { createFolders: false };
                 zip.file('xl/worksheets/sheet1.xml', serializeXlsxXml(sheetDoc), noFolders);
                 zip.file('xl/sharedStrings.xml', serializeXlsxXml(ssDoc), noFolders);
+                if (stylesModified) zip.file('xl/styles.xml', serializeXlsxXml(stylesDoc), noFolders);
 
                 if (tableXml) {
                     // Le tableau suit le pied de page ; son filtre QTT ne gardait que
