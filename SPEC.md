@@ -12,8 +12,8 @@
 ## 2. Structure des données
 
 ### Tables synchronisées (ALL_TABLES)
-Les 12 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
-`employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`, `todos`.
+Les 14 tables persistées dans localStorage et synchronisées avec Firebase Firestore :
+`employees`, `aromes`, `formats`, `recettes`, `clients`, `lots`, `commandes`, `pointages`, `inventaire`, `livraisons`, `history`, `todos`, `compta_exercices`, `compta_ecritures`.
 
 ### Tables modifiées localement (legacy, pré-v11)
 Clé localStorage hors `ALL_TABLES` : `thecol_dirty_tables`.
@@ -455,6 +455,38 @@ Les entrées d'historique sont créées par `buildLotHistoryEntry(prefixe, lot, 
 }
 ```
 
+### Comptabilité (v13.6)
+Reprise du classeur « Comptabilité SàRL » (modèle suisse Buchhaltung v2.4), sans changer sa logique.
+
+**`compta_exercices`** — un enregistrement par exercice, id `exercice-<année>` :
+```json
+{
+  "id": "exercice-2026",
+  "annee": 2026,
+  "entreprise": "string", "siege": "string",
+  "debut": "date", "fin": "date",
+  "comptes": [
+    { "classe": "actif|passif|charge|produit", "numero": "string", "nom": "string", "remarque": "string", "ouverture": "number" }
+  ],
+  "compteCreances": "string (ex. 1010)", "compteDettes": "string (ex. 2010)", "compteBanque": "string (ex. 1001)"
+}
+```
+`comptes` contient toujours les 68 emplacements de la feuille « Plan de Compte », dans l'ordre : 15 actifs (lignes 9-23), 18 passifs (25-42), 19 charges (54-72), 16 produits (74-89) — `COMPTA_CLASSES`. Comme dans le classeur, un compte n'existe que s'il a un numéro **et** un nom (`comptaCompteActif`) : les écritures sur un autre compte sont signalées « compte inconnu » et ignorées par les soldes. `ouverture` (actifs et passifs) est le bilan d'ouverture.
+
+**`compta_ecritures`** — une écriture du journal en partie double :
+```json
+{
+  "id": "string (ecr-<année>-<ligne> à l'import, sinon generateId())",
+  "annee": 2026,
+  "ligne": 710,
+  "date": "date", "debit": "string", "credit": "string", "libelle": "string",
+  "montant": "number (CHF)", "montantEur": "number (optionnel)",
+  "piece": { "texte": "string", "tiers": "string", "echeance": "date", "rappel1": "date", "rappel2": "date" },
+  "regle": { "date": "date | ''", "ecritureId": "string | ''" }
+}
+```
+`ligne` est la ligne Excel du journal (12 à 1619) : c'est le n° d'écriture **et** le n° de facture (« paye la facture 599 du 02.10 »). Une nouvelle écriture prend `max(ligne) + 1` de son exercice (déterminé par sa date). Une facture est une écriture au débit de `compteCreances`, une dette une écriture au crédit de `compteDettes` ; elle est ouverte tant qu'elle n'a pas de `regle` (`ecritureId` = écriture de paiement, vide pour « Marquer comme payée » ou à l'import). `piece` reprend les colonnes des feuilles Créance-client (Facture texte, De, Payable jusqu'à, avertissements) et Dette fournisseur (texte, En faveur de, Échue le). Supprimer une écriture de paiement rouvre la pièce qu'elle réglait.
+
 ## 3. Pages/Vues
 
 ### Navigation principale
@@ -464,6 +496,7 @@ Les entrées d'historique sont créées par `buildLotHistoryEntry(prefixe, lot, 
 - Pointage (heures)
 - Commandes
 - Production (plan, atelier, matières, journal)
+- Comptabilité (`#comptabilite`)
 - Paramètres (employés, aromes, recettes, clients)
 
 ### 3.0 Jumeau numérique 3D (v12.0)
@@ -543,6 +576,14 @@ Les heures se saisissent surtout après le travail ; pointer en direct reste pos
 - **Recettes:** CRUD par arôme, liste ingrédients
 - **Clients:** CRUD, activer/désactiver ; « Effacer les clients sans commande » supprime en masse les clients non référencés (les clients liés à une commande sont conservés, comme pour une suppression unitaire)
 - **Sauvegarde & Restauration:** export JSON de toutes les tables ; « Restaurer depuis JSON » affiche un bilan (ajouts, modifications, suppressions par table) à confirmer et télécharge une sauvegarde de l'état actuel avant d'écrire (v12.4)
+
+### 3.7 Comptabilité (v13.6)
+`renderComptabilite()` (`#comptabilite`, raccourci G F), vues choisies par `compta_vue` : **Journal** (le plus récent en haut, recherche n° / montant / libellé / compte, filtres compte et mois, 150 lignes puis « Afficher les … écritures »), **Grand livre** (un compte : solde d'ouverture, mouvements, solde progressif), **Bilan** (présentation de la feuille Bilan Final, en T : actifs à gauche, passifs à droite, un montant par compte, comptes à zéro masqués, perte ou bénéfice du côté qui équilibre, totaux égaux ; boutons Ouverture / Clôture, `compta_bilan_mode` — choix de l'utilisateur ; « Modifier » saisit le bilan d'ouverture dans ce même tableau, comme la feuille Bilan d'ouverture : une case par compte, totaux et écart en direct, Entrée passe au compte suivant, confirmation si actifs ≠ passifs, brouillon gardé si la vue se redessine, `comptaOuvertureEditionHtml`), **Résultat** (même présentation : charges / produits, `comptaDeuxCotesHtml`), **Statistiques** (`comptaStatsModele`, tout calculé depuis le journal : chiffres clés — ventes des comptes de produits nommés « vente », charges, résultat en % des ventes, trésorerie caisse + banque, factures ouvertes, délai moyen de paiement des factures réglées —, histogramme mensuel Ventes / Charges / Résultat / Trésorerie fin de mois avec barres sous zéro pour les mois en perte (`comptaChartHtml`, infobulle `bindBarChart`, « Voir les données »), classements charges par compte (les deux côtés d'un virement entre charges comptent), ventes par mode de paiement (contrepartie du compte de ventes) et factures par client ; comparaison des ventes avec l'exercice précédent quand il est dans l'app), **Créances** et **Dettes** (pièces ouvertes de l'exercice et des précédents — n° « 2026-651 » hors de l'exercice —, Encaisser / Payer qui crée l'écriture de paiement « X paye la facture N du jj.mm », écart signalé avec le solde du compte), **Plan comptable** (68 emplacements ; changer un numéro propose de le reporter sur les écritures). Calculs : `comptaCalcul` reproduit les formules du classeur (actifs et charges débit − crédit, passifs et produits crédit − débit, résultat = produits − charges).
+
+- **Saisie** (`showComptaEcritureModal`) : champs dans l'ordre du journal — date, débit → crédit (encadré commun avec une flèche, verticale sur téléphone), libellé (suggestions des libellés déjà saisis), montant en CHF (champ texte aligné à droite, virgule ou point, espaces et apostrophes acceptés, remis au format suisse en quittant le champ, `comptaLireMontant`) ; le montant en euros n'apparaît qu'avec « + EUR » ou si l'écriture en a un. Débit du compte de créances : client et échéance ; crédit du compte de dettes : objet et « en faveur de » (« noah a payé … » est découpé tout seul) ; crédit du compte de créances ou débit du compte de dettes : « Facture réglée » / « Dette réglée » pré-remplit montant et libellé. « Enregistrer et nouvelle » garde la date. Relecture des écritures juste avant d'écrire.
+- **Import** (`lireComptaExcel` → `analyserComptaClasseur` → `planComptaImport`) : feuilles reconnues par leur nom (Donnée de base, Plan de Compte, Bilan d'ouverture, Journal, Créance-client, Dette fournisseur), positions fixes du modèle. Ajout et mise à jour seulement, jamais de suppression : les écritures déjà présentes (même ligne, même contenu) sont ignorées, celles modifiées dans le fichier ne sont remplacées que sur demande, comme le plan et le bilan d'ouverture d'un exercice existant. Une pièce listée dans le fichier reste ouverte ; une pièce du fichier absente de la liste est réglée (paiement retrouvé par « facture N » / « N du jj.mm » dans les libellés). Lignes à vérifier : dates hors exercice, comptes inconnus, montants manquants. Réimporter le classeur exporté ne change rien.
+- **Export** (`exporterComptaExcel`) : `templates/compta_template.xlsx` est le classeur d'origine vidé de ses données (formules, styles et feuilles conservés, calcChain et métadonnées SharePoint retirés, `fullCalcOnLoad`). Le Journal n'y garde que la ligne 12 : l'export recopie ses formules (noms de comptes et grand livre en T) sur les lignes 12 à 1619, en formules simples — Excel refuse les formules partagées qui citent une autre feuille. Les valeurs calculées (noms, bilans, résultat, totaux, créances, dettes) sont écrites en cache pour un affichage correct en mode protégé. Créance-client et Dette fournisseur listent les pièces ouvertes à la fin de l'exercice. Fichier « Comptabilité SàRL <année>.xlsx », ouvert sur les dernières écritures.
+- **Nouvel exercice** (`creerComptaExercice`) : plan repris, bilan d'ouverture = bilan final, résultat ajouté au compte « Report » (2200).
 
 ## 4. Design
 
