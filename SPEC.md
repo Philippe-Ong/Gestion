@@ -6,7 +6,7 @@
 **Type:** Application web SPA (Single Page Application)  
 **Hébergement:** GitHub Pages  
 **Stockage:** localStorage + Firebase Firestore (cloud optionnel)  
-**Version:** v13.4
+**Version:** v13.5
 **Style:** Minimaliste, éco-responsable (style thecol.ch)
 
 ## 2. Structure des données
@@ -305,6 +305,8 @@ renuméroté automatiquement.
   ],
   "caissesVertesLivrees": "number (optionnel)",
   "caissesNoiresLivrees": "number (optionnel)",
+  "facturationMode": "'' | 'email' | 'poste' | 'autre' (case cochée « Facturation » du BL)",
+  "facturationDestinataire": "string (optionnel — ligne « À » du BL : adresse e-mail ou autre destination ; vide sans mode)",
   "notes": "string (optionnel, interne)",
   "dateDernierExport": "datetime (optionnel, legacy — v11.7: remplacé par la clé locale non synchronisée thecol_bl_export_dates)",
   "lotsTraces": [

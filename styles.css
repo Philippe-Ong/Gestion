@@ -4291,6 +4291,7 @@ input[type="checkbox"] {
     white-space: pre-line;
 }
 .bl-notes strong { display: block; margin-bottom: 2px; font-size: 12px; color: var(--text-light); }
+.bl-fact-dest { margin: 12px 0 0; max-width: 420px; }
 .bl-counters {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
