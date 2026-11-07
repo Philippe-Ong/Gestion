@@ -15519,6 +15519,7 @@ const exportBLExcel = (livraisonId) => {
             const tableFile = zip.file('xl/tables/table1.xml');
             const drawingFile = zip.file('xl/drawings/drawing1.xml');
             const stylesFile = zip.file('xl/styles.xml');
+            const workbookFile = zip.file('xl/workbook.xml');
 
             if (!sheetFile || !ssFile) {
                 showToast('Feuille non trouvée dans le template', 'error');
@@ -15530,8 +15531,9 @@ const exportBLExcel = (livraisonId) => {
                 ssFile.async('string'),
                 tableFile ? tableFile.async('string') : Promise.resolve(null),
                 drawingFile ? drawingFile.async('string') : Promise.resolve(null),
-                stylesFile ? stylesFile.async('string') : Promise.resolve(null)
-            ]).then(([sheetXml, ssXml, tableXml, drawingXml, stylesXml]) => {
+                stylesFile ? stylesFile.async('string') : Promise.resolve(null),
+                workbookFile ? workbookFile.async('string') : Promise.resolve(null)
+            ]).then(([sheetXml, ssXml, tableXml, drawingXml, stylesXml, workbookXml]) => {
                 const parser = new DOMParser();
                 const stylesDoc = stylesXml ? parser.parseFromString(stylesXml, 'text/xml') : null;
                 const stylesOk = stylesDoc && stylesDoc.getElementsByTagName('parsererror').length === 0;
@@ -15859,6 +15861,67 @@ const exportBLExcel = (livraisonId) => {
                     for (let si = 0; si < selections.length; si++) {
                         selections[si].setAttribute('activeCell', 'A1');
                         selections[si].setAttribute('sqref', 'A1');
+                    }
+                }
+
+                // Impression A4 : zone A:F (l'image du titre déborde d'1 mm sur G et
+                // ajoutait une page presque vide). Jusqu'à 24 lignes, le BL tient
+                // sur une page (réduit au besoin) ; au-delà, deux pages à 100 %,
+                // coupées dans le tableau (28 lignes au plus en page 1) pour que la
+                // dernière page garde des lignes avec le bloc Facturation / caisses
+                // / signature, et l'en-tête QTT / Description répété en page 2.
+                const wsRoot = sheetDoc.documentElement;
+                const rowNums = Array.from(allRows, r => parseInt(r.getAttribute('r'), 10)).filter(Number.isFinite);
+                const lastRow = Math.max(61 + FO, ...rowNums);
+                const pageSetupEl = wsRoot.getElementsByTagName('pageSetup')[0];
+                const pageMarginsEl = wsRoot.getElementsByTagName('pageMargins')[0];
+                if (pageMarginsEl && !wsRoot.getElementsByTagName('printOptions')[0]) {
+                    // Centré sur la largeur : une page réduite ne reste pas collée à gauche.
+                    const printOptions = sheetDoc.createElementNS(NS, 'printOptions');
+                    printOptions.setAttribute('horizontalCentered', '1');
+                    wsRoot.insertBefore(printOptions, pageMarginsEl);
+                }
+                if (FO === 0) {
+                    let sheetPr = wsRoot.getElementsByTagName('sheetPr')[0];
+                    if (!sheetPr) {
+                        sheetPr = sheetDoc.createElementNS(NS, 'sheetPr');
+                        wsRoot.insertBefore(sheetPr, wsRoot.firstElementChild);
+                    }
+                    let pageSetUpPr = sheetPr.getElementsByTagName('pageSetUpPr')[0];
+                    if (!pageSetUpPr) {
+                        pageSetUpPr = sheetDoc.createElementNS(NS, 'pageSetUpPr');
+                        sheetPr.appendChild(pageSetUpPr);
+                    }
+                    pageSetUpPr.setAttribute('fitToPage', '1');
+                    if (pageSetupEl) {
+                        pageSetupEl.setAttribute('fitToWidth', '1');
+                        pageSetupEl.setAttribute('fitToHeight', '1');
+                    }
+                } else if (pageSetupEl) {
+                    const rowBreaks = sheetDoc.createElementNS(NS, 'rowBreaks');
+                    rowBreaks.setAttribute('count', '1');
+                    rowBreaks.setAttribute('manualBreakCount', '1');
+                    const brk = sheetDoc.createElementNS(NS, 'brk');
+                    const firstPageLines = Math.min(sortedItems.length - 1, 28);
+                    // id : ligne (comptée depuis 0) qui ouvre la page 2.
+                    brk.setAttribute('id', String(DATA_START - 1 + firstPageLines));
+                    brk.setAttribute('max', '16383');
+                    brk.setAttribute('man', '1');
+                    rowBreaks.appendChild(brk);
+                    const after = wsRoot.getElementsByTagName('headerFooter')[0] || pageSetupEl;
+                    wsRoot.insertBefore(rowBreaks, after.nextSibling);
+                }
+                if (workbookXml) {
+                    const sheetName = (/<sheet\b[^>]*\sname="([^"]*)"/.exec(workbookXml) || [])[1];
+                    if (sheetName) {
+                        const sheetRef = `'${sheetName.replace(/'|&apos;/g, "''")}'`;
+                        const names = `<definedName name="_xlnm.Print_Area" localSheetId="0">${sheetRef}!$A$1:$F$${lastRow}</definedName>`
+                            + (FO > 0 ? `<definedName name="_xlnm.Print_Titles" localSheetId="0">${sheetRef}!$14:$14</definedName>` : '');
+                        let wbXml = workbookXml.replace(/<definedName name="_xlnm\.Print_(?:Area|Titles)" localSheetId="0">[^<]*<\/definedName>/g, '');
+                        wbXml = /<definedNames>/.test(wbXml)
+                            ? wbXml.replace('<definedNames>', `<definedNames>${names}`)
+                            : wbXml.replace('</sheets>', `</sheets><definedNames>${names}</definedNames>`);
+                        zip.file('xl/workbook.xml', wbXml, { createFolders: false });
                     }
                 }
 
