@@ -219,6 +219,8 @@ CLICK_HANDLERS['update-inventaire-qty'] = (el) => updateInventaireQty(el.getAttr
 CLICK_HANDLERS['show-inventaire-modal'] = (el) => showInventaireModal(el.getAttribute('data-type'), el.getAttribute('data-id'));
 CLICK_HANDLERS['delete-inventaire-item'] = (el) => deleteInventaireItem(el.getAttribute('data-id'));
 CLICK_HANDLERS['save-inventaire-item'] = (el, e) => saveInventaireItem(e, el.getAttribute('data-id') || '');
+CLICK_HANDLERS['inventaire-prix'] = (el) => showInventairePrixModal(el.getAttribute('data-id'));
+CLICK_HANDLERS['inventaire-prix-save'] = (el) => saveInventairePrix(el.getAttribute('data-id'));
 
 CLICK_HANDLERS['inventaire-ajuster'] = (el) => ouvrirAjusterInventaire(el.getAttribute('data-id'));
 CLICK_HANDLERS['inventaire-ajuster-mode'] = (el) => choisirModeAjusterInventaire(el.getAttribute('data-mode'));

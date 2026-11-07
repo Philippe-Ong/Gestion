@@ -624,7 +624,7 @@ const getProductionsJournal = () => {
             date: entries.map(h => h.dateAdded || '').sort().pop() || e0.productionDate || '',
             aromeNom: e0.arome || '',
             numLot: e0.numLot || '',
-            formats: entries.map(h => ({ format: h.format || '', quantite: Number(h.quantity) || 0, lotId: h.lotId })),
+            formats: entries.map(h => ({ format: h.format || '', quantite: Number(h.quantity) || 0, lotId: h.lotId, coutMatiereUnitaire: h.coutMatiereUnitaire })),
             quantite,
             litres: Number.isFinite(Number(e0.litres)) && e0.litres !== undefined
                 ? Number(e0.litres)
@@ -670,6 +670,7 @@ const productionJournalHtml = () => {
             p.productionId ? (lotsIng ? dashPlural(lotsIng, "lot d'ingrédient", "lots d'ingrédients") : 'ingrédients sans n° de lot') : 'saisi à la main',
             p.commandes.length ? `${p.commandes.map(c => `#${c.numero}`).join(', ')} → produite${p.commandes.length > 1 ? 's' : ''}` : ''
         ].filter(Boolean).join(' · ');
+        const couts = p.formats.filter(f => estMontantConnu(f.coutMatiereUnitaire));
         const annulable = !productionAnnulationBlocage(p);
         const premierLot = p.formats.find(f => f.lotId)?.lotId;
         return `
@@ -682,6 +683,7 @@ const productionJournalHtml = () => {
                     <div class="stock-lot-name"><span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>${escapeHtml(p.aromeNom || '?')}
                         <span class="stock-group-format">· ${escapeHtml(p.formats.map(f => `${twinFmtInt(f.quantite)} × ${f.format}`).join(', '))}</span></div>
                     <div class="stock-lot-dates">${escapeHtml(`${prodFmtDate(p.date)} · ${details}`)}</div>
+                    ${couts.length ? `<div class="stock-lot-dates">Coût matières · ${escapeHtml(couts.map(f => `${f.format} : ${formatChfUnitaire(f.coutMatiereUnitaire)} / bt`).join(' · '))}</div>` : ''}
                 </div>
                 <div class="stock-lot-actions">
                     ${premierLot ? `<button type="button" class="btn btn-sm btn-secondary" data-click="show-lot-trace" data-id="${escapeHtml(premierLot)}">Tracer</button>` : ''}
@@ -1041,7 +1043,7 @@ const majProductionModal = () => {
     if (matEl) {
         const inventaire = DB.get('inventaire') || [];
         const copie = JSON.parse(JSON.stringify(inventaire));
-        const { warnings, conversionErrors, ingredients, contenants } = deduireInventaireProduction(copie, aromeNom, s.producedByFormat, s.litresProduit);
+        const { warnings, conversionErrors, ingredients, contenants, couts } = deduireInventaireProduction(copie, aromeNom, s.producedByFormat, s.litresProduit);
         const parArticle = new Map();
         [...ingredients, ...contenants].forEach(l => {
             const e = parArticle.get(l.article) || { article: l.article, itemId: l.itemId, unite: l.unite, quantite: 0, lots: [] };
@@ -1060,9 +1062,17 @@ const majProductionModal = () => {
                 </li>`;
         }).join('');
         const notes = [...conversionErrors, ...warnings.filter(w => !w.startsWith('Stock insuffisant'))];
+        const prixManquants = [...new Set([...couts.values()].flatMap(c => [...c.manquants]))];
+        const coutsHtml = s.producedByFormat.map(({ format }) => {
+            const cout = couts.get(format.id).unitaire;
+            return `<li>${escapeHtml(format.nom)} · <strong>${estMontantConnu(cout) ? `${escapeHtml(formatChfUnitaire(cout))} / bt` : 'indisponible'}</strong></li>`;
+        }).join('');
         matEl.innerHTML = `
             ${lignes ? `<ul class="prod-mat-list prod-mat-list--compact">${lignes}</ul>` : '<p class="text-muted">Rien à déduire.</p>'}
-            ${notes.length ? `<ul class="prod-modal-notes">${notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>` : ''}`;
+            ${notes.length ? `<ul class="prod-modal-notes">${notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>` : ''}
+            ${coutsHtml ? `<h4 class="prod-modal-h">Coût matières par bouteille</h4>
+                <ul class="ingredient-list">${coutsHtml}</ul>
+                ${prixManquants.length ? `<p class="text-muted">Données manquantes ou incompatibles : ${escapeHtml(prixManquants.join(', '))}. Vérifiez les recettes et les prix d’achat dans l’inventaire.</p>` : ''}` : ''}`;
     }
 
     const cmdEl = document.getElementById('prodModalCommandes');
@@ -1094,6 +1104,8 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
     const warnings = [];
     const ingredients = [];
     const contenants = [];
+    const manquantsLiquide = new Set();
+    let coutLiquide = 0;
     // Erreurs de conversion incompatibles : bloquantes, distinctes des
     // avertissements métier (stock / ingrédient manquant). Une incohérence
     // d'unités ne peut jamais être confirmée par l'utilisateur.
@@ -1101,26 +1113,37 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
 
     if (recette && Array.isArray(recette.ingredients)) {
         recette.ingredients.forEach(ing => {
-            if (isWaterIngredient(ing.nom)) return;
+            const eau = isWaterIngredient(ing.nom);
             const ingQty = parseFloat(ing.quantite);
-            if (Number.isNaN(ingQty)) {
-                warnings.push(`Quantité de recette invalide pour ${ing.nom}`);
+            if (!estMontantConnu(ingQty)) {
+                manquantsLiquide.add(ing.nom);
+                if (!eau) warnings.push(`Quantité de recette invalide pour ${ing.nom}`);
                 return;
             }
+            if (ingQty === 0) return;
             const besoinMajore = ingQty * litresProduit * CONSTANTS.PRODUCTION_LOSS;
             const item = findInventaireItemByName(inventaire, ing.nom);
+            if (eau) {
+                const prix = prixAchatDansUnite(item, ing.unite);
+                if (estMontantConnu(prix)) coutLiquide += besoinMajore * prix;
+                else manquantsLiquide.add(ing.nom);
+                return;
+            }
             if (!item) {
+                manquantsLiquide.add(ing.nom);
                 warnings.push(`Ingrédient absent: ${ing.nom}`);
                 return;
             }
             const ingUnit = displayUnit(ing.unite);
             const invUnit = displayUnit(item.unite);
             if (!areUnitsCompatible(ingUnit, invUnit)) {
+                manquantsLiquide.add(ing.nom);
                 conversionErrors.push(`Unité incompatible pour ${ing.nom} (recette: ${ingUnit}, inventaire: ${invUnit})`);
                 return;
             }
             const converted = ingUnit !== invUnit ? convertQuantity(besoinMajore, ingUnit, invUnit) : besoinMajore;
             if (converted === null) {
+                manquantsLiquide.add(ing.nom);
                 conversionErrors.push(`Conversion impossible pour ${ing.nom}`);
                 return;
             }
@@ -1128,10 +1151,16 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
             const allocations = isLotSuiviArticle(item)
                 ? consommerLotsIngredient(item, converted)
                 : [{ numLot: '', fournisseur: '', quantite: arrondiInv(converted) }];
-            allocations.forEach(a => ingredients.push({ itemId: item.id, article: item.nom, unite: invUnit, ...a }));
+            allocations.forEach(a => {
+                const prix = a.numLot ? a.prixUnitaire : prixAchatDansUnite(item, invUnit);
+                if (estMontantConnu(prix)) coutLiquide += a.quantite * prix;
+                else if (a.quantite > 0) manquantsLiquide.add(item.nom);
+                ingredients.push({ itemId: item.id, article: item.nom, unite: invUnit, ...a, ...(estMontantConnu(prix) ? { prixUnitaire: prix } : {}) });
+            });
             item.quantite = Math.round(((item.quantite || 0) - converted) * 10000) / 10000;
         });
     } else {
+        manquantsLiquide.add(`recette ${aromeNom}`);
         warnings.push(`Recette introuvable pour ${aromeNom}`);
     }
 
@@ -1140,12 +1169,6 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
         item.quantite = (item.quantite || 0) - quantite;
         contenants.push({ itemId: item.id, article: item.nom, unite: displayUnit(item.unite), quantite });
     };
-
-    producedByFormat.forEach(({ format, quantite }) => {
-        const bottleItem = getBottleInventoryItem(inventaire, format);
-        if (!bottleItem) warnings.push(`Bouteilles vides absentes pour ${format.nom}`);
-        else deduireContenant(bottleItem, quantite);
-    });
 
     // Bouchons : déduction par taille (25cl vs 50/100cl)
     let btPetitBouchon = 0, btGrandBouchon = 0;
@@ -1156,19 +1179,47 @@ const deduireInventaireProduction = (inventaire, aromeNom, producedByFormat, lit
 
     const bouchonsPetitsNecessaires = Math.ceil(btPetitBouchon * CONSTANTS.BOUCHON_MARGIN);
     const bouchonsGrandsNecessaires = Math.ceil(btGrandBouchon * CONSTANTS.BOUCHON_MARGIN);
+    const nomPetit = 'Bouchons 25cl';
+    const nomGrand = 'Bouchons 50cl/100cl';
+    const bouchonPetitItem = findInventaireItemByName(inventaire, nomPetit);
+    const bouchonGrandItem = findInventaireItemByName(inventaire, nomGrand);
+    const etiquettes = findInventaireItemByName(inventaire, 'Étiquettes');
+    const couts = new Map();
+
+    producedByFormat.forEach(({ format, quantite }) => {
+        const bottleItem = getBottleInventoryItem(inventaire, format);
+        if (!bottleItem) warnings.push(`Bouteilles vides absentes pour ${format.nom}`);
+        else deduireContenant(bottleItem, quantite);
+
+        const petit = (format.contenanceCl || 0) < 50;
+        const litres = Number(format.contenanceCl) / 100;
+        const manquants = new Set(manquantsLiquide);
+        let unitaire = litresProduit > 0 ? coutLiquide * litres / litresProduit : 0;
+        if (!(litres > 0) || !(litresProduit > 0)) manquants.add(`contenance ${format.nom}`);
+        const emballages = [
+            { item: bottleItem, nom: `Bouteilles vides ${format.nom}`, parBouteille: 1 },
+            { item: petit ? bouchonPetitItem : bouchonGrandItem, nom: petit ? nomPetit : nomGrand,
+                parBouteille: petit ? bouchonsPetitsNecessaires / btPetitBouchon : bouchonsGrandsNecessaires / btGrandBouchon },
+            { item: etiquettes, nom: 'Étiquettes', parBouteille: 1 }
+        ];
+        emballages.forEach(({ item, nom, parBouteille }) => {
+            const prix = prixAchatDansUnite(item, 'pcs');
+            if (estMontantConnu(prix)) unitaire += prix * parBouteille;
+            else manquants.add(nom);
+        });
+        couts.set(format.id, { unitaire: manquants.size || !estMontantConnu(unitaire) ? null : unitaire, manquants });
+    });
 
     if (bouchonsPetitsNecessaires > 0) {
-        const bouchonPetitItem = findInventaireItemByName(inventaire, 'Bouchons 25cl');
         if (bouchonPetitItem) deduireContenant(bouchonPetitItem, bouchonsPetitsNecessaires);
         else warnings.push('Bouchons 25cl absents de l\'inventaire');
     }
     if (bouchonsGrandsNecessaires > 0) {
-        const bouchonGrandItem = findInventaireItemByName(inventaire, 'Bouchons 50cl/100cl');
         if (bouchonGrandItem) deduireContenant(bouchonGrandItem, bouchonsGrandsNecessaires);
         else warnings.push('Bouchons 50cl/100cl absents de l\'inventaire');
     }
 
-    return { warnings, conversionErrors, ingredients, contenants };
+    return { warnings, conversionErrors, ingredients, contenants, couts };
 };
 
 // Annule une production pour incohérence d'unités (premier élément + nombre restant)
@@ -1205,7 +1256,7 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
     // réécrit la table entière : des tableaux lus avant l'attente effaceraient
     // ces changements sans qu'aucun conflit ne soit détecté.
     const inventaire = (DB.get('inventaire') || []).map(item => ({ ...item, ...(Array.isArray(item.lots) ? { lots: item.lots.map(l => ({ ...l })) } : {}) }));
-    const { warnings, conversionErrors, ingredients, contenants } = deduireInventaireProduction(inventaire, aromeNom, producedByFormat, litresProduit);
+    const { warnings, conversionErrors, ingredients, contenants, couts } = deduireInventaireProduction(inventaire, aromeNom, producedByFormat, litresProduit);
     if (conversionErrors.length > 0) return annulerProductionUnites(conversionErrors);
     const lots = DB.get('lots') || [];
     const history = DB.get('history') || [];
@@ -1233,15 +1284,18 @@ const finaliserProductionFormats = async (aromeNom, producedByFormat, litresProd
 
     const { dateProduction, dlv, dlc, numLot } = productionLotPrevu(aromeNom, lots, history);
     producedByFormat.forEach(({ format, quantite }) => {
+        const cout = couts.get(format.id).unitaire;
         let lot = lots.find(l => l.arome === aromeNom && l.format === format.nom && l.dateProduction === dateProduction);
         if (lot) {
-            lot.quantite = (lot.quantite || 0) + quantite;
             if (!lot.numLot) lot.numLot = numLot;
         } else {
-            lot = { id: generateId(), numLot, arome: aromeNom, format: format.nom, quantite, dateProduction, dlv, dlc };
+            lot = { id: generateId(), numLot, arome: aromeNom, format: format.nom, quantite: 0, dateProduction, dlv, dlc };
             lots.push(lot);
         }
-        history.unshift(buildLotHistoryEntry('PROD', lot, quantite, tracesProduction));
+        ajouterBouteillesAuLot(lot, quantite, cout);
+        history.unshift(buildLotHistoryEntry('PROD', lot, quantite, {
+            ...tracesProduction, ...(estMontantConnu(cout) ? { coutMatiereUnitaire: cout } : {})
+        }));
     });
 
     DB.set('inventaire', inventaire);
@@ -1332,7 +1386,15 @@ const annulerProduction = async (productionId) => {
     actuelle.formats.forEach(f => {
         const index = lots.findIndex(l => String(l.id) === String(f.lotId));
         if (index < 0) return;
-        lots[index].quantite = (Number(lots[index].quantite) || 0) - f.quantite;
+        const lot = lots[index];
+        lot.quantite = (Number(lot.quantite) || 0) - f.quantite;
+        const mouvements = history.filter(h => String(h.lotId) === String(lot.id) && h.productionId !== productionId);
+        if (mouvements.every(h => String(h.id).startsWith('PROD-') && estMontantConnu(h.coutMatiereUnitaire))
+            && mouvements.reduce((s, h) => s + Number(h.quantity), 0) === lot.quantite && lot.quantite > 0) {
+            lot.coutMatiereUnitaire = mouvements.reduce((s, h) => s + h.quantity * h.coutMatiereUnitaire, 0) / lot.quantite;
+        } else {
+            delete lot.coutMatiereUnitaire;
+        }
         // Comme une vente qui vide un lot : le lot à 0 disparaît, l'historique reste
         if (lots[index].quantite <= 0) lots.splice(index, 1);
     });

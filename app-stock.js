@@ -1148,7 +1148,7 @@ const saveLot = (event) => {
         let targetLot, numLot;
         let dateOverridden = false;
         if (existingLot) {
-            existingLot.quantite = (existingLot.quantite || 0) + quantite;
+            ajouterBouteillesAuLot(existingLot, quantite);
             targetLot = existingLot;
         } else {
             const referenceLot = lots.find(l =>
@@ -1722,6 +1722,7 @@ const showLotTraceModal = (lotId) => {
                 <div class="trace-hero-text">
                     <div class="trace-hero-name">${escapeHtml(t.arome || '?')}</div>
                     <div class="trace-hero-sub">${escapeHtml(t.format || '?')} · lot #${escapeHtml(numLotAffiche)}</div>
+                    ${t.lot ? `<div class="trace-hero-sub">Coût matières moyen · ${estMontantConnu(t.lot.coutMatiereUnitaire) ? `${escapeHtml(formatChfUnitaire(t.lot.coutMatiereUnitaire))} / bt` : 'indisponible'}</div>` : ''}
                 </div>
                 ${traceStatusBadge(t)}
             </div>
@@ -2333,6 +2334,7 @@ const saveEditLot = (event, lotId) => {
                 || lot.dlv !== dlv || lot.dlc !== dlc;
             lot.arome = arome;
             lot.format = format;
+            if (delta > 0) delete lot.coutMatiereUnitaire;
             lot.quantite = quantite;
             lot.dateProduction = dateProduction;
             lot.dlv = dlv;

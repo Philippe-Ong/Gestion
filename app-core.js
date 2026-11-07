@@ -710,9 +710,24 @@ const formatChf = (n) => {
     const abs = Math.abs(n);
     const fixed = abs.toFixed(2);
     const isWhole = fixed.endsWith('.00');
-    const integerPart = Math.floor(abs).toString().replace(/\B(?=(\d{3})+(?!\d))/g, "'");
+    const integerPart = fixed.split('.')[0].replace(/\B(?=(\d{3})+(?!\d))/g, "'");
     const sign = n < 0 ? '-' : '';
     return isWhole
         ? `CHF ${sign}${integerPart}.\u2013`
         : `CHF ${sign}${integerPart}.${fixed.split('.')[1]}`;
+};
+
+const estMontantConnu = (montant) => Number.isFinite(montant) && montant >= 0;
+
+const formatChfUnitaire = (montant) => `CHF ${montant.toLocaleString('fr-CH', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+
+const ajouterBouteillesAuLot = (lot, quantite, coutMatiereUnitaire) => {
+    const avant = Number(lot.quantite) || 0;
+    if (estMontantConnu(coutMatiereUnitaire) && (avant === 0 || estMontantConnu(lot.coutMatiereUnitaire))) {
+        lot.coutMatiereUnitaire = avant === 0 ? coutMatiereUnitaire
+            : (lot.coutMatiereUnitaire * avant + coutMatiereUnitaire * quantite) / (avant + quantite);
+    } else {
+        delete lot.coutMatiereUnitaire;
+    }
+    lot.quantite = avant + quantite;
 };

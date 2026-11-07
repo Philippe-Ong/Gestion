@@ -4179,6 +4179,7 @@ input[type="checkbox"] {
 .cmd-lot svg { width: 16px; height: 16px; color: var(--text-muted); }
 .cmd-lot-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; font-weight: 600; }
 .cmd-lot-dlv { font-size: 12px; color: var(--text-light); white-space: nowrap; }
+.cmd-lot-amount { display: flex; flex-direction: column; align-items: flex-end; }
 .modal-footer-start { margin-right: auto; }
 .cmd-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 480px) {

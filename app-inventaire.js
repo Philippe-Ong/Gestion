@@ -77,6 +77,53 @@ const invFmtNombre = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleS
 const invFmtQte = (n, unite) => `${invFmtNombre(n)} ${displayUnit(unite || '')}`.trim();
 const normLotFournisseur = (v) => String(v ?? '').trim().toLowerCase();
 
+const prixAchatDansUnite = (item, unite, lot) => {
+    const prix = lot?.prixAchat ?? item?.prixAchat;
+    if (!estMontantConnu(prix?.montant)) return null;
+    const quantite = convertQuantity(1, unite, prix.unite);
+    return quantite === null ? null : prix.montant * quantite;
+};
+
+const invChampPrixAchat = (id, unite, montant = null) => `
+    <div class="form-group">
+        <label for="${id}">Prix d’achat (CHF / ${escapeHtml(unite)})</label>
+        <input type="number" id="${id}" min="0" step="any" inputmode="decimal" value="${estMontantConnu(montant) ? montant : ''}">
+    </div>`;
+
+const showInventairePrixModal = (id) => {
+    const item = DB.get('inventaire').find(i => i.id === id);
+    if (!item || item.categorie === 'equipement') return;
+    const unite = displayUnit(item.unite);
+    modal.show(`Prix d’achat · ${item.nom}`, `
+        <form id="invPrixForm" data-unite="${escapeHtml(unite)}">
+            ${invChampPrixAchat('invPrixAchat', unite, prixAchatDansUnite(item, unite))}
+            <p class="text-muted">Saisissez le prix d’une unité. Ce prix sert de référence pour les stocks sans prix de lot. Laissez vide si le prix est inconnu ou saisissez 0 si l’article est gratuit.</p>
+        </form>
+    `, `
+        <button class="btn btn-secondary" data-click="close-modal">Annuler</button>
+        <button class="btn btn-primary" data-click="inventaire-prix-save" data-id="${escapeHtml(id)}">Enregistrer</button>
+    `);
+    document.getElementById('invPrixAchat')?.focus();
+};
+
+const saveInventairePrix = (id) => {
+    const form = document.getElementById('invPrixForm');
+    if (!form?.reportValidity()) return;
+    const items = DB.get('inventaire');
+    const item = items.find(i => i.id === id);
+    if (!item || displayUnit(item.unite) !== form.dataset.unite) {
+        showToast('L’article a changé. Rouvrez son prix d’achat.', 'error');
+        return;
+    }
+    const valeur = document.getElementById('invPrixAchat').value;
+    if (valeur === '') delete item.prixAchat;
+    else item.prixAchat = { montant: Number(valeur), unite: form.dataset.unite };
+    if (!DB.set('inventaire', items)) return;
+    modal.hide();
+    showToast('Prix d’achat enregistré');
+    renderCurrentView();
+};
+
 const invLotsEnStock = (item) => (item?.lots || []).filter(l => Number(l.quantite) > 0);
 const invSansLot = (item) => Math.max(0, arrondiInv((Number(item?.quantite) || 0) - invLotsEnStock(item).reduce((s, l) => s + Number(l.quantite), 0)));
 const invDateTri = (d) => {
@@ -107,7 +154,8 @@ const consommerLotsIngredient = (item, qty) => {
         const pris = Math.min(Number(lot.quantite), reste);
         lot.quantite = arrondiInv(Number(lot.quantite) - pris);
         reste = arrondiInv(reste - pris);
-        allocations.push({ numLot: lot.numLot, fournisseur: lot.fournisseur || '', quantite: arrondiInv(pris) });
+        const prix = prixAchatDansUnite(item, item.unite, lot);
+        allocations.push({ numLot: lot.numLot, fournisseur: lot.fournisseur || '', quantite: arrondiInv(pris), ...(estMontantConnu(prix) ? { prixUnitaire: prix } : {}) });
     }
     if (reste > 0) allocations.push({ numLot: '', fournisseur: '', quantite: reste });
     return allocations;
@@ -199,6 +247,7 @@ const invRowHtml = (item, besoin = 0) => {
     const apres = arrondiInv(stock - besoin);
     const seuil = Number(item.seuilAlerte) || 0;
     const equipement = item.categorie === 'equipement';
+    const prix = prixAchatDansUnite(item, item.unite);
     const aCommander = equipement ? 0 : invACommander(item, besoin);
     const etat = !equipement && apres < 0 ? 'manque' : aCommander > 0 ? 'commander' : 'ok';
     const chip = etat === 'manque' ? `<span class="badge badge-expire">manque ${escapeHtml(invFmtQte(-apres, item.unite))}</span>`
@@ -213,6 +262,9 @@ const invRowHtml = (item, besoin = 0) => {
         <li class="inv-row inv-row--${etat}">
             <div class="inv-row-main">
                 <div class="inv-row-name">${escapeHtml(item.nom)} ${chip}</div>
+                ${equipement ? '' : `<button type="button" class="btn btn-sm btn-ghost" data-click="inventaire-prix" data-id="${id}">
+                    ${estMontantConnu(prix) ? escapeHtml(`${formatChfUnitaire(prix)} / ${displayUnit(item.unite)}`) : 'Saisir le prix d’achat'}
+                </button>`}
                 ${equipement ? '' : `<div class="inv-bar" aria-hidden="true"><span style="width:${pct(stock)}%"></span>${seuil > 0 ? `<i style="left:${pct(seuil)}%"></i>` : ''}</div>`}
                 ${suivi ? invLotsResumeHtml(item) : ''}
             </div>
@@ -478,11 +530,13 @@ const showInventaireLotsModal = (id) => {
     const lotHtml = (lot, epuise) => {
         const u = usages.get(normLotFournisseur(lot.numLot)) || [];
         const limite = lot.dateLimite ? invDateTri(lot.dateLimite) : null;
+        const prix = prixAchatDansUnite(item, unite, lot);
         const meta = [
             lot.dateReception ? `reçu le ${formatDate(lot.dateReception)}` : '',
             lot.fournisseur || '',
             lot.dateLimite ? `limite ${formatDate(lot.dateLimite)}` : '',
-            lot.dateRetrait ? `retiré le ${formatDate(lot.dateRetrait)}` : ''
+            lot.dateRetrait ? `retiré le ${formatDate(lot.dateRetrait)}` : '',
+            estMontantConnu(prix) ? `${formatChfUnitaire(prix)} / ${unite}${lot.prixAchat ? '' : ' (référence)'}` : ''
         ].filter(Boolean).join(' · ');
         return `<li class="inv-lot${epuise ? ' is-epuise' : ''}">
             <div class="inv-lot-head">
@@ -565,6 +619,11 @@ const showReceptionModal = (itemId = '', retour = '', fournisseurPrecedent = '')
                         <input type="date" id="recLimite" name="dateLimite">
                     </div>
                 </div>
+                <div class="form-group">
+                    <label for="recPrix" id="recPrixLabel">Prix d’achat du lot en CHF (facultatif)</label>
+                    <input type="number" id="recPrix" name="prixAchat" min="0" step="any" inputmode="decimal" aria-describedby="recPrixAide">
+                    <small class="text-muted" id="recPrixAide">Ce prix s’applique à tout le lot fournisseur. Laissez vide pour conserver son prix ou utiliser le prix de référence.</small>
+                </div>
             </div>
         </form>
     `, `
@@ -586,6 +645,11 @@ const majChampsReception = () => {
     if (lot) lot.required = suivi;
     const label = document.getElementById('recQteLabel');
     if (label) label.textContent = item ? `Quantité reçue (${displayUnit(item.unite || '')})` : 'Quantité reçue';
+    const prix = document.getElementById('recPrix');
+    prix.value = '';
+    prix.disabled = !suivi;
+    prix.dataset.unite = suivi ? displayUnit(item.unite) : '';
+    document.getElementById('recPrixLabel').textContent = suivi ? `Prix d’achat du lot (CHF / ${prix.dataset.unite}, facultatif)` : '';
 };
 
 const saveReception = (suite = false) => {
@@ -606,6 +670,13 @@ const saveReception = (suite = false) => {
         return;
     }
     const suivi = isLotSuiviArticle(item);
+    const prixSaisi = suivi ? get('prixAchat') : '';
+    const unite = displayUnit(item.unite);
+    if (prixSaisi !== '' && document.getElementById('recPrix').dataset.unite !== unite) {
+        showToast('L’unité de l’article a changé. Rouvrez la réception.', 'error');
+        return;
+    }
+    const prixAchat = prixSaisi === '' ? null : { montant: Number(prixSaisi), unite };
     const numLot = get('numLot');
     const fournisseur = get('fournisseur');
     const dateLimite = get('dateLimite');
@@ -623,13 +694,15 @@ const saveReception = (suite = false) => {
             existant.quantiteRecue = arrondiInv((Number(existant.quantiteRecue) || 0) + qte);
             if (fournisseur && !existant.fournisseur) existant.fournisseur = fournisseur;
             if (dateLimite && !existant.dateLimite) existant.dateLimite = dateLimite;
+            if (prixAchat) existant.prixAchat = prixAchat;
             delete existant.dateRetrait;
         } else {
             item.lots.push({
                 id: generateId(), numLot, quantite: arrondiInv(qte), quantiteRecue: arrondiInv(qte),
                 dateReception: getLocalDateISOString(),
                 ...(fournisseur ? { fournisseur } : {}),
-                ...(dateLimite ? { dateLimite } : {})
+                ...(dateLimite ? { dateLimite } : {}),
+                ...(prixAchat ? { prixAchat } : {})
             });
         }
     }
@@ -654,12 +727,14 @@ const showCorrigerLotModal = (itemId, lotId) => {
     const actuel = lot ? Number(lot.quantite) || 0 : invSansLot(item);
     const unite = displayUnit(item.unite || '');
     modal.show(`Corriger ${lot ? `le lot ${lot.numLot}` : 'le stock sans n° de lot'}`, `
-        <form id="corrigerLotForm">
+        <form id="corrigerLotForm" data-unite="${escapeHtml(unite)}">
             <p class="text-muted" style="margin: 0 0 12px;">${escapeHtml(item.nom)} · actuellement ${escapeHtml(invFmtQte(actuel, unite))}</p>
             <div class="form-group">
                 <label for="corrLotQte">Quantité restante comptée (${escapeHtml(unite)})</label>
                 <input type="number" id="corrLotQte" name="quantite" min="0" step="any" inputmode="decimal" value="${safeNumAttr(actuel)}" required>
             </div>
+            ${lot ? `${invChampPrixAchat('corrLotPrix', unite, lot.prixAchat ? prixAchatDansUnite(item, unite, lot) : null)}
+                <p class="text-muted">Laissez le prix vide pour utiliser le prix de référence de l’article.</p>` : ''}
         </form>
     `, `
         <button class="btn btn-secondary" data-click="inventaire-lots" data-id="${escapeHtml(itemId)}">Retour</button>
@@ -669,6 +744,8 @@ const showCorrigerLotModal = (itemId, lotId) => {
 };
 
 const saveCorrigerLot = (itemId, lotId) => {
+    const form = document.getElementById('corrigerLotForm');
+    if (!form?.reportValidity()) return;
     const v = parseFloat(document.getElementById('corrLotQte')?.value);
     if (!Number.isFinite(v) || v < 0) {
         showToast('Saisissez une quantité valide', 'error');
@@ -683,10 +760,17 @@ const saveCorrigerLot = (itemId, lotId) => {
         renderCurrentView();
         return;
     }
+    if (displayUnit(item.unite) !== form.dataset.unite) {
+        showToast('L’unité de l’article a changé. Rouvrez la correction.', 'error');
+        return;
+    }
     const delta = lot ? v - (Number(lot.quantite) || 0) : v - invSansLot(item);
     if (lot) {
         lot.quantite = arrondiInv(v);
         if (v > 0) delete lot.dateRetrait;
+        const valeur = document.getElementById('corrLotPrix').value;
+        if (valeur === '') delete lot.prixAchat;
+        else lot.prixAchat = { montant: Number(valeur), unite: form.dataset.unite };
     }
     item.quantite = arrondiInv(Math.max(0, (Number(item.quantite) || 0) + delta));
     DB.set('inventaire', items);

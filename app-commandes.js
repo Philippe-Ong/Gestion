@@ -14,22 +14,24 @@ const diagnoseCommandeMontant = (commande, clients, formats) => {
         total: 0,
         hasPrice: false
     };
-    if (!client) return report;
     getItems(commande).forEach((item, idx) => {
         const resolved = resolveCommandeFormat(item, formats);
         const fmt = resolved?.format;
         const key = fmt ? getFormatPriceKey(fmt) : null;
-        const rawClient = key ? client[key] : null;
+        const rawClient = key ? client?.[key] : null;
         let priceClient = parseFloat(String(rawClient || '').replace(',', '.'));
-        if (isNaN(priceClient)) priceClient = null;
+        if (!Number.isFinite(priceClient)) priceClient = null;
         let pricePreset = null;
-        if (key && TARIF_PRESETS[client.tarifs]) {
+        if (key && TARIF_PRESETS[client?.tarifs]) {
             pricePreset = parseFloat(TARIF_PRESETS[client.tarifs][key]);
-            if (isNaN(pricePreset)) pricePreset = null;
+            if (!Number.isFinite(pricePreset)) pricePreset = null;
         }
-        const priceUsed = (priceClient && priceClient > 0)
+        const tarifActuel = (priceClient && priceClient > 0)
             ? priceClient
             : (pricePreset && pricePreset > 0 ? pricePreset : null);
+        const prixEnregistre = commande.statut === 'livrée' && Object.hasOwn(item, 'prixVenteUnitaire');
+        const priceUsed = prixEnregistre
+            ? (estMontantConnu(item.prixVenteUnitaire) ? item.prixVenteUnitaire : null) : tarifActuel;
         // Bouteilles offertes (en plus de la commande) : tracées, jamais facturées
         const ligneTotal = (priceUsed != null && !item.offert) ? priceUsed * (item.quantite || 0) : 0;
         report.items.push({
@@ -47,7 +49,7 @@ const diagnoseCommandeMontant = (commande, clients, formats) => {
             quantite: item.quantite || 0,
             ligneTotal
         });
-        if (priceUsed && priceUsed > 0) {
+        if (item.offert || priceUsed > 0) {
             report.total += ligneTotal;
             report.hasPrice = true;
         }
@@ -798,7 +800,7 @@ const restaurerCommande = (id) => {
             lotsUtilises.forEach(entry => {
                 const existingLot = lots.find(l => String(l.id) === String(entry.lotId));
                 if (existingLot) {
-                    existingLot.quantite = (existingLot.quantite || 0) + entry.quantite;
+                    ajouterBouteillesAuLot(existingLot, Number(entry.quantite), entry.coutMatiereUnitaire);
                 } else {
                     // Recréer le lot supprimé
                     const prodEntry = history.find(h => String(h.lotId) === String(entry.lotId) && String(h.id).startsWith('PROD-'));
@@ -808,6 +810,7 @@ const restaurerCommande = (id) => {
                         arome: entry.arome,
                         format: entry.format,
                         quantite: entry.quantite,
+                        ...(estMontantConnu(entry.coutMatiereUnitaire) ? { coutMatiereUnitaire: entry.coutMatiereUnitaire } : {}),
                         dlc: entry.dlc,
                         // Utiliser dlv distant s'il est présent (v11 transaction), fallback sur dlc (legacy)
                         dlv: entry.dlv || entry.dlc,
@@ -833,7 +836,7 @@ const restaurerCommande = (id) => {
             cmd.lotsUtilises = [];
             // Les bouteilles livrées en plus reviennent au stock avec le reste :
             // la commande retrouve ses seules quantités commandées
-            cmd.items = getItems(cmd).filter(i => !i.enPlus);
+            cmd.items = getItems(cmd).filter(i => !i.enPlus).map(({ prixVenteUnitaire, ...item }) => item);
             delete cmd.dateLivraisonEffective;
             delete cmd.clientLivraison;
             delete cmd.numeroBL;
@@ -931,6 +934,7 @@ const deliverCommandeTransaction = async (commandeId, allocations, options = {})
     // Instantané du destinataire au moment de la livraison (traçabilité : survit
     // à une modification ou à une suppression ultérieure du client)
     const clientsLocaux = DB.get('clients') || [];
+    const formatsLocaux = DB.get('formats') || [];
 
     // Agrégation par lot (pour décrément) + par itemKey (pour validation articles)
     // ET vérification qu'un même lot ne sert pas deux couples (arome,format) incompatibles
@@ -1135,16 +1139,18 @@ const deliverCommandeTransaction = async (commandeId, allocations, options = {})
                 dateProduction: lot.dateProduction || '',
                 dlv: lot.dlv || '',
                 dlc: lot.dlc || '',
-                quantite: la.totalQty
+                quantite: la.totalQty,
+                ...(estMontantConnu(lot.coutMatiereUnitaire) ? { coutMatiereUnitaire: lot.coutMatiereUnitaire } : {})
             });
             updatedLots.push({ ref: lotRef, lot, newQty: disponible - la.totalQty });
         }
 
         // --- 4. Écriture de la commande livrée ---
         const clientLocal = clientsLocaux.find(c => c.id === commande.clientId);
+        const tarifs = diagnoseCommandeMontant({ ...commande, items: itemsLivres }, clientsLocaux, formatsLocaux);
         const updatedCommande = {
             ...commande,
-            items: itemsLivres,
+            items: itemsLivres.map((item, idx) => ({ ...item, prixVenteUnitaire: item.offert ? 0 : tarifs.items[idx].priceUsed })),
             statut: 'livrée',
             lotsUtilises,
             dateLivraisonEffective: now
@@ -1196,7 +1202,8 @@ const deliverCommandeTransaction = async (commandeId, allocations, options = {})
             lotResults: updatedLots.map(u => ({
                 lotId: u.lot.id,
                 numLot: u.lot.numLot || u.lot.id,
-                newQty: u.newQty
+                newQty: u.newQty,
+                coutMatiereUnitaire: u.lot.coutMatiereUnitaire
             }))
         };
     });
@@ -1236,7 +1243,10 @@ const deliverCommandeTransaction = async (commandeId, allocations, options = {})
             if (info.newQty <= 0) {
                 allLots.splice(lotIdx, 1);
             } else {
-                allLots[lotIdx].quantite = info.newQty;
+                const lot = allLots[lotIdx];
+                lot.quantite = info.newQty;
+                if (estMontantConnu(info.coutMatiereUnitaire)) lot.coutMatiereUnitaire = info.coutMatiereUnitaire;
+                else delete lot.coutMatiereUnitaire;
             }
         }
     }
@@ -1800,6 +1810,67 @@ const commandeStepsHtml = (commande) => {
     }).join('')}</ol>`;
 };
 
+const estimerCoutCommande = (items, aromes, formats) => {
+    const inventaire = DB.get('inventaire');
+    const parArome = new Map();
+    for (const item of items) {
+        const arome = aromes.find(a => a.id === item.aromeId);
+        const format = resolveCommandeFormat(item, formats)?.format;
+        const quantite = Number(item.quantite);
+        if (!arome || !(Number(format?.contenanceCl) > 0) || !Number.isInteger(quantite) || quantite <= 0) {
+            return { cout: null, manquants: ['arôme, format ou quantité'] };
+        }
+        if (!parArome.has(arome.id)) parArome.set(arome.id, { arome, formats: new Map() });
+        const groupe = parArome.get(arome.id).formats;
+        groupe.set(format.id, { format, quantite: (groupe.get(format.id)?.quantite || 0) + quantite });
+    }
+
+    let total = 0;
+    const manquants = new Set();
+    for (const { arome, formats: groupe } of parArome.values()) {
+        const produits = [...groupe.values()];
+        const litres = produits.reduce((s, { format, quantite }) => s + quantite * format.contenanceCl / 100, 0);
+        const { couts } = deduireInventaireProduction(inventaire, arome.nom, produits, litres);
+        produits.forEach(({ format, quantite }) => {
+            const { unitaire, manquants: manque } = couts.get(format.id);
+            manque.forEach(nom => manquants.add(nom));
+            if (estMontantConnu(unitaire)) total += unitaire * quantite;
+            else if (!manque.size) manquants.add(format.nom);
+        });
+    }
+    return { cout: items.length && !manquants.size ? total : null, manquants: [...manquants] };
+};
+
+const bilanMatiereCommandeHtml = (commande, montant, ouverte, aromes, formats) => {
+    const items = getItems(commande);
+    const lots = commande.lotsUtilises || [];
+    const quantite = items.reduce((s, item) => s + Number(item.quantite), 0);
+    const complet = lots.length > 0 && lots.reduce((s, lot) => s + Number(lot.quantite), 0) === quantite
+        && lots.every(lot => Number(lot.quantite) > 0 && estMontantConnu(lot.coutMatiereUnitaire));
+    const { cout, manquants } = ouverte ? estimerCoutCommande(items, aromes, formats) : {
+        cout: complet ? lots.reduce((s, lot) => s + lot.quantite * lot.coutMatiereUnitaire, 0) : null,
+        manquants: []
+    };
+    const prixConnus = items.length > 0 && items.every((item, idx) => item.offert
+        || (montant.items[idx]?.priceUsed > 0 && Number.isFinite(montant.items[idx].priceUsed)));
+    const vente = prixConnus ? (montant.total ?? 0) : null;
+    const marge = estMontantConnu(cout) && vente !== null ? vente - cout : null;
+    const taux = marge !== null && vente > 0 ? ` (${(100 * marge / vente).toLocaleString('fr-CH', { maximumFractionDigits: 1 })} %)` : '';
+    return `
+        <section class="trace-section">
+            <h4 class="trace-section-title">${ouverte ? 'Marge sur matières estimée' : 'Marge sur matières à la livraison'}</h4>
+            <div class="trace-kpis">
+                <div class="trace-kpi"><span class="trace-kpi-value">${escapeHtml(vente === null ? '—' : formatChf(vente))}</span><span class="trace-kpi-label">Vente</span></div>
+                <div class="trace-kpi"><span class="trace-kpi-value">${escapeHtml(estMontantConnu(cout) ? formatChf(cout) : '—')}</span><span class="trace-kpi-label">Coût matières</span></div>
+                <div class="trace-kpi"><span class="trace-kpi-value">${escapeHtml(marge === null ? '—' : formatChf(marge))}</span><span class="trace-kpi-label">Marge${escapeHtml(taux)}</span></div>
+            </div>
+            ${manquants.length ? `<p class="trace-note">Données manquantes ou incompatibles : ${escapeHtml(manquants.join(', '))}.</p>` : ''}
+            ${!ouverte && !complet ? '<p class="trace-note">Coût indisponible : au moins un lot livré n’a pas de coût enregistré.</p>' : ''}
+            ${!prixConnus ? '<p class="trace-note">Au moins un article facturé est sans tarif.</p>' : ''}
+            <p class="trace-note">${ouverte ? 'Estimation pour une nouvelle production de la commande entière, aux prix d’achat disponibles. ' : ''}Ingrédients et emballages, hors main-d’œuvre et autres charges.</p>
+        </section>`;
+};
+
 const showCommandeDetails = (id) => {
     const commandes = DB.get('commandes') || [];
     const clients = DB.get('clients') || [];
@@ -1875,7 +1946,10 @@ const showCommandeDetails = (id) => {
                             <span class="stock-lot-num">#${escapeHtml(formatLotNumero(lot.numLot || lot.lotId))}</span>
                             <span class="cmd-lot-name"><span class="aroma-tile-dot" style="background:${safeColor(arome?.couleur)}"></span>${escapeHtml(lot.arome || '?')} <span class="stock-group-format">· ${escapeHtml(lot.format || '?')}</span></span>
                             <span class="cmd-lot-dlv">${lot.dlv ? `DLV ${escapeHtml(formatDate(lot.dlv))}` : ''}</span>
-                            <span class="cmd-line-qty">${escapeHtml(twinFmtInt(lot.quantite))} bt</span>
+                            <span class="cmd-lot-amount">
+                                <span class="cmd-line-qty">${escapeHtml(twinFmtInt(lot.quantite))} bt</span>
+                                ${estMontantConnu(lot.coutMatiereUnitaire) ? `<span class="cmd-line-unit">${escapeHtml(formatChfUnitaire(lot.coutMatiereUnitaire))} / bt</span>` : ''}
+                            </span>
                             ${dashIcon('chevron')}
                         </button>
                     </li>`;
@@ -1908,6 +1982,7 @@ const showCommandeDetails = (id) => {
                 <h4 class="trace-section-title">Articles</h4>
                 ${lignesHtml ? `<ul class="cmd-lines">${lignesHtml}</ul>` : '<p class="text-muted">Aucun article</p>'}
             </section>
+            ${ouverte || commande.statut === 'livrée' ? bilanMatiereCommandeHtml(commande, montant, ouverte, aromes, formats) : ''}
             ${lotsHtml}
         </div>
     `;

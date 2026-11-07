@@ -2,7 +2,7 @@
 
 ## 1. Aperçu du projet
 
-- Application web monopage ThéCol Gestion, version v13.4
+- Application web monopage ThéCol Gestion, version v13.7
 - Hébergement sur GitHub Pages
 - Stockage local dans `localStorage` et synchronisation via Firebase Firestore
 - Style minimaliste inspiré de thecol.ch
@@ -679,6 +679,16 @@ chaque lot.
 **Lecture.** Tracer et Rappel du lot affichent « Ingrédients utilisés » (dédoublonnés par `productionId`) ; l'export Excel ajoute la feuille Ingrédients. Côté inventaire, la fenêtre d'un ingrédient liste les lots en stock dans l'ordre d'utilisation, le stock sans n° de lot, les lots épuisés ou retirés, et pour chacun les lots de bouteilles produits avec (`getUsagesLotIngredient`) ; « Rappel fournisseur » ouvre la liste de ces lots de bouteilles avec l'accès à leur rappel. Chaque lot se corrige (recomptage) ou se retire (périmé, perdu : `dateRetrait`).
 
 **Limites.** Les lots de bouteilles créés avec « + Lot » ne déduisent pas l'inventaire et n'ont donc pas d'ingrédients rattachés ; les productions antérieures à v12.9 non plus.
+
+### Prix d’achat, coût matières et marge (v13.7)
+
+Dans Inventaire, chaque consommable peut porter un `prixAchat` facultatif (`{ montant, unite }`, en CHF par unité). Le même champ sur un lot fournisseur prime sur le prix de référence de l’article. Lors d’une réception, un prix saisi pour un n° existant s’applique à tout ce lot. Un montant nul indique la gratuité et un champ vide indique un prix inconnu.
+
+Le coût matières d’un brassin reprend les quantités de recette et les pertes appliquées à la production, avec le prix des lots consommés. Le coût du liquide est réparti selon le volume. Par format, le calcul ajoute les bouteilles vides, les bouchons réellement déduits et une étiquette par bouteille. L’eau est valorisée si elle figure dans la recette. La main-d’œuvre et les autres charges sont hors calcul.
+
+Production affiche le coût par format avant validation et l’enregistre dans les entrées `PROD-` avec `coutMatiereUnitaire` en CHF par bouteille. Le lot de stock porte le même champ facultatif avec le coût moyen pondéré de ses bouteilles restantes. Une entrée de stock de coût inconnu rend cette moyenne indisponible. Une annulation conserve un coût recalculable lorsque les productions restantes expliquent la totalité du stock du lot.
+
+Le détail d’une commande ouverte estime le coût d’une nouvelle production aux prix disponibles. À la livraison, la transaction fige `coutMatiereUnitaire` dans `lotsUtilises[]` et `prixVenteUnitaire` dans `items[]` (0 pour les bouteilles offertes, `null` si le tarif est inconnu). La marge sur matières est la vente moins le coût des bouteilles livrées, cadeaux compris. Le pourcentage rapporte cette différence au montant de vente. Les anciens lots restent sans coût historique et les données manquantes rendent la marge indisponible.
 
 ## 6. Déploiement GitHub Pages
 
