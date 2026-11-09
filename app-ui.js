@@ -663,7 +663,7 @@ const navigateTo = (page) => {
     }
 
     const titles = {
-        jumeau: 'Jumeau numérique',
+        jumeau: 'Atelier 3D',
         dashboard: 'Tableau de bord',
         stock: 'Stock',
         pointage: 'Pointage',
@@ -737,7 +737,7 @@ window.addEventListener('hashchange', router);
 // Palette de commandes (Ctrl/⌘ + K) et raccourcis clavier (v12.0)
 // =============================================================================
 const PALETTE_PAGES = [
-    { page: 'jumeau', label: 'Jumeau 3D — atelier', keys: 'G J' },
+    { page: 'jumeau', label: 'Atelier 3D', keys: 'G J' },
     { page: 'dashboard', label: 'Tableau de bord', keys: 'G D' },
     { page: 'commandes', label: 'Commandes', keys: 'G C' },
     { page: 'production', label: 'Planificateur de production', keys: 'G P' },
@@ -792,7 +792,7 @@ const getPaletteEntries = (query) => {
         { label: 'Afficher les raccourcis clavier', keys: '?', run: () => showShortcutsHelp() }
     ].filter(a => !a.hidden).forEach(a => entries.push({ group: 'Actions', ...a }));
     TWIN_ZONES.forEach(z => entries.push({
-        group: 'Jumeau 3D', label: `Zone ${z.label}`, keys: z.key,
+        group: 'Atelier 3D', label: `Zone ${z.label}`, keys: z.key,
         run: () => { DB.setFilter('twin_zone', z.id); Twin.focusZone = z.id; gotoPage('jumeau'); setTimeout(() => twinFocusZone(z.id), 60); }
     }));
     (DB.get('employees') || []).filter(e => e.actif).forEach(emp => {
@@ -914,11 +914,11 @@ const showShortcutsHelp = () => {
         [`${mod} K`, 'Ouvrir la palette de commandes'],
         ['/', 'Rechercher (commande, client, BL, lot)'],
         ['?', 'Afficher cette aide'],
-        ['G puis J / D / C / P / S', 'Aller au jumeau, tableau de bord, commandes, production, stock'],
+        ['G puis J / D / C / P / S', 'Aller à l\'atelier 3D, tableau de bord, commandes, production, stock'],
         ['G puis L / H / I / A / R', 'Livraisons, pointage, inventaire, archives, paramètres'],
-        ['0 – 5', 'Jumeau 3D : vue d\'ensemble ou zone'],
-        ['← / →', 'Jumeau 3D : objet précédent / suivant'],
-        ['R · F · Échap', 'Jumeau 3D : réinitialiser la vue · plein écran · fermer le panneau']
+        ['0 – 5', 'Atelier 3D : vue d\'ensemble ou zone'],
+        ['← / →', 'Atelier 3D : objet précédent / suivant'],
+        ['R · F · Échap', 'Atelier 3D : réinitialiser la vue · plein écran · fermer le panneau']
     ];
     modal.show('Raccourcis clavier', `
         <table class="shortcuts-table">
