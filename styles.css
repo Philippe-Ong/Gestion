@@ -6018,7 +6018,6 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 .twin-item--critical .twin-item-meta,
 .twin-item--empty .twin-item-meta { color: var(--danger); }
 
-.twin-item--rupture .twin-item-meta,
 .twin-item--urgent .twin-item-meta,
 .twin-item--low .twin-item-meta,
 .twin-item--warning .twin-item-meta { color: var(--warning-dark); }

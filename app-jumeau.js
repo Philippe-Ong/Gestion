@@ -35,7 +35,8 @@ const twinRelativeDay = (days) => {
     if (days === -1) return 'hier';
     return days > 0 ? `dans ${days} j` : `en retard de ${-days} j`;
 };
-const twinCrateSize = (contenanceCl) => (contenanceCl <= 30 ? 24 : contenanceCl <= 60 ? 12 : 6);
+// Caisse IFCO 60 × 40 cm : 50 bouteilles de 25 cl, 40 de 50 cl ou 16 de 1 L
+const twinCrateSize = (contenanceCl) => (contenanceCl <= 30 ? 50 : contenanceCl <= 60 ? 40 : 16);
 
 // --- Modèle : projection des tables métier vers les objets de l'atelier ---
 const buildTwinModel = () => {
@@ -65,17 +66,13 @@ const buildTwinModel = () => {
 
     const activeCommandes = commandes.filter(c => c.statut !== 'annulee' && c.statut !== 'livrée');
     const demand = new Map();
-    const covered = new Map();
-    // Stock couvrant la demande : la règle d'attribution commune (commandes
+    // Demande des commandes actives : la règle d'attribution commune (commandes
     // « produites » d'abord, puis par date de livraison, durée de vie client),
     // comme la page Stock et le plan de production
     const attribution = planAttributionCommandes(now);
     attribution.plan.forEach(({ lignes }) => lignes.forEach(l => {
-        addName(aromeNames, l.arome.nom);
-        addName(formatNames, l.format.nom);
         const key = `${normalizeName(l.arome.nom)}|${normalizeName(l.format.nom)}`;
         demand.set(key, (demand.get(key) || 0) + l.demande);
-        covered.set(key, (covered.get(key) || 0) + l.demande - l.manque);
     }));
 
     const groups = new Map();
@@ -88,7 +85,8 @@ const buildTwinModel = () => {
         groups.get(key).push(lot);
     });
 
-    const slotKeys = new Set([...groups.keys(), ...demand.keys()]);
+    // L'entrepôt ne montre que ce qui est en stock : ce qui manque pour les commandes se lit en Production
+    const slotKeys = new Set(groups.keys());
     const slotList = [...slotKeys];
     const rowKeys = [...aromeNames.keys()].filter(ak => slotList.some(k => k.startsWith(`${ak}|`)));
     const colKeys = [...formatNames.keys()].filter(fk => slotList.some(k => k.endsWith(`|${fk}`)));
@@ -120,14 +118,13 @@ const buildTwinModel = () => {
         const invendable = lotsInfo.filter(l => l.status === 'invendable').length;
         const warning = lotsInfo.filter(l => l.status === 'warning').length;
         const demande = demand.get(key) || 0;
-        const manque = Math.max(0, demande - (covered.get(key) || 0));
         stacks.push({
             id: `stack:${key}`, zone: 'stock', kind: 'stack', row, col,
             arome, format, couleur: aromeColor(arome), contenanceCl, crateSize: twinCrateSize(contenanceCl),
-            total, sellable, demande, manque, expired, invendable, warning, lots: lotsInfo,
-            status: expired ? 'expired' : invendable ? 'invendable' : manque > 0 ? 'rupture' : warning ? 'warning' : 'ok',
+            total, sellable, demande, expired, invendable, warning, lots: lotsInfo,
+            status: expired ? 'expired' : invendable ? 'invendable' : warning ? 'warning' : 'ok',
             label: `${arome} · ${format}`,
-            sub: manque > 0 ? `${twinFmtInt(sellable)} vendables · manque ${twinFmtInt(manque)}` : `${twinFmtInt(sellable)} bt vendables`
+            sub: `${twinFmtInt(sellable)} bt vendables`
         });
     }));
 
@@ -217,7 +214,7 @@ const buildTwinModel = () => {
                 : (quantite <= 0 ? 'empty' : 'unknown');
             return {
                 id: `bin:${i.id}`, zone: 'magasin', kind: 'bin', itemId: i.id,
-                nom: i.nom || 'Article', quantite, unite: i.unite, seuil, state,
+                nom: i.nom || 'Article', quantite, unite: i.unite, seuil, state, bouteilleCl: Number(i.bouteilleCl) || 0,
                 level: seuil > 0 ? twinClamp(quantite / (seuil * 4), 0.06, 1) : (quantite > 0 ? 0.55 : 0),
                 label: i.nom || 'Article',
                 sub: `${quantite} ${displayUnit(i.unite)}${seuil > 0 ? ` · seuil ${seuil}` : ''}`
@@ -411,8 +408,8 @@ const twinCssColor = (name, fallback) => {
 // ambient : cadence max. (i/s) des animations d'ambiance (pulsations, vapeur) ; 0 = figées, la scène
 // n'est redessinée que lorsqu'elle change (caméra, données)
 const TWIN_QUALITY_LEVELS = {
-    low: { label: 'Économie', dpr: 1.25, shadow: 1024, ao: 0, tex: 256, segments: 12, steam: 8, ambient: 0 },
-    medium: { label: 'Standard', dpr: 1.6, shadow: 2048, ao: 0.5, tex: 512, segments: 20, steam: 14, ambient: 15 },
+    low: { label: 'Économie', dpr: 1.25, shadow: 1536, ao: 0, tex: 256, segments: 12, steam: 8, ambient: 0 },
+    medium: { label: 'Standard', dpr: 1.6, shadow: 3072, ao: 0.5, tex: 512, segments: 20, steam: 14, ambient: 15 },
     high: { label: 'Haute', dpr: 2, shadow: 4096, ao: 1, tex: 1024, segments: 28, steam: 20, ambient: 30 }
 };
 const TWIN_QUALITY_ORDER = ['low', 'medium', 'high'];
@@ -457,7 +454,7 @@ const twinMat = (key, factory) => Twin.mats[key] || (Twin.mats[key] = factory())
 const twinStd = (key, color, opts = {}) => twinMat(`std:${key}:${color}`, () =>
     new Twin.lib.THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.05, ...opts }));
 const twinBasic = (key, color, opts = {}) => twinMat(`basic:${key}:${color}`, () =>
-    new Twin.lib.THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, ...opts }));
+    new Twin.lib.THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -6, ...opts }));
 const twinLathe = (points, segments, phiStart = 0) => new Twin.lib.THREE.LatheGeometry(
     points.map(([x, y]) => new Twin.lib.THREE.Vector2(x, y)), segments, phiStart);
 
@@ -946,24 +943,6 @@ const twinHaloSet = () => twinTexSet('halo', () => {
     };
 });
 
-// Marquage hachuré d'un emplacement vide (rupture)
-const twinHatchSet = () => twinTexSet('hatch', () => {
-    const canvas = twinCanvas(256);
-    const g = canvas.getContext('2d');
-    g.clearRect(0, 0, 256, 256);
-    g.strokeStyle = '#ffffff';
-    g.lineWidth = 18;
-    for (let k = -256; k < 512; k += 52) {
-        g.beginPath();
-        g.moveTo(k, 256);
-        g.lineTo(k + 256, 0);
-        g.stroke();
-    }
-    g.lineWidth = 14;
-    g.strokeRect(7, 7, 242, 242);
-    return { map: twinTex(canvas) };
-});
-
 // Volute de vapeur (sprite doux)
 const twinSteamSet = () => twinTexSet('steam', () => {
     const S = 64;
@@ -1111,7 +1090,7 @@ const TWIN_LAB = {
 // Cuve 25 L (cuiseur électrique inox à robinet, Ø 38 cm), casseroles 9 L / 4 L
 const TWIN_CUVE = { R: 0.19 };
 const TWIN_POTS = { 9: { r: 0.14, h: 0.22 }, 4: { r: 0.11, h: 0.15 } };
-// Bouteilles (hauteur, diamètre) selon la contenance ; casier = 30 × 40 cm
+// Bouteilles (hauteur, diamètre) selon la contenance ; caisse IFCO = 60 × 40 cm
 const twinBottleSpec = (cl) => (cl <= 30 ? { h: 0.2, d: 0.056 } : cl <= 60 ? { h: 0.25, d: 0.068 } : { h: 0.31, d: 0.085 });
 // Profil de la bouteille (rayon 1 = corps, hauteur 1) : épaule longue et col large, comme les bouteilles de l'atelier
 const TWIN_BOTTLE_PROFILE = [[0, 0], [0.84, 0], [0.96, 0.012], [1, 0.045], [1, 0.52], [0.985, 0.585], [0.94, 0.645], [0.86, 0.705], [0.76, 0.76], [0.67, 0.81], [0.61, 0.855], [0.585, 0.895], [0.585, 0.93], [0.63, 0.935], [0.63, 0.975], [0.6, 0.985], [0, 0.985]];
@@ -1231,6 +1210,8 @@ const twinMaterials = () => {
         kraftTape: twinStd('kraftTape', '#A9844F', { roughness: 0.6 }),
         sackPaper: twinMat('sackPaper', () => Object.assign(new THREE.MeshStandardMaterial({ color: '#C9A77C', roughness: 0.95 }), { userData: { bevel: 0.05 } })),
         board: twinStd('board', '#7B5A3D', { roughness: 0.8 }),
+        pallet: twinStd('pallet', '#C8A97E', { roughness: 0.88 }),
+        palletCore: twinStd('palletCore', '#A3B4B2', { roughness: 0.3 }),
         waterPlastic: twinStd('waterPlastic', '#D3E4F0', { roughness: 0.3 }),
         label: twinStd('label', '#F6F5F0', { roughness: 0.7 }),
         tint: twinStd('tint', '#FFFFFF', { roughness: 0.72 }),
@@ -1270,7 +1251,6 @@ const twinMaterials = () => {
         ringWarningSoft: twinBasic('haloWarningSoft', p.warning, { map: halo.map, opacity: 0.5 }),
         ringSuccess: twinBasic('haloSuccess', p.success, { map: halo.map, opacity: 0.6 }),
         ringPlanned: twinBasic('haloPlanned', p.info, { map: halo.map, opacity: 0.6 }),
-        hatch: twinBasic('hatch', p.danger, { map: twinHatchSet().map, opacity: 0.85 }),
         beaconDanger: twinStd('beaconDanger', p.danger, { emissive: p.danger, emissiveIntensity: 0.8, transparent: true, opacity: 0.88, roughness: 0.2 }),
         beaconWarning: twinStd('beaconWarning', p.warning, { emissive: p.warning, emissiveIntensity: 0.8, transparent: true, opacity: 0.88, roughness: 0.2 }),
         proxy: twinMat('proxy', () => new THREE.MeshBasicMaterial())
@@ -1316,6 +1296,8 @@ const twinBatchFlush = (batch, parent) => {
         mesh.receiveShadow = e.receive;
         // Verre, films et halos n'entrent pas dans l'occlusion ambiante (sinon voile sombre sur les vitres)
         if (e.mat.transparent) mesh.userData.twinNoAO = true;
+        // Halos au sol dessinés avant les autres transparents (sinon ils repassent par-dessus le verre et les films)
+        if (e.mat.polygonOffset) mesh.renderOrder = -1;
         mesh.computeBoundingSphere();
         parent.add(mesh);
     });
@@ -1401,7 +1383,7 @@ const twinEnvironmentMap = () => {
 };
 
 // Cadre l'ombre portée du soleil sur le bâtiment (projection orthographique ajustée)
-const twinFitShadow = (light, min, max, penumbra) => {
+const twinFitShadow = (light, boxes, penumbra) => {
     const { THREE } = Twin.lib;
     const cam = light.shadow.camera;
     cam.position.copy(light.position);
@@ -1410,11 +1392,13 @@ const twinFitShadow = (light, min, max, penumbra) => {
     const v = new THREE.Vector3();
     const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
     const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-    for (let i = 0; i < 8; i++) {
-        v.set(i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]).applyMatrix4(cam.matrixWorldInverse);
-        lo.min(v);
-        hi.max(v);
-    }
+    boxes.forEach(([min, max]) => {
+        for (let i = 0; i < 8; i++) {
+            v.set(i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]).applyMatrix4(cam.matrixWorldInverse);
+            lo.min(v);
+            hi.max(v);
+        }
+    });
     Object.assign(cam, { left: lo.x - 0.4, right: hi.x + 0.4, bottom: lo.y - 0.4, top: hi.y + 0.4, near: Math.max(0.5, -hi.z - 1), far: -lo.z + 1 });
     cam.updateProjectionMatrix();
     light.shadow.radius = twinClamp(penumbra / ((hi.x - lo.x + 0.8) / light.shadow.mapSize.x), 1, 5);
@@ -1432,7 +1416,18 @@ const twinLights = (scene) => {
     key.shadow.mapSize.set(q.shadow, q.shadow);
     key.shadow.bias = -0.0003;
     key.shadow.normalBias = 0.02;
-    twinFitShadow(key, [-15.5, -3.7, -10.8], [15.5, 3.1, 10.8], 0.022);
+    // Le cadre englobe le bâtiment et chaque arbre avec son ombre au sol : un arbre à cheval sur le bord
+    // du cadre projetait une ombre tranchée net, visible dès qu'on recule
+    const ground = -TWIN_PLAN.plinth;
+    const drop = key.position.y - key.target.position.y;
+    const trees = TWIN_TREES.flatMap(([x, z, s]) => {
+        const r = 3.2 * s;
+        const top = ground + 9.4 * s;
+        const dx = (key.target.position.x - key.position.x) * (top - ground) / drop;
+        const dz = (key.target.position.z - key.position.z) * (top - ground) / drop;
+        return [[[x - r, ground, z - r], [x + r, top, z + r]], [[x - r + dx, ground, z - r + dz], [x + r + dx, ground, z + r + dz]]];
+    });
+    twinFitShadow(key, [[[-15.5, -3.7, -10.8], [15.5, 3.1, 10.8]], ...trees], 0.022);
     const fill = new THREE.DirectionalLight(0xdfe8ff, 0.45);
     fill.position.set(14, 9, -12);
     scene.add(hemi, key, key.target, fill);
@@ -1755,8 +1750,12 @@ const twinBuildSite = (b) => {
     b.part(g.box, m.darkGlass, [4.2, ground + 1.15, D / 2 + 0.085], [2.1, 2.2, 0.02], { cast: false });
     b.part(g.box, m.slab, [4.2, ground + 2.7, D / 2 + 0.9], [3.6, 0.14, 1.8]);
     b.part(g.box, m.mat, [4.2, ground + 0.045, D / 2 + 0.9], [1.6, 0.01, 0.9], { cast: false });
-    // Dalle de l'étage (nez de dalle blanc)
-    b.part(g.box, m.slab, [0, -0.16, 0], [W + 0.2, 0.32, D + 0.2]);
+    // Dalle de l'étage (nez de dalle blanc) : seulement le pourtour sous les façades, les sols des pièces
+    // couvrent le reste (une dalle pleine à 2 mm sous les sols scintillait vue de loin)
+    [-1, 1].forEach(s => {
+        b.part(g.box, m.slab, [0, -0.16, s * (P.z1 + (D + 0.2) / 2) / 2], [W + 0.2, 0.32, (D + 0.2) / 2 - P.z1]);
+        b.part(g.box, m.slab, [s * (P.x1 + (W + 0.2) / 2) / 2, -0.16, 0], [(W + 0.2) / 2 - P.x1, 0.32, P.z1 - P.z0]);
+    });
     TWIN_TREES.forEach(t => twinTree(b, ...t));
 };
 
@@ -1950,29 +1949,29 @@ const twinWeckBoxMaterial = () => twinCanvasMaterial('weckBox', 256, 256, (g, w)
     g.fillText('Einkochautomat', 128, 46);
 }, { roughness: 0.85 });
 
-// Bac en plastique noir 30 × 40 cm (bouteilles) ; repère : coin bas au centre du casier
+// Caisse IFCO noire 60 × 40 cm (bouteilles) ; repère : centre du fond
 const twinCrate = (b, x, y, z, h, mat) => {
     const m = twinMaterials();
     const g = twinGeometries();
     const c = mat || m.crateBlack;
-    b.part(g.box, c, [x, y + 0.006, z], [0.29, 0.012, 0.39]);
-    [[0, 0.195, 0.3, 0.01], [0, -0.195, 0.3, 0.01]].forEach(([dx, dz, w, t]) => b.part(g.box, c, [x + dx, y + h / 2, z + dz], [w, h, t]));
-    [0.145, -0.145].forEach(dx => b.part(g.box, c, [x + dx, y + h / 2, z], [0.01, h, 0.38]));
-    [0.201, -0.201].forEach(dz => b.part(g.box, m.dark, [x, y + h * 0.78, z + dz], [0.11, 0.028, 0.004], { cast: false }));
+    b.part(g.box, c, [x, y + 0.006, z], [0.59, 0.012, 0.39]);
+    [0.195, -0.195].forEach(dz => b.part(g.box, c, [x, y + h / 2, z + dz], [0.6, h, 0.01]));
+    [0.295, -0.295].forEach(dx => b.part(g.box, c, [x + dx, y + h / 2, z], [0.01, h, 0.38]));
+    [0.201, -0.201].forEach(dz => b.part(g.box, m.dark, [x, y + h * 0.78, z + dz], [0.14, 0.028, 0.004], { cast: false }));
 };
 
-// Bouteilles debout dans un casier (pleines : thé, étiquette, bouchon noir ; vides : verre seul)
+// Bouteilles debout dans une caisse 60 × 40 (pleines : thé, étiquette, bouchon noir ; vides : verre seul)
 const twinCrateBottles = (b, x, y, z, count, crateSize, contenanceCl, opts = {}) => {
     const m = twinMaterials();
     const g = twinGeometries();
-    const [cols, rows] = crateSize >= 24 ? [4, 6] : crateSize >= 12 ? [3, 4] : [2, 3];
+    const [cols, rows] = crateSize >= 50 ? [10, 5] : crateSize >= 40 ? [8, 5] : [4, 4];
     const spec = twinBottleSpec(contenanceCl);
-    const dx = 0.28 / cols;
-    const dz = 0.38 / rows;
+    const dx = 0.57 / cols;
+    const dz = 0.37 / rows;
     const r = Math.min(spec.d / 2, Math.min(dx, dz) / 2 - 0.003);
     for (let i = 0; i < Math.min(count, cols * rows); i++) {
-        const bx = x - 0.14 + dx * (i % cols + 0.5);
-        const bz = z - 0.19 + dz * (Math.floor(i / cols) + 0.5);
+        const bx = x - 0.285 + dx * (i % cols + 0.5);
+        const bz = z - 0.185 + dz * (Math.floor(i / cols) + 0.5);
         twinBottle(b, bx, y, bz, r, spec.h, opts);
     }
 };
@@ -2081,9 +2080,9 @@ const twinBuildLab = (batch, env, up) => {
     twinCrate(isl, fx, h, -0.12 + 0.07, 0.18);
     for (let k = 0; k < 4; k++) twinBottle(isl, fx - 0.105 + k * 0.07, h + 0.012, -0.04, 0.032, 0.25, {});
     twinCrate(isl, 0.1, h, 0.15, 0.18);
-    twinCrateBottles(isl, 0.1, h + 0.012, 0.15, 12, 12, 50, { color: '#C57A2A', labelMat: twinBottleLabelMaterial('Thé froid', '#C57A2A') });
+    twinCrateBottles(isl, 0.1, h + 0.012, 0.15, 40, 40, 50, { color: '#C57A2A', labelMat: twinBottleLabelMaterial('Thé froid', '#C57A2A') });
     twinCrate(isl, -1.5, h, 0.12, 0.18);
-    twinCrateBottles(isl, -1.5, h + 0.012, 0.12, 12, 12, 50, {});
+    twinCrateBottles(isl, -1.5, h + 0.012, 0.12, 40, 40, 50, {});
     isl.part(g.cyl, m.label, [0.95, h + 0.05, -0.25], [0.08, 0.1, 0.08], { rx: Math.PI / 2 });
     isl.part(g.cylLow, m.dark, [0.95, h + 0.05, -0.25], [0.03, 0.102, 0.03], { rx: Math.PI / 2 });
     isl.part(g.box, m.label, [1.5, h + 0.004, 0.2], [0.21, 0.004, 0.3], { ry: 0.2, cast: false });
@@ -2138,9 +2137,9 @@ const twinBuildLaverie = (batch, env) => {
     });
     // Casiers de bouteilles propres le long de la cloison
     const c = twinBuilder(batch, env, -1.42, -5.4, Math.PI / 2);
-    [0, 0.42].forEach(lx => [0, 1, 2].forEach(k => {
+    [0, 0.64].forEach(lx => [0, 1, 2].forEach(k => {
         twinCrate(c, lx, k * 0.26, 0, 0.26);
-        if (k === 2) twinCrateBottles(c, lx, k * 0.26 + 0.012, 0, 12, 12, 50, {});
+        if (k === 2) twinCrateBottles(c, lx, k * 0.26 + 0.012, 0, 40, 40, 50, {});
     }));
     s.part(g.box, m.steelDark, [0, 0.004, 3.1], [0.26, 0.004, 0.26], { cast: false });
 };
@@ -2579,9 +2578,9 @@ const twinUpdateSteam = (s, now) => {
     attrs.aAlpha.needsUpdate = true;
 };
 
-// --- Stock : piles de casiers noirs (8 par couche, ~1,9 m maximum), bouteilles visibles sur le dessus ---
+// --- Stock : piles de caisses IFCO noires (4 par couche, ~1,9 m maximum), bouteilles visibles sur le dessus ---
 const TWIN_ORDER_SLOTS = 16;
-const TWIN_SLOTS_8 = [-0.45, -0.15, 0.15, 0.45].flatMap(dx => [0.2, -0.2].map(dz => [dx, dz]));
+const TWIN_SLOTS_4 = [[-0.3, 0.2], [0.3, 0.2], [-0.3, -0.2], [0.3, -0.2]];
 
 const twinBuildStack = (batch, s, x, z) => {
     const m = twinMaterials();
@@ -2590,30 +2589,25 @@ const twinBuildStack = (batch, s, x, z) => {
     const spec = twinBottleSpec(s.contenanceCl);
     const crateH = Math.round((spec.h + 0.014) * 1000) / 1000;
     const maxLayers = Math.max(3, Math.floor(1.9 / crateH));
-    const crates = s.total > 0 ? Math.min(8 * maxLayers, Math.ceil(s.total / s.crateSize)) : 0;
-    const layers = Math.ceil(crates / 8);
-    let top = 0.3;
-    if (crates > 0) {
-        const labelMat = twinBottleLabelMaterial(s.arome, s.couleur);
-        for (let l = 0; l < layers; l++) {
-            const inLayer = l < layers - 1 ? 8 : crates - (layers - 1) * 8;
-            const y = l * crateH;
-            for (let c = 0; c < inLayer; c++) {
-                const [cx, cz] = TWIN_SLOTS_8[c];
-                twinCrate(b, cx, y, cz, crateH);
-                if (l === layers - 1) {
-                    const count = c === inLayer - 1 ? s.total - (crates - 1) * s.crateSize : s.crateSize;
-                    twinCrateBottles(b, cx, y + 0.012, cz, twinClamp(count, 0, s.crateSize), s.crateSize, s.contenanceCl, { color: s.couleur, labelMat });
-                }
+    const crates = Math.max(1, Math.min(4 * maxLayers, Math.ceil(s.total / s.crateSize)));
+    const layers = Math.ceil(crates / 4);
+    const labelMat = twinBottleLabelMaterial(s.arome, s.couleur);
+    for (let l = 0; l < layers; l++) {
+        const inLayer = l < layers - 1 ? 4 : crates - (layers - 1) * 4;
+        const y = l * crateH;
+        for (let c = 0; c < inLayer; c++) {
+            const [cx, cz] = TWIN_SLOTS_4[c];
+            twinCrate(b, cx, y, cz, crateH);
+            if (l === layers - 1) {
+                const count = c === inLayer - 1 ? s.total - (crates - 1) * s.crateSize : s.crateSize;
+                twinCrateBottles(b, cx, y + 0.012, cz, twinClamp(count, 0, s.crateSize), s.crateSize, s.contenanceCl, { color: s.couleur, labelMat });
             }
         }
-        top = (layers - 1) * crateH + 0.012 + spec.h;
-        const [lx, lz] = TWIN_SLOTS_8[0];
-        b.part(g.box, twinTagMaterial(`stack:${s.id}`, s.arome, s.format, s.couleur), [lx, crateH * 0.45, lz + 0.204], [0.17, 0.106, 0.003], { cast: false });
-    } else {
-        twinFlat(b, g.plane, m.hatch, 0, 0.005, 0, 1.2, 0.8);
     }
-    const halo = { expired: m.ringDanger, invendable: m.ringDanger, rupture: m.ringWarning, warning: m.ringWarningSoft }[s.status];
+    const top = (layers - 1) * crateH + 0.012 + spec.h;
+    const [lx, lz] = TWIN_SLOTS_4[0];
+    b.part(g.box, twinTagMaterial(`stack:${s.id}`, s.arome, s.format, s.couleur), [lx, crateH * 0.45, lz + 0.204], [0.17, 0.106, 0.003], { cast: false });
+    const halo = { expired: m.ringDanger, invendable: m.ringDanger, warning: m.ringWarningSoft }[s.status];
     if (halo) twinFlat(b, g.plane, halo, 0, 0.004, 0, 1.75, 1.25);
     twinRegister(s, b, { hit: { p: [0, top / 2, 0], s: [1.2, top, 0.8] }, top: top + 0.3, radius: 0.78 });
 };
@@ -2626,7 +2620,7 @@ const twinBuildOrder = (batch, o, x, z) => {
     const g = twinGeometries();
     const b = twinBuilder(batch, Twin.dynamic, x, z);
     const ready = o.statut === 'produite';
-    const crates = twinClamp(o.items.reduce((sum, it) => sum + Math.ceil(it.quantite / (2 * twinCrateSize(it.contenanceCl || 50))), 0), 1, 20);
+    const crates = twinClamp(o.items.reduce((sum, it) => sum + Math.ceil(it.quantite / twinCrateSize(it.contenanceCl || 50)), 0), 1, 20);
     const columns = Math.ceil(crates / 5);
     const heights = [];
     for (let c = 0; c < columns; c++) {
@@ -2642,7 +2636,7 @@ const twinBuildOrder = (batch, o, x, z) => {
                 const cl = item.contenanceCl || 50;
                 const size = twinCrateSize(cl);
                 const labelMat = twinBottleLabelMaterial(item.arome, item.couleur);
-                [-0.15, 0.15].forEach(dx => twinCrateBottles(b, cx + dx, y + 0.016, cz, size, size, cl, { color: item.couleur, labelMat }));
+                twinCrateBottles(b, cx, y + 0.016, cz, size, size, cl, { color: item.couleur, labelMat });
             }
         }
     }
@@ -2664,20 +2658,23 @@ const twinBuildOrder = (batch, o, x, z) => {
 
 // --- Réserve : étagères inox à clayettes (chambre froide) et rayonnages noirs à tablettes (préparation) ---
 const TWIN_SHELF_LEVELS = [0.1, 0.56, 1.02, 1.48];
+// Chambre froide : toutes les étagères sont en place (murs ouest, sud, nord, cloison est, îlot central) ;
+// préparation : rayonnages montés au fur et à mesure des emballages à ranger
 const TWIN_RACKS = {
     cold: [
         { x: -11.72, z: 2.6, ry: Math.PI / 2, type: 'inox' },
         { x: -11.72, z: 4.65, ry: Math.PI / 2, type: 'inox' },
         { x: -10.0, z: 7.72, ry: Math.PI, type: 'inox' },
         { x: -9.95, z: 1.8, ry: 0, type: 'rack' },
-        { x: -5.0, z: 4.45, ry: Math.PI, type: 'rack' }
+        { x: -8.34, z: 4.75, ry: -Math.PI / 2, type: 'inox' },
+        { x: -8.34, z: 6.5, ry: -Math.PI / 2, type: 'inox' },
+        { x: -10.03, z: 4.7, ry: Math.PI / 2, type: 'inox' }
     ],
     dry: [
         { x: -6.4, z: 1.8, ry: 0, type: 'rack' },
         { x: -2.1, z: 3.0, ry: -Math.PI / 2, type: 'rack' },
         { x: -2.1, z: 5.05, ry: -Math.PI / 2, type: 'rack' },
-        { x: -7.67, z: 4.6, ry: Math.PI / 2, type: 'rack' },
-        { x: -5.0, z: 5.0, ry: 0, type: 'rack' }
+        { x: -7.67, z: 4.6, ry: Math.PI / 2, type: 'rack' }
     ]
 };
 
@@ -2708,11 +2705,12 @@ const twinBuildRack = (batch, r) => {
 
 // Forme du consommable d'après son nom et son unité (photos de la réserve)
 const twinBinKind = (item) => {
+    if (item.bouteilleCl) return 'bottles';
     const n = normalizeName(item.nom);
     const family = getUnitFamily(item.unite);
-    if (/bouteille|flacon/.test(n)) return 'bottles';
     if (/bouchon|capsule|couvercle/.test(n)) return 'caps';
     if (/etiquette/.test(n)) return 'labels';
+    if (/bouteille|flacon/.test(n)) return 'bottles';
     if (family === 'volume') return /^eau/.test(n) ? 'water' : 'jerrycan';
     if (family === 'mass') return /sucre|farine|^sel/.test(n) ? 'sack' : 'container';
     return 'box';
@@ -2730,11 +2728,13 @@ const twinContentKind = (nom) => {
 const twinContentMaterial = (kind) => twinMat(`content:${kind}`, () =>
     new Twin.lib.THREE.MeshStandardMaterial({ map: twinContentSet(kind).map, roughness: 0.92 }));
 
-const twinPackBottleSpec = (nom) => {
-    const n = normalizeName(nom);
-    if (/25|33/.test(n)) return { cl: 25, cols: 4, rows: 3 };
-    if (/1l|100|litre/.test(n)) return { cl: 100, cols: 3, rows: 2 };
-    return { cl: 50, cols: 3, rows: 3 };
+// Taille d'une bouteille vide (25 cl, 50 cl ou 1 L) : celle saisie sur l'article, sinon déduite de son nom
+const twinEmptyBottleCl = (item) => {
+    if (item.bouteilleCl) return item.bouteilleCl <= 30 ? 25 : item.bouteilleCl <= 60 ? 50 : 100;
+    const n = normalizeName(item.nom);
+    if (/25|33/.test(n)) return 25;
+    if (/1 ?l(?![a-z])|100|litre/.test(n)) return 100;
+    return 50;
 };
 
 const twinBuildBin = (batch, item, slot) => {
@@ -2761,20 +2761,6 @@ const twinBuildBin = (batch, item, slot) => {
     } else if (kind === 'sack') {
         const n = level > 0.5 ? 2 : level > 0 ? 1 : 0;
         for (let k = 0; k < n; k++) b.part(g.box, m.sackPaper, [0.02 * k, 0.065 + k * 0.12, 0], [0.5, 0.13, 0.34], { ry: k * 0.06 });
-    } else if (kind === 'bottles') {
-        // Packs de bouteilles vides sous film rétractable
-        const spec = twinPackBottleSpec(item.nom);
-        const bs = twinBottleSpec(spec.cl);
-        const packs = level > 0.6 ? 2 : level > 0 ? 1 : 0;
-        const pw = spec.cols * bs.d;
-        const pd = spec.rows * bs.d;
-        for (let p = 0; p < packs; p++) {
-            const px = (p - (packs - 1) / 2) * (pw + 0.03);
-            for (let i = 0; i < spec.cols * spec.rows; i++) {
-                twinBottle(b, px - pw / 2 + bs.d * (i % spec.cols + 0.5), 0, -pd / 2 + bs.d * (Math.floor(i / spec.cols) + 0.5), bs.d / 2 - 0.002, bs.h, {});
-            }
-            b.part(g.box, m.film, [px, bs.h * 0.5, 0], [pw + 0.01, bs.h * 0.94, pd + 0.01]);
-        }
     } else if (kind === 'caps') {
         if (level > 0) b.part(g.box, twinContentMaterial('caps'), [0, 0.012 + 0.07 * level, 0], [0.3, 0.14 * level, 0.22]);
         b.part(g.box, m.kraft, [0, 0.004, 0], [0.32, 0.008, 0.24]);
@@ -2809,6 +2795,108 @@ const twinBuildBin = (batch, item, slot) => {
         b.part(g.sphere, item.state === 'critical' ? m.beaconDanger : m.beaconWarning, [0.1, -0.03, 0.266], [0.012, 0.012, 0.012], { cast: false });
     }
     twinRegister(item, b, { hit: { p: [0, 0.2, 0], s: [0.6, 0.42, 0.46] }, top: 0.6, radius: 0.36 });
+};
+
+// --- Bouteilles vides : trois palettes au sol de la préparation, une par taille ---
+const TWIN_PALLETS = [
+    { cl: 25, label: '25 cl', x: -5.95, z: 4.8 },
+    { cl: 50, label: '50 cl', x: -4.9, z: 4.8 },
+    { cl: 100, label: '1 L', x: -3.85, z: 4.8 }
+];
+
+// Flanc d'une couche de bouteilles vides vue à travers le film (une silhouette par bouteille du rang)
+const twinBottleRowMaterial = (count) => twinCanvasMaterial(`bottleRow:${count}`, count * 48, 128, (g, w, h) => {
+    g.fillStyle = '#A3B4B2';
+    g.fillRect(0, 0, w, h);
+    const cw = w / count;
+    for (let i = 0; i < count; i++) {
+        const cx = (i + 0.5) * cw;
+        const glass = g.createLinearGradient(cx - cw / 2, 0, cx + cw / 2, 0);
+        glass.addColorStop(0, '#8FA3A2');
+        glass.addColorStop(0.28, '#F2F7F6');
+        glass.addColorStop(0.62, '#D3E0DE');
+        glass.addColorStop(1, '#889C9B');
+        g.fillStyle = glass;
+        g.beginPath();
+        TWIN_BOTTLE_PROFILE.forEach(([r, y], k) => g[k ? 'lineTo' : 'moveTo'](cx + r * cw * 0.47, h - y * h));
+        [...TWIN_BOTTLE_PROFILE].reverse().forEach(([r, y]) => g.lineTo(cx - r * cw * 0.47, h - y * h));
+        g.closePath();
+        g.fill();
+    }
+}, { roughness: 0.3 });
+
+// Dessus de la couche du haut (goulots vus d'en haut)
+const twinBottleTopMaterial = (cols, rows) => twinCanvasMaterial(`bottleTop:${cols}x${rows}`, cols * 32, rows * 32, (g) => {
+    g.fillStyle = '#A3B4B2';
+    g.fillRect(0, 0, cols * 32, rows * 32);
+    for (let i = 0; i < cols * rows; i++) {
+        const cx = (i % cols + 0.5) * 32;
+        const cy = (Math.floor(i / cols) + 0.5) * 32;
+        g.fillStyle = '#DCE7E5';
+        g.beginPath();
+        g.arc(cx, cy, 14.5, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = '#7F9392';
+        g.lineWidth = 2.5;
+        g.beginPath();
+        g.arc(cx, cy, 8.5, 0, Math.PI * 2);
+        g.stroke();
+    }
+}, { roughness: 0.3 });
+
+// Palette EUR 80 × 120 : couches de bouteilles sous film séparées par des intercalaires carton. Article compté
+// en pièces : autant de bouteilles que le stock (couche du haut entamée rang par rang, palette pleine au-delà
+// de ~1,8 m) ; autre unité : hauteur selon le niveau par rapport au seuil. Les bouteilles sont dessinées sur les faces des couches (des centaines de bouteilles en verre
+// modélisées donnaient un voile blanc) ; plusieurs articles de la même taille se partagent la largeur.
+const twinBuildPallet = (batch, pallet, items) => {
+    const m = twinMaterials();
+    const g = twinGeometries();
+    const b = twinBuilder(batch, Twin.dynamic, pallet.x, pallet.z);
+    const W = 0.8;
+    const L = 1.2;
+    const H = 0.144;
+    [-0.3275, -0.165, 0, 0.165, 0.3275].forEach((dx, i) => b.part(g.box, m.pallet, [dx, H - 0.011, 0], [i % 2 ? 0.1 : 0.145, 0.022, L]));
+    [-0.5275, 0, 0.5275].forEach(dz => {
+        b.part(g.box, m.pallet, [0, H - 0.033, dz], [W, 0.022, 0.145]);
+        [-0.35, 0, 0.35].forEach(dx => b.part(g.box, m.pallet, [dx, 0.061, dz], [0.1, 0.078, 0.145]));
+    });
+    [-0.35, 0, 0.35].forEach(dx => b.part(g.box, m.pallet, [dx, 0.011, 0], [0.1, 0.022, L]));
+    b.part(g.box, twinTagMaterial(`pallet:${pallet.cl}`, pallet.label, 'Bouteilles vides', '#8DA2B5'), [0, 0.07, L / 2 + 0.002], [0.2, 0.125, 0.003], { cast: false });
+
+    const bs = twinBottleSpec(pallet.cl);
+    const pitch = bs.h + 0.006;
+    const maxLayers = Math.floor(1.8 / pitch);
+    const slice = W / Math.max(1, items.length);
+    items.forEach((item, i) => {
+        const cx = -W / 2 + slice * (i + 0.5);
+        const cols = Math.max(1, Math.floor((slice - 0.02) / bs.d));
+        const rows = Math.floor((L - 0.04) / bs.d);
+        const bw = cols * bs.d;
+        const bl = rows * bs.d;
+        const counted = normalizeUnit(item.unite) === 'pcs';
+        const pieces = Math.min(Math.round(item.quantite), maxLayers * cols * rows);
+        const layers = item.quantite <= 0 ? 0 : counted ? Math.max(1, Math.ceil(pieces / (cols * rows))) : Math.max(1, Math.ceil(item.level * maxLayers));
+        for (let k = 0; k < layers; k++) {
+            const last = k === layers - 1;
+            // Couche du haut entamée : seuls les rangs encore pleins restent, du côté du fond
+            const kr = last && counted ? twinClamp(Math.ceil((pieces - k * cols * rows) / cols), 1, rows) : rows;
+            const kl = kr * bs.d;
+            const kz = -bl / 2 + kl / 2;
+            const y = H + k * pitch + 0.005;
+            const mid = y + bs.h / 2;
+            b.part(g.box, m.kraft, [cx, y - 0.0025, 0], [bw + 0.02, 0.004, bl + 0.02]);
+            // Noyau opaque en retrait (ombre portée), habillé des faces dessinées
+            b.part(g.box, m.palletCore, [cx, mid - 0.01, kz], [bw - 0.04, bs.h - 0.02, kl - 0.04]);
+            [[cols, 0, kl / 2, 0], [cols, 0, -kl / 2, Math.PI], [kr, bw / 2, 0, Math.PI / 2], [kr, -bw / 2, 0, -Math.PI / 2]].forEach(([count, px, pz, ry]) =>
+                b.part(g.plane, twinBottleRowMaterial(count), [cx + px, mid, kz + pz], [count * bs.d, bs.h, 1], { ry, cast: false }));
+            if (last) b.part(g.plane, twinBottleTopMaterial(cols, kr), [cx, y + bs.h, kz], [bw, kl, 1], { rx: -Math.PI / 2, cast: false });
+            b.part(g.box, m.film, [cx, mid, kz], [bw + 0.012, bs.h, kl + 0.012]);
+        }
+        const top = Math.max(0.3, H + layers * pitch);
+        twinRegister(item, b, { hit: { p: [cx, top / 2, 0], s: [slice, top, L] }, top: top + 0.3, radius: 0.75, base: [cx, 0, 0] });
+    });
+    const state = ['critical', 'empty', 'low'].find(st => items.some(item => item.state === st));
+    if (state) twinFlat(b, g.plane, state === 'low' ? m.ringWarningSoft : m.ringDanger, 0, 0.004, 0, 1.5, 1.9);
 };
 
 // --- Équipe : mannequins en tenue d'hygiène (1,75 m) à leur poste, tablier à la couleur de l'employé ---
@@ -2903,22 +2991,27 @@ const twinBuildDynamic = (model) => {
 
     model.orders.slice(0, TWIN_ORDER_SLOTS).forEach((o, i) => twinBuildOrder(batch, o, 9.4 - (i % 4) * 1.9, 2.65 + Math.floor(i / 4) * 1.4));
 
-    // Réserve : ingrédients en chambre froide, emballages sur les rayonnages de la préparation
+    // Réserve : ingrédients en chambre froide, emballages sur les rayonnages de la préparation, bouteilles vides sur palettes
     const ingredient = (bin) => ['mass', 'volume'].includes(getUnitFamily(bin.unite));
-    const racks = { cold: [...TWIN_RACKS.cold], dry: [...TWIN_RACKS.dry] };
-    const place = (bins, own, other) => {
-        let slots = [];
-        bins.forEach(bin => {
-            if (!slots.length) {
-                const rack = own.shift() || other.shift();
-                if (!rack) return;
-                slots = twinBuildRack(batch, rack);
-            }
-            twinBuildBin(batch, bin, slots.shift());
-        });
+    const emptyBottles = model.bins.filter(bin => twinBinKind(bin) === 'bottles');
+    const shelved = model.bins.filter(bin => !emptyBottles.includes(bin));
+    const coldSlots = TWIN_RACKS.cold.flatMap(rack => twinBuildRack(batch, rack));
+    const dryRacks = [...TWIN_RACKS.dry];
+    let drySlots = [];
+    const drySlot = () => {
+        if (!drySlots.length && dryRacks.length) drySlots = twinBuildRack(batch, dryRacks.shift());
+        return drySlots.shift();
     };
-    place(model.bins.filter(ingredient), racks.cold, racks.dry);
-    place(model.bins.filter(bin => !ingredient(bin)), racks.dry, racks.cold);
+    shelved.filter(ingredient).forEach(bin => {
+        const slot = coldSlots.shift() || drySlot();
+        if (slot) twinBuildBin(batch, bin, slot);
+    });
+    shelved.filter(bin => !ingredient(bin)).forEach(bin => {
+        const slot = drySlot() || coldSlots.shift();
+        if (slot) twinBuildBin(batch, bin, slot);
+    });
+    // Bouteilles vides : une palette par taille
+    TWIN_PALLETS.forEach(pallet => twinBuildPallet(batch, pallet, emptyBottles.filter(bin => twinEmptyBottleCl(bin) === pallet.cl)));
 
     // Équipe : présents à leur poste (puis dans le couloir), absents représentés par leur blouse au vestiaire
     let station = 0;
@@ -2949,7 +3042,7 @@ const twinBuildDynamic = (model) => {
     Twin.signatures = nextSignatures;
     const mats = twinMaterials();
     Twin.pulseMats = [mats.ringDanger, mats.ringWarning, mats.beaconDanger, mats.beaconWarning];
-    Twin.pulsing = model.items.some(i => ['expired', 'invendable', 'rupture', 'late', 'urgent'].includes(i.status) || i.state === 'critical');
+    Twin.pulsing = model.items.some(i => ['expired', 'invendable', 'late', 'urgent'].includes(i.status) || i.state === 'critical');
     Twin.glowing = model.equipement.some(e => e.kind === 'casserole' && e.status === 'planned');
     twinShadowsDirty();
 };
@@ -3019,7 +3112,6 @@ const twinBuildLabels = (model) => {
         if ((item.kind === 'cuve' || item.kind === 'casserole') && item.status === 'planned') badge = [`${twinFmtLitres(item.litres)}`, 'info'];
         else if (item.status === 'expired') badge = ['Expiré', 'danger'];
         else if (item.status === 'invendable') badge = ['Invendable', 'danger'];
-        else if (item.status === 'rupture') badge = [`−${twinFmtInt(item.manque)}`, 'warning'];
         else if (item.status === 'late') badge = ['Retard', 'danger'];
         else if (item.status === 'urgent') badge = [item.days === 0 ? "Auj." : `J-${item.days}`, 'warning'];
         else if (item.kind === 'bin' && item.state === 'critical') badge = ['Seuil', 'danger'];
@@ -3312,6 +3404,15 @@ const twinAnimate = (now) => {
     return active;
 };
 
+// Plan proche proportionnel au recul de la caméra : la précision du tampon de profondeur suit la distance
+// (à 0,1 m fixe, les surfaces proches l'une de l'autre scintillaient en vue éloignée)
+const twinFitDepth = () => {
+    const near = twinClamp(Twin.camera.position.distanceTo(Twin.controls.target) * 0.04, 0.1, 2);
+    if (Math.abs(near - Twin.camera.near) < Twin.camera.near * 0.05) return;
+    Twin.camera.near = near;
+    Twin.camera.updateProjectionMatrix();
+};
+
 const twinFrame = (now) => {
     Twin.raf = 0;
     if (!Twin.container || !Twin.container.isConnected) {
@@ -3335,6 +3436,7 @@ const twinFrame = (now) => {
     if (Twin.pointerDirty) twinUpdateHover();
     Twin.lastFrame = now;
     twinUpdateCutaways();
+    twinFitDepth();
     twinRender();
     twinUpdateLabels();
     Twin.needsRender = false;
@@ -3500,7 +3602,7 @@ const twinShellHtml = () => {
     const panelClosed = DB.getFilter('twin_panel') === 'closed';
     const panelExpanded = !twinCompactLayout() && !panelClosed;
     return `
-        <section class="twin ${panelClosed ? 'is-panel-closed' : ''}" id="twinRoot" aria-label="Jumeau numérique de l'atelier">
+        <section class="twin ${panelClosed ? 'is-panel-closed' : ''}" id="twinRoot" aria-label="Atelier en 3D">
             <div class="twin-stage" id="twinStage">
                 <div class="twin-loading" id="twinLoading"><span class="spinner" aria-hidden="true"></span>Construction de l'atelier 3D…</div>
             </div>
@@ -3594,7 +3696,7 @@ const twinRenderPanel = () => {
 
 const twinStatusChip = (item) => {
     const map = {
-        expired: ['Lots expirés', 'danger'], invendable: ['Lots invendables (DLV)', 'danger'], rupture: ['Stock insuffisant', 'warning'], warning: ['DLV proche', 'warning'], ok: ['En ordre', 'success'],
+        expired: ['Lots expirés', 'danger'], invendable: ['Lots invendables (DLV)', 'danger'], warning: ['DLV proche', 'warning'], ok: ['En ordre', 'success'],
         late: ['En retard', 'danger'], urgent: ['Urgente', 'warning'], ready: ['Prête à livrer', 'success'], waiting: ['En attente', 'info'],
         planned: ['Planifiée', 'info'], idle: ['Libre', 'default'],
         critical: ['Sous le seuil', 'danger'], low: ['Bientôt épuisé', 'warning'], unknown: ['Sans seuil', 'default'], empty: ['Épuisé', 'danger'],
@@ -3640,7 +3742,7 @@ const twinInspectorBody = (item) => {
                 <div><span class="twin-stat-val">${twinFmtInt(item.demande)}</span><span class="twin-stat-lbl">commandées</span></div>
             </div>
             <h4 class="twin-insp-h">Lots (${item.lots.length})</h4>
-            ${item.lots.length === 0 ? `<p class="twin-empty">Aucun lot en stock${item.manque ? ` — il manque ${twinFmtInt(item.manque)} bt pour les commandes` : ''}.</p>` : `
+            ${item.lots.length === 0 ? '<p class="twin-empty">Aucun lot en stock.</p>' : `
             <ul class="twin-lots">${item.lots.map(l => `
                 <li class="twin-lot">
                     <div class="twin-lot-main">

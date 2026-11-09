@@ -4,7 +4,17 @@ Application de gestion pour votre entreprise de thé froid.
 
 ## Version
 
-**v13.7**
+**v13.8**
+
+### Atelier 3D
+
+Le « jumeau numérique » s’appelle désormais **Atelier 3D**.
+
+- L’entrepôt ne montre que les bouteilles réellement en stock : plus d’emplacements hachurés ni de badges de manque (ce qui reste à produire se lit en Production).
+- La chambre froide a sept étagères, toujours en place.
+- Les bouteilles vides sont sur trois palettes dans la préparation, une par taille (25 cl, 50 cl, 1 L). Un article compté en pièces montre autant de bouteilles que le stock ; la taille se règle sur l’article (champ « Bouteille vide »), sinon elle est déduite du nom.
+- Les caisses sont des IFCO 60 × 40 : 50 bouteilles de 25 cl, 40 de 50 cl ou 16 de 1 L.
+- Vue éloignée : plus de scintillement des sols ni d’ombres d’arbres coupées.
 
 ### Prix d’achat et marge
 

@@ -895,9 +895,17 @@ const showInventaireModal = (categorie, id = null) => {
                     </select>
                 </div>
             </div>
-            ${cat === 'equipement' ? '' : `<div class="form-group">
-                <label for="invSeuil">Seuil d'alerte</label>
-                <input type="number" id="invSeuil" name="seuilAlerte" value="${safeNumAttr(item?.seuilAlerte || 0)}" min="0" step="any">
+            ${cat === 'equipement' ? '' : `<div class="form-row">
+                <div class="form-group">
+                    <label for="invSeuil">Seuil d'alerte</label>
+                    <input type="number" id="invSeuil" name="seuilAlerte" value="${safeNumAttr(item?.seuilAlerte || 0)}" min="0" step="any">
+                </div>
+                <div class="form-group">
+                    <label for="invBouteille">Bouteille vide</label>
+                    <select id="invBouteille" name="bouteilleCl">
+                        ${[[0, 'Non'], [25, '25 cl'], [50, '50 cl'], [100, '1 L']].map(([cl, label]) => `<option value="${cl}" ${(Number(item?.bouteilleCl) || 0) === cl ? 'selected' : ''}>${label}</option>`).join('')}
+                    </select>
+                </div>
             </div>`}
         </form>
     `, `
@@ -919,6 +927,8 @@ const saveInventaireItem = (event, id) => {
         }
 
         const items = DB.get('inventaire') || [];
+        // Taille de bouteille vide (25, 50 ou 100 cl) : place l'article sur la bonne palette de l'atelier 3D
+        const bouteilleCl = [25, 50, 100].find(cl => cl === Number(formData.get('bouteilleCl'))) || 0;
         const doublon = items.find(i => i.id !== id && normalizeName(i.nom) === normalizeName(nom));
         if (doublon) {
             showToast(`« ${doublon.nom} » existe déjà dans l'inventaire`, 'error');
@@ -936,6 +946,8 @@ const saveInventaireItem = (event, id) => {
             item.nom = nom;
             if (formData.has('unite')) item.unite = displayUnit(formData.get('unite'));
             if (formData.has('seuilAlerte')) item.seuilAlerte = parseFloat(formData.get('seuilAlerte')) || 0;
+            if (bouteilleCl) item.bouteilleCl = bouteilleCl;
+            else if (formData.has('bouteilleCl')) delete item.bouteilleCl;
         } else {
             items.push({
                 id: generateId(),
@@ -943,7 +955,8 @@ const saveInventaireItem = (event, id) => {
                 nom,
                 quantite: Math.max(0, parseFloat(formData.get('quantite')) || 0),
                 unite: displayUnit(formData.get('unite')),
-                seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0
+                seuilAlerte: parseFloat(formData.get('seuilAlerte')) || 0,
+                ...(bouteilleCl ? { bouteilleCl } : {})
             });
         }
         DB.set('inventaire', items);
